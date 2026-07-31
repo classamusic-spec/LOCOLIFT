@@ -785,4 +785,4 @@ export class Lighting {
   }
 }
 
-export { SHADOW_EXTENT, clamp };
+export { SHADOW_EXTENT };

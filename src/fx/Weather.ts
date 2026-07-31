@@ -687,4 +687,3 @@ export class Weather implements WorldLayer {
   }
 }
 
-export { clamp };

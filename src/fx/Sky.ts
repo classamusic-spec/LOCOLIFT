@@ -293,6 +293,11 @@ export class Sky {
   private envSize: number;
   private envTimer = 1e9;
   private envDirty = true;
+  /**
+   * Scalar fingerprint of the sky state. The environment capture is only
+   * re-rendered when this drifts, so a static sky costs nothing per frame.
+   */
+  private envSig = Number.NaN;
   private quality: QualityTier;
   private time = 0;
   private disposed = false;
@@ -384,7 +389,24 @@ export class Sky {
     u.uCloudLit.value.copy(s.cloudLit);
     u.uCloudShade.value.copy(s.cloudShade);
     u.uStars.value = s.starIntensity;
-    this.envDirty = true;
+
+    /* Only re-capture the environment when the sky has actually moved. A
+     * signature comparison keeps a static frame at one capture and still
+     * catches a time-of-day scrub or a shower rolling in. */
+    const sig =
+      s.sunDir.y * 9 +
+      s.sunDir.x * 3 +
+      s.sunIntensity +
+      s.cloudCover * 4 +
+      s.skyZenith.r * 6 +
+      s.skyZenith.b * 6 +
+      s.skyHorizon.g * 6 +
+      s.starIntensity * 2 +
+      s.haze;
+    if (Math.abs(sig - this.envSig) > 0.0035) {
+      this.envSig = sig;
+      this.envDirty = true;
+    }
   }
 
   /**
