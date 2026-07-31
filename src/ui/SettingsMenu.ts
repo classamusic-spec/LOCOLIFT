@@ -280,8 +280,8 @@ export class SettingsMenu implements NavigableScreen {
         'Boost input',
         'Mantener pulsado, o pulsar una vez para activar y otra para apagar.',
         [
-          { value: true, label: 'Mantener · Hold' },
-          { value: false, label: 'Alternar · Toggle' },
+          { value: true, label: 'Mantener' },
+          { value: false, label: 'Alternar' },
         ],
         (s) => s.holdToBoost,
         (v) => this.store.set('holdToBoost', v),
@@ -434,8 +434,8 @@ export class SettingsMenu implements NavigableScreen {
         'Minimap',
         'Girar con el Jeep, o dejar el norte siempre arriba.',
         [
-          { value: true, label: 'Gira · Rotates' },
-          { value: false, label: 'Norte arriba · North-up' },
+          { value: true, label: 'Gira' },
+          { value: false, label: 'Norte arriba' },
         ],
         (s) => s.minimapRotates,
         (v) => this.store.set('minimapRotates', v),

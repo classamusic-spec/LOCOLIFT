@@ -23,6 +23,7 @@ import type { PhysicsWorldAPI } from './physics/PhysicsTypes';
 import { World, type WeatherKind } from './world/World';
 import { Vehicle } from './vehicle/Vehicle';
 import { ChaseCamera } from './camera/ChaseCamera';
+import { AudioSystem } from './audio/AudioSystem';
 
 /**
  * Steps the solver. Registered last so every system has already applied its
@@ -98,10 +99,16 @@ async function boot(): Promise<void> {
 
   const camera = new ChaseCamera(engine.camera, vehicle, physics, engine.bus);
 
+  const audio = new AudioSystem({ seed: CONFIG.worldSeed });
+  audio.setVehicle(vehicle);
+  audio.setWorld(world);
+
   engine.add(world);
   engine.add(vehicle);
   engine.add(new PhysicsStepper(physics));
   engine.add(camera);
+  // After the camera: the listener is refreshed in lateUpdate from final transforms.
+  engine.add(audio);
 
   // Input is sampled once per frame; `airborne` remaps steering to air control.
   engine.setPreFrameHook((dt) => {

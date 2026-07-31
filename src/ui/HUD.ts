@@ -10,8 +10,12 @@
  * Performance contract — this runs every frame:
  *  - no layout-triggering reads or writes (no width/height/top/left, no
  *    `offsetWidth`, no `getBoundingClientRect`);
- *  - bars animate through CSS custom properties consumed by `transform:
- *    scaleX()`, written only when the value moves more than an epsilon;
+ *  - bars are `transform: scaleX()` written straight onto the fill element
+ *    (`ScaleSlot`) and only when the value moves past an epsilon. They are
+ *    deliberately *not* driven by a CSS custom property: an unregistered custom
+ *    property is opaque to the style engine, and Chromium schedules a layout
+ *    pass on every write to one — measured at one layout per frame before this
+ *    was changed, and effectively zero after;
  *  - text is written only when the *rendered string* changes;
  *  - score popups come from a fixed pool, so a busy combo allocates nothing.
  */
@@ -21,6 +25,7 @@ import type { PassengerMood, SettingsState } from '../core/types';
 import {
   el,
   FlagSlot,
+  ScaleSlot,
   formatClock,
   formatInt,
   formatTenths,
@@ -113,6 +118,9 @@ const SKIN_RAMP = [
 
 const HAIR_COLORS = ['#1C1512', '#2E211A', '#4A3124', '#6B4A2E', '#8A6B45', '#C9C3BC'];
 
+/** Length of the speedometer arc path, px in its own viewBox (π × r 42). */
+const SPEED_ARC_LENGTH = 131.95;
+
 const POPUP_POOL = 26;
 const CALLOUT_POOL = 6;
 const CALLOUT_LIFE = 1.5;
@@ -159,7 +167,7 @@ export class HUD {
   /* timer */
   private readonly timerDigits: TextSlot;
   private readonly timerTenths: TextSlot;
-  private readonly timerBar: VarSlot;
+  private readonly timerBar: ScaleSlot;
   private readonly timerNode: HTMLElement;
   private readonly timerWarn: FlagSlot;
   private readonly timerCrit: FlagSlot;
@@ -169,13 +177,14 @@ export class HUD {
   /* fare */
   private readonly fareValue: TextSlot;
   private readonly fareNode: HTMLElement;
+  private readonly fareTicking: FlagSlot;
   private scoreTarget = 0;
   private scoreShown = 0;
 
   /* combo */
   private readonly comboNode: HTMLElement;
   private readonly comboValue: TextSlot;
-  private readonly comboBar: VarSlot;
+  private readonly comboBar: ScaleSlot;
   private readonly comboOn: FlagSlot;
   private comboMultiplier = 1;
   private comboWindow = 0;
@@ -186,7 +195,7 @@ export class HUD {
   private readonly callouts: CalloutSlot[] = [];
 
   /* boost */
-  private readonly boostFill: VarSlot;
+  private readonly boostFill: ScaleSlot;
   private readonly boostNode: HTMLElement;
   private readonly boostFull: FlagSlot;
   private readonly boostActive: FlagSlot;
@@ -194,7 +203,8 @@ export class HUD {
   /* speed */
   private readonly speedValue: TextSlot;
   private readonly speedUnit: TextSlot;
-  private readonly speedNeedle: VarSlot;
+  private readonly speedArc: SVGPathElement;
+  private lastNeedle = Number.NaN;
   private units: SettingsState['showSpeedUnits'] = 'mph';
 
   /* passenger */
@@ -203,7 +213,7 @@ export class HUD {
   private readonly cardBlurb: TextSlot;
   private readonly cardMood: TextSlot;
   private readonly cardFare: TextSlot;
-  private readonly patienceBar: VarSlot;
+  private readonly patienceBar: ScaleSlot;
   private readonly patienceLow: FlagSlot;
   private readonly patienceMid: FlagSlot;
   private readonly portrait: SVGSVGElement;
@@ -271,6 +281,7 @@ export class HUD {
     fare.setAttribute('aria-label', 'Fare total');
     this.fareNode = fare;
     this.fareValue = new TextSlot(fareVal);
+    this.fareTicking = new FlagSlot(fare, 'is-ticking');
 
     const combo = el('div', 'll-combo');
     const comboChip = el('div', 'll-combo__chip');
@@ -280,12 +291,13 @@ export class HUD {
     const comboStack = el('div', 'll-combo__stack');
     const comboLabel = el('div', 'll-combo__label', 'COMBO');
     const comboTrack = el('div', 'll-combo__track');
-    comboTrack.append(el('div', 'll-combo__fill'));
+    const comboFill = el('div', 'll-combo__fill');
+    comboTrack.append(comboFill);
     comboStack.append(comboLabel, comboTrack);
     combo.append(comboChip, comboStack);
     this.comboNode = combo;
     this.comboValue = new TextSlot(comboV);
-    this.comboBar = new VarSlot(comboTrack, '--fill', 0.004);
+    this.comboBar = new ScaleSlot(comboFill, 0.004);
     this.comboOn = new FlagSlot(combo, 'is-on');
 
     tl.append(fare, combo);
@@ -303,12 +315,13 @@ export class HUD {
     const tenths = el('span', 'll-timer__tenths', '.0');
     timerRow.append(digits, tenths);
     const timerTrack = el('div', 'll-timer__track');
-    timerTrack.append(el('div', 'll-timer__fill'));
+    const timerFill = el('div', 'll-timer__fill');
+    timerTrack.append(timerFill);
     timer.append(timerLabel, timerRow, timerTrack);
     this.timerNode = timer;
     this.timerDigits = new TextSlot(digits);
     this.timerTenths = new TextSlot(tenths);
-    this.timerBar = new VarSlot(timerTrack, '--fill', 0.003);
+    this.timerBar = new ScaleSlot(timerFill, 0.003);
     this.timerWarn = new FlagSlot(timer, 'is-warn');
     this.timerCrit = new FlagSlot(timer, 'is-crit');
 
@@ -378,7 +391,8 @@ export class HUD {
     const patTrack = el('div', 'll-card__patience');
     patTrack.setAttribute('role', 'progressbar');
     patTrack.setAttribute('aria-label', 'Passenger patience');
-    patTrack.append(el('div', 'll-card__patience-fill'));
+    const patFill = el('div', 'll-card__patience-fill');
+    patTrack.append(patFill);
     const patLabel = el('div', 'll-card__patience-label');
     patLabel.append(el('span', 'll-lbl-es', 'PACIENCIA'), el('span', 'll-lbl-en', 'Patience'));
     const fareEl = el('div', 'll-card__fare', '');
@@ -392,7 +406,7 @@ export class HUD {
     this.cardBlurb = new TextSlot(blurbEl);
     this.cardMood = new TextSlot(moodEl);
     this.cardFare = new TextSlot(fareEl);
-    this.patienceBar = new VarSlot(patTrack, '--fill', 0.004);
+    this.patienceBar = new ScaleSlot(patFill, 0.004);
     this.patienceLow = new FlagSlot(card, 'is-impatient');
     this.patienceMid = new FlagSlot(card, 'is-restless');
     bl.append(card);
@@ -404,7 +418,9 @@ export class HUD {
     speedo.setAttribute('role', 'status');
     speedo.setAttribute('aria-label', 'Speed');
     const gauge = el('div', 'll-speedo__gauge');
-    gauge.append(buildSpeedArc());
+    const arcSvg = buildSpeedArc();
+    gauge.append(arcSvg);
+    const arc = arcSvg.querySelector('.ll-speedo__arc') as SVGPathElement;
     const speedRow = el('div', 'll-speedo__row');
     const speedV = el('span', 'll-speedo__value', '0');
     const speedU = el('span', 'll-speedo__unit', 'MPH');
@@ -412,7 +428,7 @@ export class HUD {
     speedo.append(gauge, speedRow);
     this.speedValue = new TextSlot(speedV);
     this.speedUnit = new TextSlot(speedU);
-    this.speedNeedle = new VarSlot(speedo, '--needle', 0.004);
+    this.speedArc = arc;
 
     const boost = el('div', 'll-boost');
     const boostLabel = el('div', 'll-boost__label');
@@ -420,10 +436,11 @@ export class HUD {
     const boostTrack = el('div', 'll-boost__track');
     boostTrack.setAttribute('role', 'progressbar');
     boostTrack.setAttribute('aria-label', 'Boost charge');
-    boostTrack.append(el('div', 'll-boost__fill'), el('div', 'll-boost__ticks'));
+    const boostFill = el('div', 'll-boost__fill');
+    boostTrack.append(boostFill, el('div', 'll-boost__ticks'));
     boost.append(boostLabel, boostTrack);
     this.boostNode = boost;
-    this.boostFill = new VarSlot(boostTrack, '--fill', 0.004);
+    this.boostFill = new ScaleSlot(boostFill, 0.004);
     this.boostFull = new FlagSlot(boost, 'is-full');
     this.boostActive = new FlagSlot(boost, 'is-active');
 
@@ -768,13 +785,15 @@ export class HUD {
     /* fare -------------------------------------------------------------- */
     if (this.scoreShown !== this.scoreTarget) {
       const diff = this.scoreTarget - this.scoreShown;
-      const step = Math.max(Math.abs(diff) * 0.16, 12) * (raw * 60) * 0.1;
-      this.scoreShown =
-        Math.abs(diff) <= step ? this.scoreTarget : this.scoreShown + Math.sign(diff) * step;
+      const mag = Math.abs(diff);
+      // Framerate-independent ease with an absolute floor, so a big jackpot
+      // lands in ~0.5 s and the last few dollars never crawl.
+      const step = Math.max(mag * (1 - Math.exp(-11 * raw)), Math.min(mag, 900 * raw));
+      this.scoreShown = mag <= step ? this.scoreTarget : this.scoreShown + Math.sign(diff) * step;
       this.fareValue.set(formatInt(this.scoreShown));
-      this.fareNode.classList.add('is-ticking');
+      this.fareTicking.set(true);
     } else {
-      this.fareNode.classList.remove('is-ticking');
+      this.fareTicking.set(false);
     }
 
     /* combo ------------------------------------------------------------- */
@@ -808,7 +827,11 @@ export class HUD {
 
     const shown = this.pendingSpeed * (this.units === 'kmh' ? MPS_TO_KMH : MPS_TO_MPH);
     this.speedValue.set(String(Math.round(shown)));
-    this.speedNeedle.set(clamp01(this.pendingSpeed / 60));
+    const needle = clamp01(this.pendingSpeed / 60);
+    if (!(Math.abs(needle - this.lastNeedle) < 0.004)) {
+      this.lastNeedle = needle;
+      this.speedArc.style.strokeDashoffset = `${(SPEED_ARC_LENGTH * (1 - needle)).toFixed(2)}px`;
+    }
 
     /* patience ---------------------------------------------------------- */
     this.patienceBar.set(this.patience);

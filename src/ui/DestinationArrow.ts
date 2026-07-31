@@ -55,6 +55,14 @@ export class DestinationArrow {
   private wrongWay = false;
   private visible = false;
 
+  /* per-frame write caches — nothing is written unless it actually moved */
+  private lastTurn = Number.NaN;
+  private lastPinX = Number.NaN;
+  private lastPinY = Number.NaN;
+  private lastEdge: boolean | null = null;
+  private lastDim: boolean | null = null;
+  private pinShown = false;
+
   constructor(theme: UITheme) {
     this.theme = theme;
     this.el = el('div', 'll-nav');
@@ -105,6 +113,8 @@ export class DestinationArrow {
   setTarget(pos: THREE.Vector3 | null): void {
     if (!pos) {
       this.hasTarget = false;
+      this.pinShown = false;
+      this.pin.style.display = 'none';
       this.setVisible(false);
       return;
     }
@@ -153,7 +163,11 @@ export class DestinationArrow {
     this.shownAngle = wrapAngle(
       this.shownAngle + delta * (1 - Math.exp(-14 * Math.max(frame.rawDt, 0.0001))),
     );
-    this.arrow.style.setProperty('--turn', `${((this.shownAngle * 180) / Math.PI).toFixed(2)}deg`);
+    const turnDeg = (this.shownAngle * 180) / Math.PI;
+    if (!(Math.abs(turnDeg - this.lastTurn) < 0.12)) {
+      this.lastTurn = turnDeg;
+      this.arrow.style.setProperty('--turn', `${turnDeg.toFixed(2)}deg`);
+    }
 
     /* distance text ------------------------------------------------------ */
     const rounded = this.distance >= 1000 ? Math.round(this.distance / 100) : Math.round(this.distance / 5) * 5;
@@ -181,20 +195,45 @@ export class DestinationArrow {
     const maxX = frame.width - EDGE_MARGIN;
     const minY = EDGE_MARGIN;
     const maxY = frame.height - EDGE_MARGIN * 1.4;
-    const cx = clamp(sx, minX, maxX);
-    const cy = clamp(sy, minY, maxY);
-    const offscreen = behind || cx !== sx || cy !== sy;
+    const offscreen = behind || sx < minX || sx > maxX || sy < minY || sy > maxY;
 
-    this.pin.style.display = '';
-    this.pin.style.transform = `translate3d(${cx.toFixed(1)}px, ${cy.toFixed(1)}px, 0) translate(-50%, -50%)`;
-    this.pin.classList.toggle('is-edge', offscreen);
+    // Off screen, the pin orbits an ellipse around frame centre instead of
+    // sticking to the viewport rectangle. Corners are where the fare panel, the
+    // minimap and the passenger card live — a marker must never land there.
+    let cx: number;
+    let cy: number;
     if (offscreen) {
-      const ang = Math.atan2(cy - frame.height * 0.5, cx - frame.width * 0.5);
-      this.pin.style.setProperty('--edge-turn', `${((ang * 180) / Math.PI + 90).toFixed(1)}deg`);
+      const rx = frame.width * 0.34;
+      const ry = frame.height * 0.33;
+      cx = frame.width * 0.5 + Math.sin(this.shownAngle) * rx;
+      cy = frame.height * 0.5 - Math.cos(this.shownAngle) * ry;
+    } else {
+      cx = clamp(sx, minX, maxX);
+      cy = clamp(sy, minY, maxY);
+    }
+
+    if (!this.pinShown) {
+      this.pinShown = true;
+      this.pin.style.display = '';
+    }
+    // negated form on purpose: the first frame has NaN caches, and `NaN > x` is
+    // false — a positive test would never write at all
+    if (!(Math.abs(cx - this.lastPinX) < 0.4 && Math.abs(cy - this.lastPinY) < 0.4)) {
+      this.lastPinX = cx;
+      this.lastPinY = cy;
+      this.pin.style.transform = `translate3d(${cx.toFixed(1)}px, ${cy.toFixed(1)}px, 0) translate(-50%, -50%)`;
+    }
+    if (offscreen !== this.lastEdge) {
+      this.lastEdge = offscreen;
+      this.pin.classList.toggle('is-edge', offscreen);
     }
 
     // The big arrow only matters when the target is not comfortably on screen.
-    this.arrow.classList.toggle('is-dim', !offscreen && this.distance < 70);
+    const dim = !offscreen && this.distance < 70;
+    if (dim !== this.lastDim) {
+      this.lastDim = dim;
+      this.arrow.classList.toggle('is-dim', dim);
+    }
   }
 
   dispose(): void {

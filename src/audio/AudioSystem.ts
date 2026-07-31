@@ -149,6 +149,8 @@ export class AudioSystem implements System {
   private gameState: GameStateId = 'boot';
   private weather: WeatherKind = 'clear';
   private screechLevel = 0;
+  /** state requested before the context was unlocked */
+  private pendingMusicState: MusicState | null = null;
 
   /* cached settings */
   private lastMaster = -1;
@@ -302,7 +304,8 @@ export class AudioSystem implements System {
     this.engine?.start();
     this.ambience?.start();
     if (this.autoStartMusic && this.music) {
-      this.music.start(this.musicStateFor(this.gameState));
+      this.music.start(this.pendingMusicState ?? this.musicStateFor(this.gameState));
+      this.pendingMusicState = null;
     }
     this.removeGestureUnlock();
   }
@@ -480,6 +483,19 @@ export class AudioSystem implements System {
   }
 
   setMusicState(s: MusicState, immediate = false): void {
+    this.applyMusicState(s, immediate);
+  }
+
+  /**
+   * Music must not start scheduling against a suspended context — its clock
+   * would not advance and it would have to catch up on resume. Until the first
+   * gesture we just remember what was asked for.
+   */
+  private applyMusicState(s: MusicState, immediate = false): void {
+    if (!this.unlocked) {
+      this.pendingMusicState = s;
+      return;
+    }
     this.music?.setState(s, immediate);
   }
 
@@ -674,7 +690,7 @@ export class AudioSystem implements System {
         this.duckHold = 0;
         this.duckAmount = 0;
       }
-      if (to !== 'paused') this.music?.setState(this.musicStateFor(to), to === 'boot');
+      if (to !== 'paused') this.applyMusicState(this.musicStateFor(to), to === 'boot');
       if (to === 'results') this.sfx?.play('crowdCheer', { volume: 0.5 });
     });
 
@@ -813,20 +829,20 @@ export class AudioSystem implements System {
       this.comboMultiplier = 1;
       this.timePressure = 0;
       this.sfx?.play('countdownGo', { volume: 0.85 });
-      this.music?.setState('shift');
+      this.applyMusicState('shift');
       this.setMusicIntensity(0.6);
     });
 
     on('shift:end', ({ rating }) => {
       this.timePressure = 0;
       this.sfx?.play('crowdCheer', { volume: 0.35 + clamp01(rating / 5) * 0.4 });
-      this.music?.setState('results');
+      this.applyMusicState('results');
     });
 
     on('shift:timeAdded', ({ seconds }) => {
       this.sfx?.play('timeExtend', { volume: 0.7, pitch: 1 + clamp01(seconds / 40) * 0.2 });
       this.timePressure = Math.max(0, this.timePressure - 0.5);
-      if (this.timePressure < 0.35 && this.gameState === 'playing') this.music?.setState('shift');
+      if (this.timePressure < 0.35 && this.gameState === 'playing') this.applyMusicState('shift');
     });
 
     on('shift:timeWarning', ({ remaining }) => {
@@ -835,7 +851,7 @@ export class AudioSystem implements System {
         volume: 0.45 + this.timePressure * 0.4,
         pitch: 0.95 + this.timePressure * 0.35,
       });
-      if (remaining <= 15 && this.gameState === 'playing') this.music?.setState('urgent');
+      if (remaining <= 15 && this.gameState === 'playing') this.applyMusicState('urgent');
     });
 
     /* -------------------------------------------------------- direct audio */

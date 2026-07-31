@@ -476,6 +476,36 @@ export class VarSlot {
   }
 }
 
+/**
+ * A bar fill driven by `transform: scaleX()`, written directly rather than
+ * through a custom property.
+ *
+ * This is deliberate and measured: an *unregistered* custom property is opaque
+ * to the style engine, so Chromium cannot prove it does not affect geometry and
+ * schedules a layout pass on every write. A HUD bar that drains over four
+ * seconds then costs a layout every frame. Writing `transform` on an element
+ * that already declares `will-change: transform` is compositor-only.
+ */
+export class ScaleSlot {
+  private last = Number.NaN;
+
+  constructor(
+    private readonly target: HTMLElement,
+    private readonly epsilon = 0.002,
+  ) {}
+
+  set(value: number): boolean {
+    if (Math.abs(value - this.last) < this.epsilon) return false;
+    this.last = value;
+    this.target.style.transform = `scaleX(${clamp01(value).toFixed(4)})`;
+    return true;
+  }
+
+  invalidate(): void {
+    this.last = Number.NaN;
+  }
+}
+
 /** Toggle a class only when the flag flips. */
 export class FlagSlot {
   private last: boolean | null = null;

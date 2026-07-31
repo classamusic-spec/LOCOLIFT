@@ -164,6 +164,8 @@ export class EngineAudio {
   private lastGear = 1;
   private gearShiftTimer = 0;
   private crackleTimer = 0;
+  /** true while the throttle has been open long enough to charge the BOV */
+  private bovLatch = true;
   private curveSoft: ReturnType<typeof distortionCurve>;
   private curveHard: ReturnType<typeof distortionCurve>;
   private hardCurveActive = false;
@@ -564,8 +566,6 @@ export class EngineAudio {
     const shiftDuck = this.gearShiftTimer > 0 ? lerp(1, 0.62, this.gearShiftTimer / 0.22) : 1;
     this.sMaster.set(this.volume * 0.42 * airDuck * shiftDuck, t);
   }
-
-  private bovLatch = true;
 
   /**
    * Gear change: a driveline clunk, a noise thwack and a short pitch blip on

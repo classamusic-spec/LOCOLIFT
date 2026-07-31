@@ -569,8 +569,9 @@ export class MusicSystem {
     this.state = next;
     this.section = SECTIONS[next];
     this.bpmTarget = this.section.bpm;
-    // Reset the phrase so a new section starts at the top of its form.
-    this.bar = 0;
+    // -1 because `onBar` increments immediately after this runs, so the first
+    // bar of the new section is bar 0 — the top of its form.
+    this.bar = -1;
     this.phrase = 0;
     this.regenerateMotif();
   }
@@ -579,9 +580,8 @@ export class MusicSystem {
     if (this.pendingState) {
       this.applyState(this.pendingState);
       this.pendingState = null;
-    } else {
-      this.bar++;
     }
+    this.bar++;
 
     // Tempo moves toward the section tempo a little each bar, so a state
     // change accelerates rather than jumping.
