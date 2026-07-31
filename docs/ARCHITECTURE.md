@@ -152,6 +152,31 @@ interface LocoTestHook {
   stereotype shorthand, no caricature, no invented "generic Latin" signage.
   Spanish text should be correct and idiomatic.
 
+## Reconciliation notes (read before Wave 2)
+
+`docs/ART_REFERENCE.md` was researched in parallel with the first world build,
+so two things it specifies differ from what Wave 1 was briefed with. These are
+the binding resolutions:
+
+1. **District size.** The reference specs a 1620×900 m full island; Wave 1 built
+   a ~900×700 m district. The smaller district **stands** for the vertical
+   slice — it is denser, and density is what sells Old San Juan. Treat the
+   reference's dimensions as *per-element* truth (bay module, storey heights,
+   street widths, stone size), not as a mandate to rebuild the footprint.
+
+2. **World orientation vs. sun azimuth.** The reference requires golden-hour
+   light to rake straight down the long streets. Do **not** rotate the city to
+   achieve this — regenerating the layout would invalidate every downstream
+   system. Instead the lighting rig must **derive the sun's azimuth from the
+   road graph**: compute the dominant street bearing (circular mean of edge
+   tangents weighted by length, mod 180°) and anchor the dawn/dusk azimuths to
+   it. Same look, no regeneration, and it stays correct if the layout is
+   ever reseeded.
+
+Everything else in the art reference is binding as written — in particular the
+three colour laws, the adoquín dimensions and anti-tiling stack, the material
+roughness table, and the readability rules.
+
 ## Performance targets
 
 60 fps at 1600×900 on `high` with traffic, pedestrians, weather and particles
