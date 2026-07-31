@@ -271,6 +271,18 @@ export class ChaseCamera implements System {
     return this.fovCurrent;
   }
 
+  /**
+   * Scales the whole rig — pivot height, follow distance and ride height — for
+   * vehicles much larger than the Jeep the tuning was authored against. An 11m
+   * party bus at scale 1 puts the camera on its roof.
+   */
+  private rigScale = 1;
+
+  /** Size the rig to the vehicle. 1 = the Jeep; ~2 suits the bus. */
+  setRigScale(scale: number): void {
+    this.rigScale = clamp(scale, 0.5, 4);
+  }
+
   /** Current pivot→eye distance in metres, after collision resolution. */
   get distance(): number {
     return this.eye.distanceTo(this.anchor);
@@ -696,6 +708,10 @@ export class ChaseCamera implements System {
         BOOST.pullback * this.boostBlend) *
         externalRig;
     let height = p.height + (p.speedRise * speedCurve - p.airDrop * this.airBlend) * (showcase ? 0 : 1);
+    // Bigger vehicle, bigger rig — applied after the speed/air/drift terms so
+    // their tuned proportions are preserved rather than re-authored per vehicle.
+    dist *= this.rigScale;
+    height *= this.rigScale;
 
     /* Blocked-rig escape hatch: when the collision ray is heavily obstructed,
      * lift and shorten the arm rather than jamming it flat against masonry.
@@ -718,12 +734,12 @@ export class ChaseCamera implements System {
      * *input* here (rather than lagging its output) removes it while leaving
      * real elevation change — hills, ramps, the ramparts — fully tracked. */
     let ax = tp.x;
-    let ay = tp.y + PIVOT.height;
+    let ay = tp.y + PIVOT.height * this.rigScale;
     let az = tp.z;
     if (showcase && this.showcaseObject) {
       this.showcaseObject.getWorldPosition(scratch.v1);
       ax = scratch.v1.x;
-      ay = scratch.v1.y + PIVOT.height;
+      ay = scratch.v1.y + PIVOT.height * this.rigScale;
       az = scratch.v1.z;
     }
     if (doSnap || !this.anchorInitialised) {
@@ -1215,14 +1231,14 @@ export class ChaseCamera implements System {
     this.shake.reset();
 
     const ax = valid ? tp.x : 0;
-    const ay = (valid ? tp.y : 0) + PIVOT.height;
+    const ay = (valid ? tp.y : 0) + PIVOT.height * this.rigScale;
     const az = valid ? tp.z : 0;
     this.anchor.set(ax, ay, az);
     this.anchorY = ay;
     this.anchorInitialised = true;
     this.eye.set(ax, ay + preset.height, az + preset.distance);
     this.look.set(ax, ay + preset.lookHeight, az - preset.lookLead);
-    this.lastTargetPos.set(ax, ay - PIVOT.height, az);
+    this.lastTargetPos.set(ax, ay - PIVOT.height * this.rigScale, az);
     this.hasLastTargetPos = valid;
 
     this.mat.lookAt(this.eye, this.look, AXIS_Y);

@@ -62,6 +62,11 @@ export interface LocoTestHook {
   teleport(x: number, y: number, z: number, heading?: number): void;
   perfSample(ms: number): Promise<Record<string, number>>;
   stats(): Record<string, number>;
+  /** Named places, so QA can navigate by name instead of guessing coordinates. */
+  places(): Array<{ id: string; kind: string; x: number; y: number; z: number }>;
+  bounds(): { minX: number; maxX: number; minZ: number; maxZ: number };
+  /** Which vehicle is being driven. */
+  vehicleId(): string;
 }
 
 declare global {
@@ -130,6 +135,9 @@ async function boot(): Promise<void> {
   t = stage('vehicle', t);
 
   const camera = new ChaseCamera(engine.camera, vehicle, physics, engine.bus);
+  // The camera tuning is authored against the 4.7m Jeep; the 11m bus needs a
+  // proportionally larger rig or the eye ends up sitting on its roof.
+  camera.setRigScale(vehicleId === 'bus' ? 1.95 : 1);
 
   const audio = new AudioSystem({ seed: CONFIG.worldSeed });
   audio.setVehicle(vehicle);
@@ -271,6 +279,21 @@ function installTestHook(
     async perfSample(ms) {
       const s = await engine.perfSample(ms);
       return { ...s };
+    },
+    places() {
+      return world.pois.map((q) => ({
+        id: q.id,
+        kind: q.kind,
+        x: Number(q.pos.x.toFixed(1)),
+        y: Number(q.pos.y.toFixed(1)),
+        z: Number(q.pos.z.toFixed(1)),
+      }));
+    },
+    bounds() {
+      return world.bounds;
+    },
+    vehicleId() {
+      return vehicle.vehicleId;
     },
     stats() {
       return {
