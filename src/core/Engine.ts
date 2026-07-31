@@ -191,7 +191,15 @@ export class Engine {
   };
 
   async initSystems(): Promise<void> {
-    for (const s of this.systems) await s.init?.(this.ctx);
+    for (const s of this.systems) {
+      // Logged *before* the call: an init that never returns is otherwise
+      // invisible, since a completion-only log prints nothing for the one
+      // system that matters.
+      console.info(`[boot] init -> ${s.name}`);
+      const t0 = performance.now();
+      await s.init?.(this.ctx);
+      console.info(`[boot] init ok ${s.name}: ${Math.round(performance.now() - t0)}ms`);
+    }
   }
 
   start(): void {

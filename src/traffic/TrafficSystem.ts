@@ -227,8 +227,13 @@ export class TrafficSystem implements System {
 
     const edges = this.roads.edges;
     const nodes = this.roads.nodes;
-    this.edgeHead = new Int32Array(edges.length);
-    this.agentNext = new Int32Array(LIMITS.maxAgents);
+    // These are linked lists over agent indices with -1 as the empty sentinel.
+    // A zero-filled Int32Array means "index 0", and agentNext[0] === 0 makes
+    // laneIsClear() walk a self-referencing node forever. buildBuckets() resets
+    // edgeHead every frame, but warmUp() spawns before the first update, so
+    // both must start valid here.
+    this.edgeHead = new Int32Array(edges.length).fill(-1);
+    this.agentNext = new Int32Array(LIMITS.maxAgents).fill(-1);
     this.edgeMid = new Float32Array(edges.length * 3);
     this.edgeBearingA = new Float32Array(edges.length);
     this.edgeBearingB = new Float32Array(edges.length);

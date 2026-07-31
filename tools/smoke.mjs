@@ -56,9 +56,12 @@ async function main() {
     // The game exposes a scripted-test surface on window.__loco when built.
     await page.waitForFunction(() => !!window.__loco?.ready, null, { timeout: 90_000 });
 
+    // Software rendering (SwiftShader) makes a single frame of this scene take
+    // many seconds, and screenshot waits for one. 30s is not enough.
+    page.setDefaultTimeout(180_000);
     const shot = async (name) => {
       const file = path.join(OUT, `${name}.png`);
-      await page.screenshot({ path: file });
+      await page.screenshot({ path: file, timeout: 180_000 });
       report.shots.push(file);
       return file;
     };

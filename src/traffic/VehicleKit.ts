@@ -243,8 +243,10 @@ if ( aWheel.w > 0.5 ) {
 }
 `;
 
+// NOTE: vColor is vec4 under USE_COLOR_ALPHA and vec3 otherwise; always
+// swizzle .rgb so this compiles either way.
 const ROLE_RESOLVE = /* glsl */ `
-vec3 locoBase = vColor;
+vec3 locoBase = vColor.rgb;
 vLocoEmissive = vec3( 0.0 );
 if ( aRole > 0.5 ) {
   if ( aRole < 1.5 ) {
@@ -259,11 +261,11 @@ if ( aRole > 0.5 ) {
     else if ( aRole < 5.5 ) { locoLevel = iLights.z; locoGain = ${LIGHTS.indicatorGain.toFixed(2)}; }
     else { locoLevel = iLights.w; locoGain = ${LIGHTS.headGain.toFixed(2)}; }
     locoLevel = max( locoLevel, ${LIGHTS.dayResidual.toFixed(3)} );
-    vLocoEmissive = vColor * locoGain * locoLevel;
-    locoBase = vColor * mix( 0.42, 1.0, min( 1.0, locoLevel * 1.6 ) );
+    vLocoEmissive = vColor.rgb * locoGain * locoLevel;
+    locoBase = vColor.rgb * mix( 0.42, 1.0, min( 1.0, locoLevel * 1.6 ) );
   }
 }
-vColor = locoBase;
+vColor.rgb = locoBase;
 `;
 
 /** Applies the traffic vertex patch to a lit material and its depth twin. */

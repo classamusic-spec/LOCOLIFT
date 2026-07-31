@@ -701,15 +701,17 @@ float locoSlotVisible() {
 }
 `;
 
+// NOTE: vColor is vec4 under USE_COLOR_ALPHA and vec3 otherwise; always
+// swizzle .rgb so this compiles either way.
 const PED_COLOR = /* glsl */ `
 mat4 locoSkin = locoSkinMatrix();
 float locoVis = locoSlotVisible();
 if ( aMat > 0.5 ) {
-  if ( aMat < 1.5 ) vColor *= iSkin;
-  else if ( aMat < 2.5 ) vColor *= iShirt;
-  else if ( aMat < 3.5 ) vColor *= iPants;
-  else if ( aMat < 4.5 ) vColor *= iHair;
-  else if ( aMat > 10.5 ) vColor *= iHair;
+  if ( aMat < 1.5 ) vColor.rgb *= iSkin;
+  else if ( aMat < 2.5 ) vColor.rgb *= iShirt;
+  else if ( aMat < 3.5 ) vColor.rgb *= iPants;
+  else if ( aMat < 4.5 ) vColor.rgb *= iHair;
+  else if ( aMat > 10.5 ) vColor.rgb *= iHair;
 }
 `;
 
