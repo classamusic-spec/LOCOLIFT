@@ -46,11 +46,20 @@ export interface BuildingStats {
   facadeTriangles: number;
   massTriangles: number;
   roofTriangles: number;
+  /** triangles in the simplified far-LOD twins */
+  farTriangles: number;
   drawCalls: number;
   buildMs: number;
   balconies: BalconyStats;
   roofs: RoofStats;
 }
+
+/**
+ * Distance at which a block swaps to its flat twin. 130m is past the far kerb
+ * of the widest street, so the detailed shell always covers anything the player
+ * can read, and the swap happens behind intervening façades.
+ */
+const SHELL_LOD_DISTANCE = 130;
 
 /** Hours over which lit windows fade in and out. */
 const DUSK_START = 17.6;
@@ -69,6 +78,8 @@ export class Buildings implements WorldLayer {
   private nightUniform = { value: 0 };
 
   private meshes: THREE.Mesh[] = [];
+  /** simplified twin of each block, swapped in beyond `SHELL_LOD_DISTANCE` */
+  private farMeshes: THREE.Mesh[] = [];
   private instanced: THREE.InstancedMesh[] = [];
   private ownedGeometries: THREE.BufferGeometry[] = [];
   private quality: QualityTier;
@@ -85,6 +96,7 @@ export class Buildings implements WorldLayer {
     facadeTriangles: 0,
     massTriangles: 0,
     roofTriangles: 0,
+    farTriangles: 0,
     drawCalls: 0,
     buildMs: 0,
     balconies: {
@@ -152,6 +164,11 @@ export class Buildings implements WorldLayer {
     let roofTris = 0;
     for (const block of layout.blocks) {
       const b = new GeomBuilder();
+      // LOD 1 flattens reveals, cornice profiles and applied trim and paints
+      // the openings onto the wall instead. From the fort or the waterfront
+      // the whole district is in frustum at once, and that detail is far below
+      // a pixel — this is where the triangle count is actually won.
+      const bFar = new GeomBuilder();
       let built = 0;
 
       for (const lotId of block.lots) {
@@ -159,16 +176,24 @@ export class Buildings implements WorldLayer {
         const plan = plans.get(lotId);
         if (!lot || !plan) continue;
 
+        const tops = this.neighbourTops(lot, layout, plans);
+
         const t1 = b.triangleCount;
         composeFacade(plan, b, this.atlas, 0);
         const t2 = b.triangleCount;
-        composeShell(plan, b, this.atlas, 0, this.neighbourTops(lot, layout, plans));
+        composeShell(plan, b, this.atlas, 0, tops);
         composeLightWell(plan, b, this.atlas);
         const t3 = b.triangleCount;
         roofs.place(plan, b);
         roofTris += b.triangleCount - t3;
         facadeTris += t2 - t1;
         massTris += t3 - t2;
+
+        // Far shell: flat façade + mass only. No light wells (invisible from
+        // outside at range) and no roof clutter.
+        composeFacade(plan, bFar, this.atlas, 1);
+        composeShell(plan, bFar, this.atlas, 1, tops);
+
         balconies.place(plan);
         built++;
       }
@@ -188,6 +213,21 @@ export class Buildings implements WorldLayer {
       this.ownedGeometries.push(geo);
       shellTris += geo.index ? geo.index.count / 3 : 0;
       this._stats.lots += built;
+
+      const geoFar = bFar.build();
+      if (geoFar) {
+        const far = new THREE.Mesh(geoFar, this.shellMat);
+        far.name = `buildings/block${block.id}/far`;
+        far.castShadow = false; // the near twin casts; far shadows are mush anyway
+        far.receiveShadow = true;
+        far.matrixAutoUpdate = false;
+        far.updateMatrix();
+        far.visible = false;
+        this.group.add(far);
+        this.farMeshes.push(far);
+        this.ownedGeometries.push(geoFar);
+        this._stats.farTriangles += geoFar.index ? geoFar.index.count / 3 : 0;
+      }
     }
 
     /* ---------------- instanced detail ---------------- */
@@ -199,6 +239,9 @@ export class Buildings implements WorldLayer {
     this.instanced = registry.build(instMats);
     let instTris = 0;
     for (const m of this.instanced) {
+      // computeBoundingSphere on an InstancedMesh spans every instance, which
+      // is what the distance test needs; the geometry's own sphere is one part.
+      m.computeBoundingSphere();
       this.group.add(m);
       const g = m.geometry;
       instTris += (g.index ? g.index.count / 3 : 0) * m.count;
@@ -365,11 +408,38 @@ export class Buildings implements WorldLayer {
     mat.customProgramCacheKey = () => 'loco-glow';
   }
 
-  update(_cameraPos: THREE.Vector3, _dt: number, timeOfDay: number): void {
+  update(cameraPos: THREE.Vector3, _dt: number, timeOfDay: number): void {
     // Windows come on across dusk and go off across dawn.
     const dusk = smoothstep((timeOfDay - DUSK_START) / (DUSK_END - DUSK_START));
     const dawn = 1 - smoothstep((timeOfDay - DAWN_START) / (DAWN_END - DAWN_START));
     this.nightUniform.value = clamp01(Math.max(dusk, dawn));
+
+    /* ---- distance culling ----
+     * Three frustum-culls per mesh, but nothing drops a block that is merely
+     * far away. From the waterfront or the fort the whole district is in
+     * frustum at once, which is where the triangle count doubles. Blocks are
+     * merged per city block, so their bounding spheres are large — we test
+     * against the sphere edge, not its centre, or façades pop at the far kerb.
+     */
+    const budget = QUALITY_BUDGET[this.quality];
+    const shellLimit = budget.drawDistance;
+    const lodSwap = SHELL_LOD_DISTANCE;
+    for (let i = 0; i < this.meshes.length; i++) {
+      const near = this.meshes[i];
+      const far = this.farMeshes[i];
+      const s = near.geometry.boundingSphere;
+      const d = s ? cameraPos.distanceTo(s.center) - s.radius : 0;
+      const inRange = d < shellLimit;
+      const useNear = d < lodSwap;
+      near.visible = inRange && useNear;
+      if (far) far.visible = inRange && !useNear;
+    }
+    // Instanced detail (balconies, pots, laundry) reads at much shorter range.
+    const detailLimit = budget.propDetailDistance * 2.2;
+    for (const m of this.instanced) {
+      const s = m.boundingSphere ?? m.geometry.boundingSphere;
+      m.visible = s ? cameraPos.distanceTo(s.center) - s.radius < detailLimit : true;
+    }
   }
 
   onQualityChange(tier: QualityTier): void {
@@ -384,12 +454,14 @@ export class Buildings implements WorldLayer {
 
   dispose(): void {
     for (const m of this.meshes) m.removeFromParent();
+    for (const m of this.farMeshes) m.removeFromParent();
     for (const m of this.instanced) {
       m.removeFromParent();
       m.dispose();
     }
     for (const g of this.ownedGeometries) g.dispose();
     this.meshes = [];
+    this.farMeshes = [];
     this.instanced = [];
     this.ownedGeometries = [];
     this.shellMat?.dispose();

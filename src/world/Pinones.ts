@@ -280,8 +280,19 @@ class DeckBuilder {
     return this.n++;
   }
 
+  /**
+   * Wind CCW seen from **above**, matching `Ground`'s convention.
+   *
+   * The caller hands corners in ribbon order — `a` and `b` one station apart
+   * along the road, `c`/`d` one column further seaward. Since the seaward
+   * normal is `(-tz, tx)`, the 3D cross `tangent × seaward` points **down**;
+   * emitting `(a, b, c)` in station-then-column order therefore produced a
+   * clockwise, downward-facing triangle and every square metre of this layer
+   * was back-face culled from the driver's eye. Walking the column axis first
+   * flips it the right way up.
+   */
   quad(a: number, b: number, c: number, d: number): void {
-    this.idx.push(a, b, c, a, c, d);
+    this.idx.push(a, d, c, a, c, b);
   }
 
   get vertexCount(): number {
@@ -417,6 +428,7 @@ export class Pinones implements WorldLayer {
 
     this.buildStations(layout);
     this.buildDeck(opts);
+    pinonesDebugDump(this.deckGroup, this.stations, layout);
 
     const rng = opts.rng.fork(0x9151);
     this.buildProps(rng);
@@ -1403,6 +1415,82 @@ export class Pinones implements WorldLayer {
 /* ========================================================================== *
  *  helpers
  * ========================================================================== */
+
+/** TEMPORARY diagnostic: geometry counts, bounds, and winding sanity. */
+function pinonesDebugDump(deck: THREE.Group, stations: Station[], layout: CityLayout): void {
+  const profile: Array<Record<string, unknown>> = [];
+  for (const si of [10, 60, 110, 160]) {
+    const st = stations[si];
+    if (!st) continue;
+    const row: number[] = [];
+    for (let v = -200; v <= 60; v += 20) {
+      row.push(+layout.groundHeight(st.x + st.nx * v, st.z + st.nz * v).toFixed(1));
+    }
+    profile.push({ s: st.s, x: +st.x.toFixed(0), z: +st.z.toFixed(0), roadY: +st.y.toFixed(2), waterV: +st.waterV.toFixed(1), heights: row });
+  }
+  console.info('[PN-PROFILE]', JSON.stringify(profile));
+  const rows: Array<Record<string, unknown>> = [];
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  const ab = new THREE.Vector3();
+  const ac = new THREE.Vector3();
+  const n = new THREE.Vector3();
+  for (const child of deck.children) {
+    const m = child as THREE.Mesh;
+    const g = m.geometry;
+    const idx = g.getIndex();
+    const pos = g.getAttribute('position') as THREE.BufferAttribute;
+    const nrm = g.getAttribute('normal') as THREE.BufferAttribute;
+    let upFaces = 0;
+    let downFaces = 0;
+    let nrmUp = 0;
+    const tris = idx ? idx.count / 3 : 0;
+    for (let t = 0; t < tris; t++) {
+      const i0 = idx!.getX(t * 3);
+      const i1 = idx!.getX(t * 3 + 1);
+      const i2 = idx!.getX(t * 3 + 2);
+      a.fromBufferAttribute(pos, i0);
+      b.fromBufferAttribute(pos, i1);
+      c.fromBufferAttribute(pos, i2);
+      ab.subVectors(b, a);
+      ac.subVectors(c, a);
+      n.crossVectors(ab, ac);
+      if (n.y > 0) upFaces++;
+      else downFaces++;
+      if (nrm.getY(i0) > 0) nrmUp++;
+    }
+    const bb = g.boundingBox;
+    rows.push({
+      name: m.name,
+      visible: m.visible,
+      tris,
+      verts: pos.count,
+      windingUp: upFaces,
+      windingDown: downFaces,
+      shadingNormalUp: nrmUp,
+      material: (m.material as THREE.Material).name,
+      side: (m.material as THREE.Material).side,
+      bbox: bb ? [bb.min.toArray().map((v) => +v.toFixed(2)), bb.max.toArray().map((v) => +v.toFixed(2))] : null,
+    });
+  }
+  const w = window as unknown as { __pinonesDebug?: unknown };
+  w.__pinonesDebug = {
+    deckChildren: deck.children.length,
+    stations: stations.length,
+    st0: stations[0] ? { x: +stations[0].x.toFixed(1), z: +stations[0].z.toFixed(1), y: +stations[0].y.toFixed(2) } : null,
+    stMid: stations[Math.floor(stations.length / 2)]
+      ? {
+          x: +stations[Math.floor(stations.length / 2)].x.toFixed(1),
+          z: +stations[Math.floor(stations.length / 2)].z.toFixed(1),
+          y: +stations[Math.floor(stations.length / 2)].y.toFixed(2),
+          waterV: +stations[Math.floor(stations.length / 2)].waterV.toFixed(1),
+        }
+      : null,
+    rows,
+  };
+  console.info('[PN-DBG]', JSON.stringify(w.__pinonesDebug));
+}
 
 /** A double-sided sign panel on the atlas material, centred on a post top. */
 function signPanel(

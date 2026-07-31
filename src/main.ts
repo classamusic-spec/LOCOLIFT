@@ -67,6 +67,8 @@ export interface LocoTestHook {
   bounds(): { minX: number; maxX: number; minZ: number; maxZ: number };
   /** Which vehicle is being driven. */
   vehicleId(): string;
+  /** Per-group mesh/triangle/instance breakdown, for budget triage. */
+  sceneBreakdown(): Array<{ group: string; meshes: number; instanced: number; instances: number; triangles: number }>;
 }
 
 declare global {
@@ -294,6 +296,42 @@ function installTestHook(
     },
     vehicleId() {
       return vehicle.vehicleId;
+    },
+    sceneBreakdown() {
+      const rows: Array<{ group: string; meshes: number; instanced: number; instances: number; triangles: number }> = [];
+      const tally = (root: THREE.Object3D, label: string): void => {
+        let meshes = 0;
+        let instanced = 0;
+        let instances = 0;
+        let triangles = 0;
+        root.traverse((o) => {
+          const m = o as THREE.Mesh & { count?: number; isInstancedMesh?: boolean };
+          if (!m.isMesh || !m.geometry) return;
+          const g = m.geometry as THREE.BufferGeometry;
+          const tris = g.index ? g.index.count / 3 : (g.getAttribute('position')?.count ?? 0) / 3;
+          if (m.isInstancedMesh) {
+            instanced++;
+            instances += m.count ?? 0;
+            triangles += tris * (m.count ?? 0);
+          } else {
+            meshes++;
+            triangles += tris;
+          }
+        });
+        if (meshes + instanced > 0) {
+          rows.push({ group: label, meshes, instanced, instances, triangles: Math.round(triangles) });
+        }
+      };
+      // World layers hang off the world root; everything else is top-level.
+      for (const child of engine.scene.children) {
+        if (child === world.root) {
+          for (const layer of child.children) tally(layer, `world/${layer.name || 'unnamed'}`);
+        } else {
+          tally(child, child.name || child.type);
+        }
+      }
+      rows.sort((a, b) => b.triangles - a.triangles);
+      return rows;
     },
     stats() {
       return {
