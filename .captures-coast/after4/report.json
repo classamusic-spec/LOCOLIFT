@@ -1,0 +1,34 @@
+{
+  "url": "http://127.0.0.1:5191",
+  "shots": [
+    ".captures-coast/after4/a-road-west.png",
+    ".captures-coast/after4/b-beach-west.png",
+    ".captures-coast/after4/c-waterline.png",
+    ".captures-coast/after4/d-road-mid.png",
+    ".captures-coast/after4/f-beach-east.png",
+    ".captures-coast/after4/g-overview.png",
+    ".captures-coast/after4/h-sandkicker.png",
+    ".captures-coast/after4/i-alongshore.png",
+    ".captures-coast/after4/j-lookinland.png",
+    ".captures-coast/after4/k-sunward.png",
+    ".captures-coast/after4/l-slipway.png"
+  ],
+  "errors": [
+    "Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ],
+  "stats": {
+    "drawCalls": 183,
+    "triangles": 637531,
+    "geometries": 215,
+    "textures": 38,
+    "programs": 41,
+    "systems": 10,
+    "elapsed": 3.5,
+    "speed": 6.21,
+    "boost": 0.388,
+    "wheelsOnGround": 0,
+    "camDistance": 8.5,
+    "camFov": 64.6,
+    "bank": 0
+  }
+}

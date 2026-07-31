@@ -45,6 +45,38 @@ import type { CityLayout, OpenArea, WorldLayer, WorldOpts } from './WorldTypes';
 /** What the tyres are on. Consumed by the vehicle's grip model. */
 export type SurfaceKind = 'cobble' | 'sand' | 'asphalt' | 'grass';
 
+/** Multipliers on the tyre model, one set per surface. */
+export interface SurfaceGrip {
+  /** scales `TYRE.latGripFront` / `latGripRear` */
+  lateral: number;
+  /** scales `TYRE.longGrip` */
+  longitudinal: number;
+  /**
+   * Extra rolling resistance, as a fraction of the vehicle's drive force lost
+   * per wheel on this surface. Sand is what makes the beach a *different place
+   * to drive* rather than a differently coloured road.
+   */
+  drag: number;
+  /** how readily this surface throws a particle plume under a spinning wheel */
+  spray: number;
+}
+
+/**
+ * Suggested tuning. Cobble is the reference — the whole vehicle is tuned on
+ * adoquín, so it sits at 1.0 and everything else is expressed relative to it.
+ *
+ * Sand is deliberately loose: grip drops about a third laterally, the Jeep
+ * pushes wide on entry and steps out on power, and the drag term caps beach
+ * top speed below road top speed. That combination is the fun — you arrive on
+ * the sand fast and immediately have to drive it differently.
+ */
+export const SURFACE_GRIP: Record<SurfaceKind, SurfaceGrip> = {
+  cobble: { lateral: 1.0, longitudinal: 1.0, drag: 0.0, spray: 0.15 },
+  asphalt: { lateral: 1.06, longitudinal: 1.05, drag: 0.0, spray: 0.1 },
+  sand: { lateral: 0.64, longitudinal: 0.74, drag: 0.22, spray: 1.0 },
+  grass: { lateral: 0.8, longitudinal: 0.85, drag: 0.09, spray: 0.5 },
+};
+
 /** One sample of the waterline, marching along the shore. */
 export interface ShoreStation {
   /** waterline position */
@@ -808,29 +840,51 @@ export class CoastModel {
     const prom = this.promenade;
     if (prom.length < 8) return;
 
-    /* --- the slipway: a wide concrete ramp letting you off the malecón --- */
+    /**
+     * Walk to the nearest open-beach station at or after `f`. The shore is one
+     * continuous span now, and a good chunk of its middle is cruise apron, so
+     * a fraction alone is not a placement.
+     */
+    const openStation = (span: BeachSpan, f: number): ShoreStation | null => {
+      const n = span.stations.length;
+      const start = Math.floor(clamp(f, 0, 0.999) * n);
+      for (let k = 0; k < n; k++) {
+        // search outward from the target so a ramp lands near where it was asked for
+        for (const i of [start + k, start - k]) {
+          if (i < 2 || i >= n - 2) continue;
+          const st = span.stations[i];
+          if (!st.dock && st.width > 24) return st;
+        }
+      }
+      return null;
+    };
+
+    /* --- slipways: wide concrete ramps letting you off the malecón --- */
     const beachSpans = this.spans.filter((s) => s.length > 90);
     for (const span of beachSpans) {
-      const st = span.stations[Math.floor(span.stations.length * 0.28)];
-      if (st.dock) continue;
-      const p = this.nearestPromenade(st.x, st.z);
-      if (!p) continue;
-      this.ramps.push({
-        kind: 'slipway',
-        x: p.x + p.nx * 0.5,
-        y: p.y,
-        z: p.z + p.nz * 0.5,
-        dx: p.nx,
-        dz: p.nz,
-        length: 22,
-        rise: -(p.y - this.layout.groundHeight(p.x + p.nx * 22, p.z + p.nz * 22)),
-        width: 11,
-        lip: 0,
-      });
+      for (const f of [0.12, 0.88]) {
+        const st = openStation(span, f);
+        if (!st) continue;
+        const p = this.nearestPromenade(st.x, st.z);
+        if (!p) continue;
+        if (this.distToRamp(p.x, p.z) < 40) continue;
+        this.ramps.push({
+          kind: 'slipway',
+          x: p.x + p.nx * 0.5,
+          y: p.y,
+          z: p.z + p.nz * 0.5,
+          dx: p.nx,
+          dz: p.nz,
+          length: 22,
+          rise: -(p.y - this.layout.groundHeight(p.x + p.nx * 22, p.z + p.nz * 22)),
+          width: 11,
+          lip: 0,
+        });
+      }
     }
 
-    /* --- seawall kickers: three launches off the malecón over the sand --- */
-    const kickerAt = [0.18, 0.47, 0.79];
+    /* --- seawall kickers: launches off the malecón, out over the sand --- */
+    const kickerAt = [0.2, 0.36, 0.62, 0.84];
     const total = prom[prom.length - 1].s;
     for (const f of kickerAt) {
       const target = total * f;
@@ -839,6 +893,7 @@ export class CoastModel {
       // only where there is actually beach to land on
       const sz = this.shoreZ(p.x);
       if (!Number.isFinite(sz)) continue;
+      if (this.distToRamp(p.x, p.z) < 34) continue;
       this.ramps.push({
         kind: 'kicker',
         x: p.x - p.nx * 8,
@@ -855,23 +910,26 @@ export class CoastModel {
 
     /* --- sand kickers: hit the tideline flat out and fly over the water --- */
     for (const span of beachSpans) {
-      const st = span.stations[Math.floor(span.stations.length * 0.66)];
-      if (st.dock) continue;
-      const foot = 16;
-      const fx = st.x - st.nx * foot;
-      const fz = st.z - st.nz * foot;
-      this.ramps.push({
-        kind: 'sandKicker',
-        x: fx,
-        y: this.layout.groundHeight(fx, fz) + SAND_LIFT,
-        z: fz,
-        dx: st.nx,
-        dz: st.nz,
-        length: 13,
-        rise: 2.6,
-        width: 10,
-        lip: 1.2,
-      });
+      for (const f of [0.26, 0.74]) {
+        const st = openStation(span, f);
+        if (!st) continue;
+        const foot = 16;
+        const fx = st.x - st.nx * foot;
+        const fz = st.z - st.nz * foot;
+        if (this.distToRamp(fx, fz) < 34) continue;
+        this.ramps.push({
+          kind: 'sandKicker',
+          x: fx,
+          y: this.layout.groundHeight(fx, fz) + SAND_LIFT,
+          z: fz,
+          dx: st.nx,
+          dz: st.nz,
+          length: 13,
+          rise: 2.6,
+          width: 10,
+          lip: 1.2,
+        });
+      }
     }
   }
 
@@ -1192,6 +1250,14 @@ function makeSandMaterial(
           'locoFoam *= step( -1.6, locoAbove );',
           // --- assemble
           'vec3 locoSand = mix( uDryCol, uDuneCol, smoothstep( 0.34, 0.0, vCoast.x ) );',
+          // broad drifts of slightly warmer and cooler sand, plus a band of
+          // shell hash and dark mineral sand along the old high-tide line —
+          // an unbroken field of one cream is what makes CG beaches look fake
+          'float locoDrift = locoFbm2( vWorld.xz * 0.055 );',
+          'locoSand *= mix( vec3( 0.93, 0.95, 1.02 ), vec3( 1.07, 1.03, 0.93 ), locoDrift );',
+          'float locoHash = smoothstep( 0.55, 0.9, vCoast.x ) * ( 1.0 - smoothstep( 0.86, 0.99, vCoast.x ) );',
+          'locoHash *= smoothstep( 0.42, 0.78, locoFbm2( vWorld.xz * 0.42 + 11.0 ) );',
+          'locoSand = mix( locoSand, locoSand * vec3( 0.74, 0.71, 0.68 ), locoHash * 0.55 );',
           'locoSand *= 1.0 + ( locoGrain - 0.11 ) * 0.9 + locoRip * 0.055;',
           'locoSand = mix( locoSand, uWetCol, locoWet );',
           'locoSand = mix( locoSand, uFoamCol, clamp( locoFoam, 0.0, 0.92 ) );',
@@ -1275,11 +1341,20 @@ export class Coast implements WorldLayer {
   }
 
   /**
-   * Grip query for the vehicle. O(1) — backed by a 2.5 m raster built on first
-   * use. Safe to call per wheel per fixed step.
+   * Grip query for the vehicle. O(1) — a lookup into a 2.5 m raster built
+   * during `build`. Safe to call per wheel per fixed step (measured at
+   * ~0.1 µs, so 480 calls a second costs nothing).
+   *
+   * Returns `'cobble'` before the layer has built, which is the reference
+   * surface the vehicle is already tuned for.
    */
   surfaceAt(x: number, z: number): SurfaceKind {
     return this.model ? this.model.surfaceAt(x, z) : 'cobble';
+  }
+
+  /** Convenience: the tuning multipliers for whatever is under (x, z). */
+  gripAt(x: number, z: number): SurfaceGrip {
+    return SURFACE_GRIP[this.surfaceAt(x, z)];
   }
 
   /** The shared shoreline model, for anything that wants to place props. */
@@ -1843,9 +1918,13 @@ function buildRamp(
   // Real slipways and ramps are cast with transverse grip ribs, which is both
   // what they look like and what makes an otherwise blank wedge read as a
   // surface with a direction from 55 m out (§6.2 R4).
-  const concrete = r.kind === 'sandKicker' ? 0xc9b894 : 0xc3bfb2;
-  const ribCol = r.kind === 'sandKicker' ? 0xb2a17c : 0xa9a598;
-  const kerbCol = r.kind === 'sandKicker' ? 0xb08d5a : 0xb9553a;
+  const sandy = r.kind === 'sandKicker';
+  const concrete = sandy ? 0xc9b894 : 0xc3bfb2;
+  const ribCol = sandy ? 0xb2a17c : 0xa9a598;
+  const kerbCol = sandy ? 0xb08d5a : 0xb9553a;
+  const flankCol = sandy ? 0xd2c19a : 0xbeb9ab;
+  const flankMid = sandy ? 0xb9a684 : 0xa8a396;
+  const flankLow = sandy ? 0x97866a : 0x8b877d;
 
   const deckY = (t: number): number => {
     if (r.kind === 'slipway') return r.y + r.rise * t;
@@ -1883,16 +1962,36 @@ function buildRamp(
     gb.quad(a.clone(), b.clone(), c.clone(), d.clone(), rib ? ribCol : concrete, 0.4);
     addColQuad(a.clone(), b.clone(), c.clone(), d.clone());
 
-    // skirts down to the ground on both sides + the underside apron
+    // Flanks down to the ground on both sides. A ramp on a falling beach can
+    // stand four metres proud at its lip, and one flat quad that size reads as
+    // a blank wall dropped on the sand — so it is coursed, and a sand kicker is
+    // faced in sand because that is what it is: a bermed-up ramp, not a slab.
     for (const side of [-1, 1]) {
       at(t0, side, a);
       at(t1, side, b);
-      const g0 = model.layout.groundHeight(a.x, a.z) - 0.2;
-      const g1 = model.layout.groundHeight(b.x, b.z) - 0.2;
-      c.set(b.x, Math.min(g1, b.y), b.z);
-      d.set(a.x, Math.min(g0, a.y), a.z);
+      const g0 = model.layout.groundHeight(a.x, a.z) - 1.1;
+      const g1 = model.layout.groundHeight(b.x, b.z) - 1.1;
       outward.set(px * side, 0, pz * side);
-      gb.quadTowards(a.clone(), b.clone(), c.clone(), d.clone(), concrete, 0.4, outward);
+      const COURSES = 3;
+      for (let k = 0; k < COURSES; k++) {
+        const f0 = k / COURSES;
+        const f1 = (k + 1) / COURSES;
+        const top0 = lerp(a.y, Math.min(g0, a.y), f0);
+        const top1 = lerp(b.y, Math.min(g1, b.y), f0);
+        const bot0 = lerp(a.y, Math.min(g0, a.y), f1);
+        const bot1 = lerp(b.y, Math.min(g1, b.y), f1);
+        // courses darken downward: contact shadow at the foot, per §8
+        const shade = k === 0 ? flankCol : k === 1 ? flankMid : flankLow;
+        gb.quadTowards(
+          a.clone().setY(top0),
+          b.clone().setY(top1),
+          b.clone().setY(bot1),
+          a.clone().setY(bot0),
+          shade,
+          0.45,
+          outward,
+        );
+      }
     }
   }
 

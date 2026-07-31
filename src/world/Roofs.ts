@@ -34,12 +34,9 @@ import {
   InstanceRegistry,
   PartBuilder,
   box,
-  deck,
   frameYaw,
   instanceMatrix,
   linearRGB,
-  makeFrame,
-  panel,
   shadeRGB,
   sidePanel,
   worldQuad,
@@ -325,6 +322,3 @@ export class Roofs {
     this.reg.add(key, this.m, wx, wz);
   }
 }
-
-/* re-exported so `Buildings.ts` need not import the kit for the roof pass */
-export { makeFrame, panel, deck };

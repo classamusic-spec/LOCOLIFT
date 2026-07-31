@@ -84,7 +84,7 @@ const C = {
   coconut: 0x7c6a44,
   seagrapeLeaf: 0x6f9a4a,
   seagrapeWood: 0x6e5c46,
-  almondLeaf: 0x3f7a33,
+  almondLeaf: 0x5f9741,
   almondWood: 0x6a5a48,
   bougainvillea: [0xd6217a, 0xe8563f, 0xf4f0e6, 0xb43fa8] as const,
   hibiscus: [0xe02b26, 0xf2557e, 0xf6a01f] as const,
@@ -216,7 +216,7 @@ export class Vegetation implements WorldLayer {
     this.quality = quality;
     this.options = { density: 1, wind: 1, ...options };
     this.group.name = 'world/vegetation';
-    this.uniforms.uWindStrength.value = 0.5 * (this.options.wind ?? 1);
+    this.uniforms.uWindStrength.value = 0.68 * (this.options.wind ?? 1);
   }
 
   /* --------------------------------------------------------------- build */
@@ -448,7 +448,7 @@ export class Vegetation implements WorldLayer {
       fronds.name = `veg/${species}Fronds`;
       const m = new THREE.Matrix4();
       const q = new THREE.Quaternion();
-      const qs = new THREE.Quaternion();
+      const yawQ = new THREE.Quaternion();
       const pos = new THREE.Vector3();
       const scl = new THREE.Vector3();
       const euler = new THREE.Euler();
@@ -458,6 +458,7 @@ export class Vegetation implements WorldLayer {
       for (const s of list) {
         const crown = crowns[s.variant % detail.trunkVariants];
         const tilt = crownTilt[s.variant % detail.trunkVariants];
+        yawQ.setFromAxisAngle(UP, s.yaw);
         pos.copy(crown).multiplyScalar(s.scale);
         pos.applyAxisAngle(UP, s.yaw);
         pos.add(new THREE.Vector3(s.x, s.y, s.z));
@@ -466,12 +467,16 @@ export class Vegetation implements WorldLayer {
           // droop: the outer fronds hang, the newest ones stand up
           const age = (f * 0.618033) % 1;
           const droop = lerp(-0.16, 0.86, age) + s.droopBias;
-          euler.set(droop, a + s.yaw, 0, 'YXZ');
+          // world = instance yaw * crown tilt * frond. The tilt is authored in
+          // the trunk's own space, so it has to be applied *inside* the yaw or
+          // every palm leans the same way regardless of which way it faces.
+          euler.set(droop, a, 0, 'YXZ');
           q.setFromEuler(euler);
-          qs.copy(tilt);
-          q.premultiply(qs);
+          q.premultiply(tilt);
+          q.premultiply(yawQ);
           const len = lerp(s.frondLen[0], s.frondLen[1], (f * 0.37) % 1) * s.scale;
-          scl.set(len * 0.34, len, len);
+          // §1.9: a coconut frond is 4–5 m long and a little over a metre wide
+          scl.set(len * 0.2, len, len);
           m.compose(pos, q, scl);
           fronds.setMatrixAt(k, m);
           // fronds are floppier than trunks, and every one gets its own phase
@@ -570,10 +575,15 @@ export class Vegetation implements WorldLayer {
       for (let s = 30; s < total - 20; s += rng.range(46, 82)) {
         const p = model.promenadeAtS(s);
         if (!p) continue;
-        const x = p.x - p.nx * rng.range(3.5, 6);
-        const z = p.z - p.nz * rng.range(3.5, 6);
+        // §1.9 puts the almendro on the waterfront proper — and the promenade
+        // station is already outboard of the kerb, so anything set landward of
+        // it would be standing in the road
+        const off = rng.range(5, 12);
+        const x = p.x + p.nx * off;
+        const z = p.z + p.nz * off;
         if (model.distToRamp(x, z) < 12) continue;
-        const y = layout.groundHeight(x, z);
+        const y = model.beachHeight(x, z);
+        if (y < SEA_LEVEL + 2.4) continue;
         const scale = rng.range(0.85, 1.25);
         almondTrunk.push({ x, y, z, yaw: rng.range(0, 6.283), scale, tint: 0 });
         almondCanopy.push({ x, y, z, yaw: rng.range(0, 6.283), scale, tint: 0 });
@@ -1084,8 +1094,8 @@ function leafClump(
     const s = shade * (0.86 + 0.14 * (p / Math.max(1, planes - 1)));
     const nx = Math.cos(a + Math.PI * 0.5);
     const nz = Math.sin(a + Math.PI * 0.5);
-    const i0 = gb.vertex(cx - ca, lo, cz - sa, nx, 0.5, nz, 0, 0, col.r * s * 0.72, col.g * s * 0.72, col.b * s * 0.72, swayW * 0.3, flutW * 0.4, p * 0.17);
-    const i1 = gb.vertex(cx + ca, lo, cz + sa, nx, 0.5, nz, 1, 0, col.r * s * 0.72, col.g * s * 0.72, col.b * s * 0.72, swayW * 0.3, flutW * 0.4, p * 0.17);
+    const i0 = gb.vertex(cx - ca, lo, cz - sa, nx, 0.5, nz, 0, 0, col.r * s * 0.82, col.g * s * 0.82, col.b * s * 0.82, swayW * 0.3, flutW * 0.4, p * 0.17);
+    const i1 = gb.vertex(cx + ca, lo, cz + sa, nx, 0.5, nz, 1, 0, col.r * s * 0.82, col.g * s * 0.82, col.b * s * 0.82, swayW * 0.3, flutW * 0.4, p * 0.17);
     const i2 = gb.vertex(cx + ca, hi, cz + sa, nx, 0.5, nz, 1, 1, col.r * s, col.g * s, col.b * s, swayW, flutW, p * 0.17);
     const i3 = gb.vertex(cx - ca, hi, cz - sa, nx, 0.5, nz, 0, 1, col.r * s, col.g * s, col.b * s, swayW, flutW, p * 0.17);
     gb.quadIdx(i0, i1, i2, i3);
@@ -1196,7 +1206,9 @@ function buildAlmondCanopy(rng: RNG): THREE.BufferGeometry {
     { y: 5.7, r: 1.9 },
   ];
   for (const tier of tiers) {
-    const n = rng.int(4, 6);
+    // sparse enough that sky reads through the tiers — a solid ball of leaves
+    // is what makes a procedural broadleaf look like a dark green wall
+    const n = rng.int(3, 4);
     for (let i = 0; i < n; i++) {
       const a = (i / n) * Math.PI * 2 + rng.range(-0.4, 0.4);
       const d = tier.r * rng.range(0.35, 0.8);

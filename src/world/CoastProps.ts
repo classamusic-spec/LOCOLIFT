@@ -34,7 +34,7 @@ import { GROUP } from '../physics/PhysicsTypes';
 import type { BodyHandle } from '../physics/PhysicsTypes';
 import { SEA_LEVEL } from './CityLayout';
 import { coastModel, sampleSpan, GeoBuilder, COAST_DENSITY } from './Coast';
-import type { CoastModel, ShoreStation } from './Coast';
+import type { CoastModel } from './Coast';
 import type { CityLayout, WorldLayer, WorldOpts } from './WorldTypes';
 
 /* ------------------------------------------------------------------ palette */
@@ -309,12 +309,17 @@ export class CoastProps implements WorldLayer {
       const s = ((i + 0.5) / want) * total + rng.range(-14, 14);
       const p = model.promenadeAtS(Math.max(6, Math.min(total - 6, s)));
       if (!p) continue;
-      const off = rng.range(-8.5, -5.5);
+      // Seaward of the parapet, on the dry upper beach. The promenade station
+      // already sits outboard of the kerb and the pavement, so anything placed
+      // *landward* of it lands in the carriageway (§6.2 R1).
+      const off = rng.range(7, 17);
       const x = p.x + p.nx * off;
       const z = p.z + p.nz * off;
       if (model.distToRamp(x, z) < 13) continue;
-      const yaw = Math.atan2(p.nx, p.nz) + rng.range(-0.16, 0.16);
-      const y = model.layout.groundHeight(x, z);
+      const yaw = Math.atan2(p.nx, p.nz) + Math.PI + rng.range(-0.16, 0.16);
+      const y = model.beachHeight(x, z);
+      // the counter has to be above the surf line
+      if (y < SEA_LEVEL + 2.2) continue;
       const shape = rng.int(0, 2);
       bodies.push({
         x,

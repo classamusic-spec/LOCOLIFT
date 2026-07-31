@@ -33,6 +33,10 @@ import { Weather } from '../fx/Weather';
 import type { SkyWeather } from '../fx/LightingPresets';
 import { generateCityLayout, DISTRICT_BOUNDS, SEA_LEVEL } from './CityLayout';
 import { Buildings } from './Buildings';
+import { Coast } from './Coast';
+import { CoastProps } from './CoastProps';
+import { Ocean } from './Ocean';
+import { Vegetation } from './Vegetation';
 import { Ground } from './Ground';
 import { MaterialLibrary } from './Materials';
 import { TextureFactory } from './TextureFactory';
@@ -59,6 +63,8 @@ export class World implements System, WorldAPI {
   readonly materials: MaterialLibrary;
   readonly ground: Ground;
   readonly buildings: Buildings;
+  readonly ocean: Ocean;
+  readonly coast: Coast;
 
   private quality: QualityTier;
   private opts: WorldOpts;
@@ -123,6 +129,15 @@ export class World implements System, WorldAPI {
     // Façades come before weather so the wetness pass sees the full district.
     this.buildings = new Buildings(opts.quality, this.textures);
     this.registerLayer(this.buildings);
+
+    // Coastline. Ocean hides the flat placeholder sea mesh and restores it on
+    // dispose; the four layers share a memoised model, so order is free.
+    this.ocean = new Ocean(opts.quality);
+    this.coast = new Coast(opts.quality);
+    this.registerLayer(this.ocean);
+    this.registerLayer(this.coast);
+    this.registerLayer(new Vegetation(opts.quality));
+    this.registerLayer(new CoastProps(opts.quality));
 
     this.weatherFx = new Weather({
       materials: this.materials,

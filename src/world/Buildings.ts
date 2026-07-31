@@ -282,7 +282,6 @@ export class Buildings implements WorldLayer {
     // §5 — painted lime stucco wants nScale 0.35, not the implicit 1.0 that
     // §8.22 calls out as the reason procedural stucco reads as plastic.
     this.shellMat.normalScale.set(0.42, 0.42);
-    this.shellMat.side = THREE.DoubleSide; // TEMP winding probe
     this.injectGlow(this.shellMat);
 
     const tf = this.textures;
@@ -323,6 +322,15 @@ export class Buildings implements WorldLayer {
    * Adds the per-vertex `aGlow` emissive channel, scaled by `uNight`. Doing it
    * in the shader keeps one material for the whole district while still
    * letting individual windows light up.
+   *
+   * `aGlow` is **not** a colour. It packs `(intensity, warmth, phase)`, and it
+   * has to be resolved into one: adding the triple to `gl_FragColor.rgb`
+   * directly turns a window with warmth 0.1 into a saturated red rectangle and
+   * a window with phase 0.9 into magenta — a street of neon that breaks §4.3's
+   * warm/cool lamp spec outright and crowds the reserved gameplay hues (§3.6).
+   * Here `warmth` picks between a 2700 K bulb and a cool fluorescent, and
+   * `phase` gives each building its own brightness so the district does not
+   * switch on as one flat sheet (§8.45).
    */
   private injectGlow(mat: THREE.MeshStandardMaterial): void {
     mat.onBeforeCompile = (shader) => {
@@ -336,11 +344,22 @@ export class Buildings implements WorldLayer {
       shader.fragmentShader = shader.fragmentShader
         .replace(
           '#include <common>',
-          '#include <common>\nuniform float uNight;\nvarying vec3 vGlow;',
+          [
+            '#include <common>',
+            'uniform float uNight;',
+            'varying vec3 vGlow;',
+            'const vec3 LAMP_WARM = vec3(1.0, 0.66, 0.33);',
+            'const vec3 LAMP_COOL = vec3(0.78, 0.87, 1.0);',
+          ].join('\n'),
         )
         .replace(
           '#include <dithering_fragment>',
-          'gl_FragColor.rgb += vGlow * uNight;\n\t#include <dithering_fragment>',
+          [
+            'vec3 lampCol = mix(LAMP_WARM, LAMP_COOL, clamp(vGlow.y, 0.0, 1.0));',
+            'float lampAmp = vGlow.x * (0.72 + 0.5 * vGlow.z);',
+            'gl_FragColor.rgb += lampCol * lampAmp * uNight;',
+            '#include <dithering_fragment>',
+          ].join('\n\t'),
         );
     };
     mat.customProgramCacheKey = () => 'loco-glow';

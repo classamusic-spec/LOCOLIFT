@@ -242,8 +242,12 @@ export function makeFrame(
  */
 const FRAME_HANDEDNESS = -1;
 
-/** true when (a, b, c, d) must be reversed to face `normalSign` */
-function flipWinding(normalSign: number): boolean {
+/**
+ * True when a quad authored (x0,y0) -> (x1,y0) -> (x1,y1) -> (x0,y1) in the
+ * façade plane already faces `normalSign * n`, so it can be emitted in that
+ * order. Its natural winding faces `FRAME_HANDEDNESS * n`.
+ */
+function windsForward(normalSign: number): boolean {
   return normalSign * FRAME_HANDEDNESS > 0;
 }
 
@@ -316,7 +320,7 @@ function tileSpans(a0: number, a1: number, tile: number, phase: number): Span[] 
 export function contactAO(y: number): number {
   if (y >= 1.3) return 1;
   const t = clamp01(y / 1.3);
-  return lerp(0.6, 1, t * t * (3 - 2 * t));
+  return lerp(0.68, 1, t * t * (3 - 2 * t));
 }
 
 /** Darkening under a soffit, cornice or balcony slab, `d` metres below it. */
@@ -415,9 +419,9 @@ export function panel(
       const i2 = b.vertex(worldX(f, c.a1, z), f.y0 + r.a1, worldZ(f, c.a1, z), nx, 0, nz, u1, v1, cb, g[0], g[1], g[2]);
       const i3 = b.vertex(worldX(f, c.a0, z), f.y0 + r.a1, worldZ(f, c.a0, z), nx, 0, nz, u0, v1, cb, g[0], g[1], g[2]);
       // (x0,y0)->(x1,y0)->(x1,y1) winds along u x ŷ, which the frame's
-      // handedness puts opposite the surface normal — so it is reversed here.
-      if (flipWinding(face)) b.quad(i0, i3, i2, i1);
-      else b.quad(i0, i1, i2, i3);
+      // handedness puts opposite the surface normal — hence the reversal.
+      if (windsForward(face)) b.quad(i0, i1, i2, i3);
+      else b.quad(i0, i3, i2, i1);
     }
   }
 }
@@ -458,8 +462,10 @@ export function deck(
       const p2 = b.vertex(worldX(f, xb, za), f.y0 + y, worldZ(f, xb, za), 0, up, 0, u1, v0, col);
       const p3 = b.vertex(worldX(f, xb, zb), f.y0 + y, worldZ(f, xb, zb), 0, up, 0, u1, v1, col);
       const p4 = b.vertex(worldX(f, xa, zb), f.y0 + y, worldZ(f, xa, zb), 0, up, 0, u0, v1, col);
-      if (up > 0) b.quad(p1, p4, p3, p2);
-      else b.quad(p1, p2, p3, p4);
+      // (x,z) -> (x+dx,z) -> (x+dx,z+dz) winds along u x n = +ŷ, and either
+      // span may be authored in reverse, so the sign comes from the spans
+      if (Math.sign((xb - xa) * (zb - za)) * up > 0) b.quad(p1, p2, p3, p4);
+      else b.quad(p1, p4, p3, p2);
     }
   }
 }
@@ -514,7 +520,8 @@ export function sidePanel(
       const p2 = b.vertex(worldX(f, x, zb), f.y0 + r.a0, worldZ(f, x, zb), nx, 0, nz, u1, v0, shadeRGB(col, ka * gb));
       const p3 = b.vertex(worldX(f, x, zb), f.y0 + r.a1, worldZ(f, x, zb), nx, 0, nz, u1, v1, shadeRGB(col, kb * gb));
       const p4 = b.vertex(worldX(f, x, za), f.y0 + r.a1, worldZ(f, x, za), nx, 0, nz, u0, v1, shadeRGB(col, kb * ga));
-      if (face > 0) b.quad(p1, p2, p3, p4);
+      // this pair winds along n x ŷ = +u, so it only flips with the z order
+      if (Math.sign(zb - za) * face > 0) b.quad(p1, p2, p3, p4);
       else b.quad(p1, p4, p3, p2);
     }
   }
@@ -751,12 +758,13 @@ export function plinth(
     const v1a = atlas.v(rect, clamp01((yTop - ya) / T));
     const v1b = atlas.v(rect, clamp01((yTop - yb) / T));
     // the wall/ground junction is the darkest contact in the frame (§8.1/8.2)
-    const dark = shadeRGB(col, 0.5);
+    const dark = shadeRGB(col, 0.64);
     const p0 = b.vertex(worldX(f, xa, z), f.y0 + ya, worldZ(f, xa, z), f.nx, 0, f.nz, u0, v0, dark);
     const p1 = b.vertex(worldX(f, xb, z), f.y0 + yb, worldZ(f, xb, z), f.nx, 0, f.nz, u1, v0, dark);
     const p2 = b.vertex(worldX(f, xb, z), f.y0 + yTop, worldZ(f, xb, z), f.nx, 0, f.nz, u1, v1b, shadeRGB(col, contactAO(yTop)));
     const p3 = b.vertex(worldX(f, xa, z), f.y0 + yTop, worldZ(f, xa, z), f.nx, 0, f.nz, u0, v1a, shadeRGB(col, contactAO(yTop)));
-    b.quad(p0, p1, p2, p3);
+    // outward-facing: the frame is left-handed, so this order is reversed
+    b.quad(p0, p3, p2, p1);
   }
   // the small weathering slope back to the wall plane
   deck(b, f, atlas, rect, x0, 0, x1, z, yTop, shadeRGB(col, 1.02 * contactAO(yTop)), 1, T);
@@ -1002,7 +1010,8 @@ export function shopfront(
   opening(k, x0, y0, x1, y1, {
     leaf: shuttered ? atlas.rect('shutterRoll') : atlas.rect('shopGlass'),
     leafColor: shuttered ? joinery : WHITE,
-    glow: shuttered ? [0, 0, 0] : [0.85, 0.15, 0.2],
+    // (intensity, warmth, phase) — a shop interior is bright and incandescent
+    glow: shuttered ? [0, 0, 0] : [0.62, 0.1, 0.55],
     depth: 0.22,
   });
   // fascia board
@@ -1046,7 +1055,7 @@ export function shopfront(
       const r1 = b.vertex(worldX(f, xb, proj), f.y0 + vy - 0.16, worldZ(f, xb, proj), f.nx, 0, f.nz, u1, v0, shadeRGB(WHITE, 0.92));
       const r2 = b.vertex(worldX(f, xb, proj), f.y0 + vy, worldZ(f, xb, proj), f.nx, 0, f.nz, u1, v1, WHITE);
       const r3 = b.vertex(worldX(f, xa, proj), f.y0 + vy, worldZ(f, xa, proj), f.nx, 0, f.nz, u0, v1, WHITE);
-      b.quad(r0, r1, r2, r3);
+      b.quad(r0, r3, r2, r1);
     }
     // the awning's shadow on the wall behind it
     undersideShadow(k, ax0, ax1, ay - 0.02, 0.55, 0.5);

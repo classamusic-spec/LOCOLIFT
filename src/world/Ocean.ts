@@ -146,8 +146,9 @@ vec3 locoWaves( vec2 xz, float depth, out vec3 outNormal, out vec2 outFoam ) {
   float standUp = 1.0 + 0.75 * smoothstep( 0.02, 0.32, shoal ) * ( 1.0 - smoothstep( 0.22, 0.86, shoal ) );
   float gain = uSwell * mix( 0.05, 1.0, shoal ) * standUp;
 
-  vec3 tang = vec3( 1.0, 0.0, 0.0 );
-  vec3 bino = vec3( 0.0, 0.0, 1.0 );
+  // pure derivative *offsets*; the base axes are folded in below
+  vec3 tang = vec3( 0.0 );
+  vec3 bino = vec3( 0.0 );
   vec3 disp = vec3( 0.0 );
   float steep = 0.0;
 
@@ -300,8 +301,10 @@ void main() {
 
   /* --- depth-graded body colour --------------------------------------- */
   float d = max( vDepth, 0.0 );
-  vec3 water = mix( uShallow, uMid, smoothstep( 1.6, 9.0, d ) );
-  water = mix( water, uDeep, smoothstep( 8.0, 19.0, d ) );
+  // wide, overlapping ramps: the sea floor drops fast here, so tight ramps
+  // would put a hard contour ring in the water a few tens of metres out
+  vec3 water = mix( uShallow, uMid, smoothstep( 1.2, 13.0, d ) );
+  water = mix( water, uDeep, smoothstep( 10.0, 24.0, d ) );
   // sunlit sand read through very shallow water — the Caribbean signature
   float sandSee = 1.0 - smoothstep( 0.0, 4.2, d );
   water = mix( water, mix( uSandLit, uShallow, 0.34 ), sandSee * 0.85 );
@@ -327,7 +330,7 @@ void main() {
   fres = mix( 0.022, 1.0, fres );
   // Over a bright sand bottom the upwelling light genuinely wins, so the
   // shallows keep their own colour and only the deep water goes mirror.
-  float reflAmt = fres * mix( 0.15, 0.52, smoothstep( 1.2, 13.0, d ) );
+  float reflAmt = fres * mix( 0.15, 0.46, smoothstep( 1.2, 13.0, d ) );
   vec3 col = mix( water, locoSkyOf( R ), reflAmt );
 
   /* --- sun glitter ----------------------------------------------------- */
@@ -476,7 +479,7 @@ export class Ocean implements WorldLayer {
        * open Atlantic goes deep navy. */
       uShallow: { value: srgb(0x54ded0) },
       uMid: { value: srgb(0x1794c4) },
-      uDeep: { value: srgb(0x0d3f66) },
+      uDeep: { value: srgb(0x11507f) },
       uSandLit: { value: srgb(0xe4dcb2) },
       uFoamCol: { value: srgb(0xf6fcfb) },
       uSunDir: { value: new THREE.Vector3(0.4, 0.72, 0.56) },
@@ -666,19 +669,23 @@ function buildDisc(radius: number, rings: number, segments: number): THREE.Buffe
     }
   }
 
-  // centre fan
+  // Winding: vertices run counter-clockwise in XZ as the angle increases, so
+  // the triangles have to be emitted in reverse to face +Y. Getting this
+  // backwards makes the entire sea back-face cull, and what you are then
+  // looking at is the sky dome's below-horizon colour — which is close enough
+  // to plausible water that it does not read as a bug.
   for (let s = 0; s < segments; s++) {
     const a = ringStart[0] + s;
     const b = ringStart[0] + ((s + 1) % segments);
-    idx.push(0, a, b);
+    idx.push(0, b, a);
   }
   for (let r = 0; r < rings - 1; r++) {
     const i0 = ringStart[r];
     const i1 = ringStart[r + 1];
     for (let s = 0; s < segments; s++) {
       const sn = (s + 1) % segments;
-      idx.push(i0 + s, i1 + s, i1 + sn);
-      idx.push(i0 + s, i1 + sn, i0 + sn);
+      idx.push(i0 + s, i1 + sn, i1 + s);
+      idx.push(i0 + s, i0 + sn, i1 + sn);
     }
   }
 

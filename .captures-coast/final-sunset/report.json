@@ -1,0 +1,27 @@
+{
+  "url": "http://127.0.0.1:5191",
+  "shots": [
+    ".captures-coast/final-sunset/a-beach-west.png",
+    ".captures-coast/final-sunset/b-waterline.png",
+    ".captures-coast/final-sunset/c-overview.png",
+    ".captures-coast/final-sunset/d-malecon.png"
+  ],
+  "errors": [
+    "Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ],
+  "stats": {
+    "drawCalls": 200,
+    "triangles": 678746,
+    "geometries": 136,
+    "textures": 38,
+    "programs": 40,
+    "systems": 10,
+    "elapsed": 1.4,
+    "speed": 7.13,
+    "boost": 0.163,
+    "wheelsOnGround": 0,
+    "camDistance": 8.71,
+    "camFov": 65.1,
+    "bank": 0
+  }
+}
