@@ -967,7 +967,8 @@
   transform: translateX(-50%);
   width: min(56ch, 44vw);
   display: none;
-  gap: 0.4em;
+  max-height: calc(var(--ll-fs-md) * 4.3);
+  overflow: hidden;
   padding: var(--ll-sp-2) var(--ll-sp-4);
   border-radius: var(--ll-r-md);
   background: rgba(4, 8, 12, 0.82);
@@ -980,21 +981,18 @@
 }
 
 .ll-sub.is-live {
-  display: flex;
+  display: block;
 }
 
 .ll-sub__who {
   font-weight: 900;
   color: var(--ll-player);
   white-space: nowrap;
+  margin-right: 0.4em;
 }
 
 .ll-sub__text {
   font-weight: 600;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
 }
 
 /* score popups -------------------------------------------------------------- */
@@ -1161,7 +1159,7 @@
 .ll-nav__arrow {
   position: absolute;
   left: 50%;
-  top: 72%;
+  top: 69%;
   transform: translate(-50%, -50%) rotate(var(--turn, 0deg));
   width: calc(104px * var(--ll-ui-scale));
   transition: opacity var(--ll-t-base) linear;
@@ -2473,15 +2471,14 @@
 
 .ll-toasts {
   position: absolute;
-  left: 50%;
-  bottom: calc(var(--pad-b) + var(--ll-fs-md) * 4.8 + var(--ll-sp-4));
-  transform: translateX(-50%);
+  left: var(--pad);
+  top: calc(var(--pad) + var(--ll-fs-3xl) * 3.7);
   display: flex;
-  flex-direction: column-reverse;
-  align-items: center;
+  flex-direction: column;
+  align-items: flex-start;
   gap: var(--ll-sp-2);
   width: max-content;
-  max-width: min(60vw, 640px);
+  max-width: min(34vw, 420px);
 }
 
 .ll-toast {

@@ -671,8 +671,8 @@ export class SfxLibrary {
     b1.frequency.linearRampToValueAtTime(1500 * p, t + dur * 0.4);
     b1.frequency.linearRampToValueAtTime(1050 * p, t + dur);
 
-    const e1 = envPerc(g1.gain, t, 0.34 * v.vol, 0.035, dur);
-    envPerc(g2.gain, t, 0.15 * v.vol, 0.05, dur * 0.85);
+    const e1 = envPerc(g1.gain, t, 0.45 * v.vol, 0.035, dur);
+    envPerc(g2.gain, t, 0.2 * v.vol, 0.05, dur * 0.85);
 
     // Rubber roll underneath so it is not pure hiss.
     const roll = v.noise('brown');
@@ -1329,23 +1329,23 @@ export class SfxLibrary {
 
   private rUiMove(v: VoiceScope): void {
     const t = v.t0;
-    const end = this.pluckNote(v, 880 * v.pitch, t, 0.09 * v.vol, 0.13, 1.6);
+    const end = this.pluckNote(v, 880 * v.pitch, t, 0.16 * v.vol, 0.13, 1.6);
     v.mark(end + 0.02);
   }
 
   private rUiConfirm(v: VoiceScope): void {
     const t = v.t0;
     const p = v.pitch;
-    this.pluckNote(v, 659.25 * p, t, 0.12 * v.vol, 0.22, 1.5);
-    const end = this.pluckNote(v, 987.77 * p, t + 0.062, 0.13 * v.vol, 0.34, 1.5);
+    this.pluckNote(v, 659.25 * p, t, 0.2 * v.vol, 0.22, 1.5);
+    const end = this.pluckNote(v, 987.77 * p, t + 0.062, 0.22 * v.vol, 0.34, 1.5);
     v.mark(end + 0.02);
   }
 
   private rUiBack(v: VoiceScope): void {
     const t = v.t0;
     const p = v.pitch;
-    this.pluckNote(v, 587.33 * p, t, 0.1 * v.vol, 0.18, 0.9);
-    const end = this.pluckNote(v, 415.3 * p, t + 0.055, 0.11 * v.vol, 0.3, 0.8);
+    this.pluckNote(v, 587.33 * p, t, 0.17 * v.vol, 0.18, 0.9);
+    const end = this.pluckNote(v, 415.3 * p, t + 0.055, 0.19 * v.vol, 0.3, 0.8);
     v.mark(end + 0.02);
   }
 
@@ -1417,7 +1417,7 @@ export class SfxLibrary {
       bp.connect(bg);
       bg.connect(bus);
     }
-    const e = envSwell(bus.gain, t, 0.3 * amp, dur * 0.3, dur * 0.25, dur * 0.55);
+    const e = envSwell(bus.gain, t, 0.5 * amp, dur * 0.3, dur * 0.25, dur * 0.55);
     v.fire(src, t, e + 0.02);
 
     // Individual voices.
@@ -1433,7 +1433,7 @@ export class SfxLibrary {
       o.frequency.setValueAtTime(f, at);
       o.frequency.exponentialRampToValueAtTime(f * 1.35, at + 0.12);
       o.frequency.exponentialRampToValueAtTime(f * 0.9, at + 0.3);
-      const ge = envPerc(g.gain, at, 0.05 * amp * v.vary(0.5, 1.2), 0.05, 0.28);
+      const ge = envPerc(g.gain, at, 0.08 * amp * v.vary(0.5, 1.2), 0.05, 0.28);
       v.fire(o, at, ge + 0.02);
     }
     v.mark(e + 0.1);
@@ -1443,7 +1443,7 @@ export class SfxLibrary {
   private rSeagull(v: VoiceScope): void {
     const t = v.t0;
     const p = v.pitch * v.vary(0.88, 1.15);
-    const amp = v.vol * 0.55;
+    const amp = v.vol * 2.6;
     const cries = 2 + Math.floor(v.rng.next() * 3 * v.variation);
     let at = t;
     let end = t;

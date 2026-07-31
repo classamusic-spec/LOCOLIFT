@@ -194,10 +194,10 @@ export class Ambience {
   setWeather(kind: WeatherKind): void {
     this.weather = kind;
     if (kind === 'rain') {
-      this.sfx.startLoop('rainLoop', { volume: 0.55, pitch: 1 });
+      this.sfx.startLoop('rainLoop', { volume: 0.42, pitch: 1 });
       this.thunderTimer = 25 + this.rng.next() * 30;
     } else if (kind === 'storm') {
-      this.sfx.startLoop('rainLoop', { volume: 0.9, pitch: 0.92 });
+      this.sfx.startLoop('rainLoop', { volume: 0.68, pitch: 0.92 });
       this.thunderTimer = 3 + this.rng.next() * 6;
     } else {
       this.sfx.stopLoop('rainLoop', 2.5);

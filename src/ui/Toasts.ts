@@ -202,7 +202,10 @@ function buildIcon(id?: string): Node {
   switch (id) {
     case 'money':
     case 'fare':
-      return glyph('M12 3 V21 M8 7.5 A3.2 3.2 0 0 1 11.2 4.5 H13 A3.2 3.2 0 0 1 13 11 H11 A3.2 3.2 0 0 0 11 17.5 H13 A3.2 3.2 0 0 0 16 14.5');
+      // a banknote reads at 20 px; a lone "$" stroke does not
+      return glyph(
+        'M2.6 5.6 H21.4 A1 1 0 0 1 22.4 6.6 V17.4 A1 1 0 0 1 21.4 18.4 H2.6 A1 1 0 0 1 1.6 17.4 V6.6 A1 1 0 0 1 2.6 5.6 Z M12 8.6 A3.4 3.4 0 1 1 12 15.4 A3.4 3.4 0 0 1 12 8.6 Z M4.8 9.2 V14.8 M19.2 9.2 V14.8',
+      );
     case 'time':
       return glyph('M12 6.5 V12 L15.6 14.2 M12 3.4 A8.6 8.6 0 1 0 12 20.6 A8.6 8.6 0 0 0 12 3.4 Z');
     case 'star':

@@ -235,7 +235,7 @@ export class AudioSystem implements System {
       this.sfxBus = gainNode(ctx, 0.85);
       this.sfxBus.connect(this.masterPre);
 
-      this.ambBus = gainNode(ctx, 0.7);
+      this.ambBus = gainNode(ctx, 0.45);
       this.ambBus.connect(this.masterPre);
 
       this.sfx = new SfxLibrary(ctx, this.sfxBus, this.seed ^ 0x51f1);
@@ -555,12 +555,12 @@ export class AudioSystem implements System {
     }
     if (force || Math.abs(musicV - this.lastMusic) > 1e-3) {
       this.lastMusic = musicV;
-      this.musicBus.gain.setTargetAtTime(musicV * 0.62, t, 0.08);
+      this.musicBus.gain.setTargetAtTime(musicV * 0.82, t, 0.08);
     }
     if (force || Math.abs(sfxV - this.lastSfx) > 1e-3) {
       this.lastSfx = sfxV;
       this.sfxBus.gain.setTargetAtTime(sfxV, t, 0.05);
-      this.ambBus.gain.setTargetAtTime(sfxV * 0.72, t, 0.12);
+      this.ambBus.gain.setTargetAtTime(sfxV * 0.5, t, 0.12);
     }
   }
 

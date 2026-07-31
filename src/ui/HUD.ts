@@ -817,10 +817,11 @@ export class HUD {
 
     /* destination distance ---------------------------------------------- */
     if (this.pendingDistance >= 0) {
+      // quantised to 5 m so it agrees with the navigation pin exactly
       this.destDist.set(
         this.pendingDistance >= 1000
           ? `${(this.pendingDistance / 1000).toFixed(1)} km`
-          : `${Math.round(this.pendingDistance)} m`,
+          : `${Math.round(this.pendingDistance / 5) * 5} m`,
       );
     } else {
       this.destDist.set('');

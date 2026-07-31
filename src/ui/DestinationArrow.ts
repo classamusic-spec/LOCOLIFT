@@ -215,11 +215,11 @@ function buildArrow(): SVGSVGElement {
   s.append(
     svg('path', {
       d: body,
-      transform: 'translate(0, 9)',
+      transform: 'translate(0, 7)',
       fill: 'rgba(6,9,13,0.55)',
       class: 'll-nav__drop',
     }),
-    svg('path', { d: body, fill: 'var(--ll-ink)', transform: 'translate(0, 5)' }),
+    svg('path', { d: body, fill: 'var(--ll-ink)', transform: 'translate(0, 4)' }),
     svg('path', { d: body, fill: 'var(--nav-tone, var(--ll-dest))' }),
     svg('path', {
       d: 'M60 4 L116 62 L88 62 L88 74 L32 74 L32 62 L4 62 Z',

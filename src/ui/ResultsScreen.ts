@@ -162,9 +162,9 @@ export class ResultsScreen implements NavigableScreen {
     /* meta --------------------------------------------------------------- */
     const meta = el('div', 'll-results__meta');
     const fares = metaChip('CARRERAS', 'Fares');
-    const combo = metaChip('MEJOR COMBO', 'Best combo');
+    const combo = metaChip('MEJOR COMBO', 'Best');
     const banked = metaChip('AL BANCO', 'Banked');
-    const bank = metaChip('BANCO TOTAL', 'Bank total');
+    const bank = metaChip('BANCO TOTAL', 'Total');
     meta.append(fares.node, combo.node, banked.node, bank.node);
     this.faresSlot = fares.slot;
     this.comboSlot = combo.slot;
