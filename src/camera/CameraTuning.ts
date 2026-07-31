@@ -23,8 +23,6 @@
 export const SPEED = {
   /** speed that maps to "full" framing — pull-back, FOV and lead all max here */
   top: 52,
-  /** boosted top speed; above `top` the curves keep easing gently, not clamp hard */
-  topBoost: 58,
   /** below this the velocity vector is too noisy to aim the camera with */
   velocityValid: 2.5,
   /** velocity fully overrides the chassis facing for look-ahead above this */
@@ -113,7 +111,7 @@ export const FOLLOW = {
    * blow-up can reach it; it exists so an absurd reported velocity cannot
    * teleport the rig into the next district.
    */
-  maxTrail: 9.0,
+  maxTrail: 6.0,
 
   /**
    * Hard leash: the camera is never allowed further from the pivot than
@@ -152,10 +150,6 @@ export const FOV = {
 
 /** Look-ahead framing: where the camera aims, versus where the car is. */
 export const LOOK = {
-  /** metres ahead of the pivot at rest */
-  leadBase: 3.2,
-  /** additional metres of lead at top speed */
-  leadSpeed: 13.0,
   /**
    * While looking backwards the lead flips behind the car, but shortened —
    * you want to see what's chasing you, not the horizon behind it.
@@ -240,8 +234,6 @@ export const DRIFT = {
   rollPerSlipRad: -0.16,
   /** absolute roll clamp (rad, ≈7.5°) — more than this and it reads as a bug */
   rollMax: 0.13,
-  /** roll never fully disappears at cameraSway 0; this is its floor */
-  rollSwayFloor: 0.25,
 
   /** extra metres of pull-back at full drift, so the sideways car still fits */
   pullback: 1.3,

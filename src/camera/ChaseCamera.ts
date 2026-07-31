@@ -129,7 +129,6 @@ export class ChaseCamera implements System {
   private readonly camera: THREE.PerspectiveCamera;
   private target: CameraTarget;
   private physics: PhysicsWorldAPI | null;
-  private readonly bus: EventBus;
 
   /* ------------------------------------------------------------- mode state */
 
@@ -188,7 +187,6 @@ export class ChaseCamera implements System {
 
   private settings: SettingsState = DEFAULT_SETTINGS;
   private lastInput: InputState | null = null;
-  private qualityTier: QualityTier = DEFAULT_SETTINGS.quality;
   /** guards the NaN recovery path against recursing */
   private recovering = false;
 
@@ -221,7 +219,6 @@ export class ChaseCamera implements System {
     this.camera = camera;
     this.target = target;
     this.physics = physics;
-    this.bus = bus;
     this.shake = new CameraShake(bus);
 
     copyModeParams(CAMERA_MODES.chase, this.params);
@@ -304,7 +301,12 @@ export class ChaseCamera implements System {
     return this._fovKick;
   }
 
-  /** Copy the eye position out without allocating. */
+  /**
+   * The solved rig position, *before* shake and handheld sway are applied.
+   * Copy-out, no allocation. This — not `camera.position` — is what an audio
+   * listener or a spatial-audio panner should follow: a listener that shakes
+   * with the camera smears every positional sound on impact.
+   */
   getEyePosition(out: THREE.Vector3): THREE.Vector3 {
     return out.copy(this.eye);
   }
@@ -389,7 +391,6 @@ export class ChaseCamera implements System {
 
   init(ctx: GameContext): void {
     this.settings = ctx.settings;
-    this.qualityTier = ctx.settings.quality;
     this.lastInput = ctx.input ?? null;
     if (ctx.renderer && typeof ctx.renderer.getSize === 'function') {
       ctx.renderer.getSize(this.viewSize);
@@ -414,8 +415,13 @@ export class ChaseCamera implements System {
     this.solve(dt, ctx.rawDt, ctx.settings, input, false);
   }
 
-  onQualityChange(tier: QualityTier, settings: SettingsState): void {
-    this.qualityTier = tier;
+  /**
+   * The rig costs one sphere-cast a frame at every tier, so there is nothing to
+   * scale down. What matters here is re-reading `settings`: `screenShake`,
+   * `cameraSway` and `photosensitiveSafe` all change the rig's behaviour and a
+   * settings apply can land between frames.
+   */
+  onQualityChange(_tier: QualityTier, settings: SettingsState): void {
     this.settings = settings;
   }
 
@@ -529,7 +535,7 @@ export class ChaseCamera implements System {
     const vx = vel && Number.isFinite(vel.x) ? vel.x : 0;
     const vy = vel && Number.isFinite(vel.y) ? vel.y : 0;
     const vz = vel && Number.isFinite(vel.z) ? vel.z : 0;
-    const hSpeed = Math.hypot(vx, vz);
+    const hSpeed = Math.sqrt(vx * vx + vz * vz);
     const velValid = hSpeed >= SPEED.velocityValid;
 
     const airborne = t.isAirborne === true;
@@ -758,20 +764,27 @@ export class ChaseCamera implements System {
      *     is the classic nausea source. Paired with the pivot low-pass above,
      *     this is smooth input into a tight output.
      *
-     * The subtlety: the thing being chased is *moving*. Naively damping the
-     * error toward zero gives a discrete steady-state lag of
-     * `v·dt / (1 - e^(-r·dt))`, which is framerate **dependent** — the camera
-     * genuinely sits further back at 30 fps than at 144 fps. Solving the actual
-     * ODE `ė = -r·e - v` over the step instead gives
+     * The subtlety, and it is worth spelling out because getting it wrong is
+     * invisible until someone plays on a 144 Hz monitor: the thing being chased
+     * is *moving*, and `desired` is recomputed from this frame's transform. So
+     * `eye - desired` is the error against the position the rig should reach at
+     * the *end* of the step, not the start — the desired has already advanced by
+     * `v·dt` underneath us. Damping that quantity toward zero has fixed point
+     * `v·dt·e^(-r·dt) / (1 - e^(-r·dt))`, which is ~`v/r` only in the limit and
+     * is measurably larger at 30 fps than at 144 fps. The camera would literally
+     * sit further behind the car on a slower machine.
      *
-     *     e(t+dt) = e·e^(-r·dt) - (v/r)·(1 - e^(-r·dt))  ≡  damp(e, -v/r, r, dt)
+     * Undoing the re-anchoring (`err += v·dt`) restores the error against the
+     * previous desired, and the update becomes the exact solution of
+     * `ė = -r·e - v` over the step:
      *
-     * i.e. damp the error toward `-v/r` rather than toward 0. That is exact for
-     * constant velocity, framerate independent at any dt, and it makes the trail
-     * an explicit, tunable quantity (`v/r` metres) instead of an accident of the
-     * frame rate. `feedForward` then scales that trail down per mode: the chase
-     * rig keeps half of it because the lag *is* the sensation of speed, while a
-     * bumper cam cancels it entirely and tracks the bull bar exactly. */
+     *     e(t+dt) = e·e^(-r·dt) + T·(1 - e^(-r·dt))  ≡  damp(e, T, r, dt)
+     *
+     * whose fixed point is exactly `T`. Setting `T = -v/r` reproduces the ideal
+     * continuous trail at any frame rate; `feedForward` then scales that trail
+     * down per mode. The chase rig keeps half of it, because the lag *is* the
+     * sensation of speed. A bumper cam cancels it entirely (`T = 0`) and tracks
+     * the bull bar with exactly zero steady-state error at 50 m/s. */
     const rateLat = FOLLOW.lateral * rateScale;
     const rateVert = FOLLOW.vertical * rateScale;
     const rateLong = FOLLOW.longitudinal * rateScale;
@@ -788,6 +801,10 @@ export class ChaseCamera implements System {
       this.eye.copy(this.desired).add(this.err);
     } else {
       this.err.copy(this.eye).sub(this.desired).applyQuaternion(this.qFrameInv);
+      // undo this frame's re-anchoring — see the derivation above
+      this.err.x += scratch.v4.x * step;
+      this.err.y += scratch.v4.y * step;
+      this.err.z += scratch.v4.z * step;
       this.err.x = damp(this.err.x, trailX, rateLat, sdt);
       this.err.y = damp(this.err.y, trailY, rateVert, sdt);
       this.err.z = damp(this.err.z, trailZ, rateLong, sdt);
@@ -994,13 +1011,13 @@ export class ChaseCamera implements System {
    */
   private extractYaw(q: THREE.Quaternion): number {
     const f = scratch.v1.set(0, 0, -1).applyQuaternion(q);
-    if (Math.hypot(f.x, f.z) >= SAFETY.yawDegenerateThreshold) {
+    if (f.x * f.x + f.z * f.z >= SAFETY.yawDegenerateThreshold * SAFETY.yawDegenerateThreshold) {
       this.lastCarYaw = Math.atan2(-f.x, -f.z);
       return this.lastCarYaw;
     }
     const s = f.y >= 0 ? -1 : 1;
     const u = scratch.v2.set(0, 1, 0).applyQuaternion(q).multiplyScalar(s);
-    if (Math.hypot(u.x, u.z) >= SAFETY.yawDegenerateThreshold) {
+    if (u.x * u.x + u.z * u.z >= SAFETY.yawDegenerateThreshold * SAFETY.yawDegenerateThreshold) {
       this.lastCarYaw = Math.atan2(-u.x, -u.z);
     }
     return this.lastCarYaw;
@@ -1021,7 +1038,10 @@ export class ChaseCamera implements System {
     const halfH = near * Math.tan(fovDeg * DEG2RAD * 0.5);
     const aspect = Number.isFinite(this.camera.aspect) && this.camera.aspect > 0 ? this.camera.aspect : 1;
     const halfW = halfH * aspect;
-    return Math.max(COLLISION.probeRadiusMin, Math.hypot(halfW, halfH) + COLLISION.probeMargin);
+    return Math.max(
+      COLLISION.probeRadiusMin,
+      Math.sqrt(halfW * halfW + halfH * halfH) + COLLISION.probeMargin,
+    );
   }
 
   /**
@@ -1110,6 +1130,39 @@ export class ChaseCamera implements System {
     // damper's job, so the recovery inherits the rig's easing for free.
     const finalDist = Math.min(eyeDist, this.collisionDist);
     this.resolved.copy(this.anchor).addScaledVector(this.rayDir, finalDist);
+
+    /* Depenetration along the contact normal.
+     *
+     * Sliding along the ray is not sufficient in one specific case, and it is a
+     * case Old San Juan produces constantly: when the *pivot itself* is within
+     * the probe radius of a façade — the Jeep nosed into a wall in a 3 m alley —
+     * the cast reports contact at distance 0, and the floor at
+     * `hardMinDistance` then places the camera 1.15 m along a ray that is
+     * already heading into the masonry. No amount of clamping along that ray
+     * can help; the ray is the problem.
+     *
+     * The hit's own surface data fixes it exactly. `(resolved - point)·normal`
+     * is the signed clearance from the contact plane; if it is less than the
+     * probe radius, pushing along the normal by the shortfall puts the camera
+     * precisely on the safe side with no overshoot. Guarded on the normal being
+     * unit length, since a physics backend may report a degenerate normal for a
+     * deeply-overlapping cast, and clamped so a bad normal cannot launch the
+     * camera. */
+    if (hit && hit.normal) {
+      const n = hit.normal;
+      const nLenSq = n.x * n.x + n.y * n.y + n.z * n.z;
+      if (nLenSq > 0.5 && nLenSq < 1.5 && hit.point) {
+        const clearance =
+          (this.resolved.x - hit.point.x) * n.x +
+          (this.resolved.y - hit.point.y) * n.y +
+          (this.resolved.z - hit.point.z) * n.z;
+        if (clearance < probe) {
+          const push = Math.min(probe - clearance, probe + COLLISION.hardMinDistance);
+          this.resolved.addScaledVector(n, push);
+        }
+      }
+    }
+
     this.blockedRaw = clamp01(1 - this.collisionDist / Math.max(desiredDist, SAFETY.epsilon));
   }
 
