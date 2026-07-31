@@ -49,6 +49,14 @@ import { IRON_HEX, IRON_RUST_HEX } from './Facades';
  *   v 0.00 – 0.50  solid painted iron (slabs, rails, brackets)
  *   v 0.50 – 1.00  balustrade: bar in the middle of every pitch, opaque top
  *                  and bottom rails baked into the band
+ *
+ * The balustrade band is **alpha cut-out**: everything between the bars is
+ * cleared, and the material that draws it runs `alphaTest`. Both halves of
+ * that contract matter — an opaque material sampling this texture renders the
+ * cleared pixels as solid black, which is exactly the black band that ran
+ * along every balcony line in the pre-fix capture. `wrapS` must likewise be
+ * `RepeatWrapping`, or a card spanning 24 balusters clamps every bar into the
+ * last texel column and the whole rail collapses to one flat slab.
  */
 export function ironTexture(textures: TextureFactory): THREE.Texture {
   return textures.texture('buildings:iron', () => {
@@ -73,32 +81,35 @@ export function ironTexture(textures: TextureFactory): THREE.Texture {
     }
 
     // --- balustrade half (canvas top) ---
-    const barW = W * 0.19;
+    const barW = W * 0.3;
     const bx = (W - barW) * 0.5;
     const bg = ctx.createLinearGradient(bx, 0, bx + barW, 0);
-    bg.addColorStop(0, '#8a8a8a');
-    bg.addColorStop(0.32, '#ffffff');
-    bg.addColorStop(0.7, '#c0c0c0');
-    bg.addColorStop(1, '#6e6e6e');
+    bg.addColorStop(0, '#7a7a7a');
+    bg.addColorStop(0.3, '#ffffff');
+    bg.addColorStop(0.68, '#c4c4c4');
+    bg.addColorStop(1, '#606060');
     ctx.fillStyle = bg;
     ctx.fillRect(bx, 0, barW, H * 0.5);
     // a twist half way up, which is what wrought iron actually looks like
-    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
     for (let i = 0; i < 5; i++) {
       const y = H * (0.16 + i * 0.045);
-      ctx.fillRect(bx - W * 0.05, y, barW + W * 0.1, H * 0.012);
+      ctx.fillRect(bx - W * 0.06, y, barW + W * 0.12, H * 0.013);
     }
     // opaque top and bottom rails baked into the band
     ctx.fillStyle = '#efefef';
-    ctx.fillRect(0, 0, W, H * 0.035);
+    ctx.fillRect(0, 0, W, H * 0.045);
     ctx.fillStyle = '#dcdcdc';
-    ctx.fillRect(0, H * 0.45, W, H * 0.05);
+    ctx.fillRect(0, H * 0.43, W, H * 0.07);
 
     const tex = new THREE.CanvasTexture(c as HTMLCanvasElement);
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.generateMipmaps = true;
     tex.minFilter = THREE.LinearMipmapLinearFilter;
     tex.magFilter = THREE.LinearFilter;
+    // one baluster pitch per u unit — the whole point of the card layout
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
     return tex;
   });
 }
@@ -184,12 +195,13 @@ function bracket(p: PartBuilder, x: number, t: number, pr: number, drop: number,
       p.tri(idx[0], idx[3], idx[2]);
     }
   }
-  // the scrolled outer edge
+  // The scrolled outer edge, one strip per profile segment. A second card used
+  // to be laid at x = 0 — inside the 0.05 m thickness, where nothing can ever
+  // see it: 2 triangles x ~5 brackets x ~4 000 balconies of pure waste.
   for (let i = 1; i < prof.length; i++) {
     const a = prof[i - 1];
     const b = prof[i];
     if (i === 1) continue;
-    p.cardZY(a[0], a[1], b[0], b[1], 0, u, v, u, v, shadeRGB(c, 0.95));
     const q0 = p.vert(x0, a[1], a[0], 0, 0, 1, u, v, shadeRGB(c, 1.05));
     const q1 = p.vert(x1, a[1], a[0], 0, 0, 1, u, v, shadeRGB(c, 1.05));
     const q2 = p.vert(x1, b[1], b[0], 0, 0, 1, u, v, shadeRGB(c, 1.05));
@@ -199,15 +211,15 @@ function bracket(p: PartBuilder, x: number, t: number, pr: number, drop: number,
 }
 
 /** railing run: two parallel alpha cards, so the bars keep depth at a raking angle */
-function railRun(p: PartBuilder, plane: 'x' | 'z', a0: number, a1: number, at: number, h: number, c: RGB): void {
+function railRun(p: PartBuilder, plane: 'x' | 'z', a0: number, a1: number, at: number, h: number, c: RGB, single = false): void {
   const bars = Math.max(2, Math.round(Math.abs(a1 - a0) / BALCON.barPitch));
   const off = 0.011;
   if (plane === 'z') {
     p.cardXY(a0, 0, a1, h, at + off, 0, RAIL_V0, bars, RAIL_V1, c, 1);
-    p.cardXY(a0, 0, a1, h, at - off, 0, RAIL_V0, bars, RAIL_V1, shadeRGB(c, 0.8), 1);
+    if (!single) p.cardXY(a0, 0, a1, h, at - off, 0, RAIL_V0, bars, RAIL_V1, shadeRGB(c, 0.8), 1);
   } else {
     p.cardZY(a0, 0, a1, h, at + off, 0, RAIL_V0, bars, RAIL_V1, c, 1);
-    p.cardZY(a0, 0, a1, h, at - off, 0, RAIL_V0, bars, RAIL_V1, shadeRGB(c, 0.8), -1);
+    if (!single) p.cardZY(a0, 0, a1, h, at - off, 0, RAIL_V0, bars, RAIL_V1, shadeRGB(c, 0.8), -1);
   }
 }
 
@@ -230,14 +242,14 @@ function ironBalcony(w: number, worn: boolean): THREE.BufferGeometry {
   }
   // balustrade: front run plus two returns
   railRun(p, 'z', -hw, hw, d - 0.03, BALCON.railH, c);
-  railRun(p, 'x', 0.05, d - 0.03, -hw + 0.03, BALCON.railH, c);
-  railRun(p, 'x', 0.05, d - 0.03, hw - 0.03, BALCON.railH, c);
+  railRun(p, 'x', 0.05, d - 0.03, -hw + 0.03, BALCON.railH, c, true);
+  railRun(p, 'x', 0.05, d - 0.03, hw - 0.03, BALCON.railH, c, true);
   // top rail, Ø 0.032 — the silhouette that survives at 60 m
   const t = BALCON.topRailD;
   const y = BALCON.railH;
   p.boxUV(-hw - 0.02, y - t, d - 0.03 - t * 0.5, hw + 0.02, y, d - 0.03 + t * 0.5, SOLID.u0, SOLID.v0, SOLID.u1, SOLID.v1, c, FACE_PY | FACE_PZ | FACE_NZ);
-  p.boxUV(-hw - 0.02, y - t, 0.03, -hw + 0.02 + t, y, d, SOLID.u0, SOLID.v0, SOLID.u1, SOLID.v1, c, FACE_PY | FACE_PX | FACE_NX);
-  p.boxUV(hw - 0.02 - t, y - t, 0.03, hw + 0.02, y, d, SOLID.u0, SOLID.v0, SOLID.u1, SOLID.v1, c, FACE_PY | FACE_PX | FACE_NX);
+  p.boxUV(-hw - 0.02, y - t, 0.03, -hw + 0.02 + t, y, d, SOLID.u0, SOLID.v0, SOLID.u1, SOLID.v1, c, FACE_PY | FACE_NX);
+  p.boxUV(hw - 0.02 - t, y - t, 0.03, hw + 0.02, y, d, SOLID.u0, SOLID.v0, SOLID.u1, SOLID.v1, c, FACE_PY | FACE_PX);
   return p.build();
 }
 
@@ -307,12 +319,16 @@ function woodBalcony(w: number, atlas: FacadeAtlas): THREE.BufferGeometry {
   return p.build();
 }
 
-/** terracotta pot for balcony and azotea planting */
+/**
+ * Terracotta pot. Deliberately one 5-sided tapered prism with a cap: there are
+ * ~11 000 of these on the district's balconies and azoteas, so every triangle
+ * here is multiplied by four figures — the flared rim is worth 3 triangles, not
+ * a second barrel.
+ */
 function plantPot(atlas: FacadeAtlas): THREE.BufferGeometry {
   const p = new PartBuilder();
   const rect = atlas.rect('plinth');
-  p.prism(0, 0, 0.11, 0.15, 0, 0.26, 6, rect, atlas, linearRGB(0xb5613a), false);
-  p.prism(0, 0, 0.16, 0.16, 0.26, 0.31, 6, rect, atlas, linearRGB(0xc06b42), true);
+  p.prism(0, 0, 0.105, 0.155, 0, 0.29, 5, rect, atlas, linearRGB(0xb5613a), true);
   return p.build();
 }
 
@@ -413,7 +429,7 @@ export class BalconyFactory {
       reg.define(`balconette${i}`, balconette(BALCONETTE_WIDTHS[i]), 'iron');
     }
     reg.define('pot', plantPot(atlas), 'atlas');
-    reg.define('leafS', leafCluster(0.55, 3), 'foliage');
+    reg.define('leafS', leafCluster(0.55, 2), 'foliage');
     reg.define('leafL', leafCluster(0.95, 3), 'foliage');
     reg.define('vine', trailingVine(), 'foliage');
     reg.define('laundry', hangingCloth(atlas, false), 'atlas');
@@ -469,7 +485,7 @@ export class BalconyFactory {
       // §1.4 — ≥ 60 % of balconies carry 2–5 pots
       if (rng.bool(0.68)) {
         this.planted++;
-        const count = rng.int(2, 5);
+        const count = rng.int(2, slot.bays > 2 ? 5 : 4);
         for (let i = 0; i < count; i++) {
           const t = count === 1 ? 0.5 : i / (count - 1);
           const px = lerp(slot.x0 + 0.3, slot.x1 - 0.3, t) + rng.range(-0.12, 0.12);

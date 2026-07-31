@@ -33,11 +33,13 @@ import {
   WHITE,
   azulejoPlaque,
   box,
+  contactAO,
   cornice,
   cuartoEsquinero,
   dripStreak,
   encadrement,
   floatingLintel,
+  hangingSign,
   linearRGB,
   makeFrame,
   numberTile,
@@ -50,8 +52,9 @@ import {
   shopfront,
   sidePanel,
   stringCourse,
+  undersideShadow,
 } from './BuildingKit';
-import type { Frame, KitCtx, RGB } from './BuildingKit';
+import type { Frame, KitCtx, ParapetProfile, RGB } from './BuildingKit';
 
 /* ------------------------------------------------------------- palettes */
 
@@ -353,6 +356,12 @@ export interface BuildingPlan {
   doorBay: number;
   lightWell: LightWell | null;
   balconies: BalconySlot[];
+  /** §6.2 R6 — the skyline event this building contributes */
+  parapetProfile: ParapetProfile;
+  /** §3.2 salt haze: extra top-of-wall bleaching on seaward elevations */
+  haze: number;
+  /** a projecting bracket sign over the shopfront */
+  hangSign: boolean;
   seed: number;
   rng: RNG;
 }
@@ -399,7 +408,13 @@ export function planLot(input: PlanInput): BuildingPlan {
     if (g < lowest) lowest = g;
   }
   const floorY = frontMax + 0.09;
-  const frame = makeFrame(p0.x, p0.y, p1.x, p1.y, floorY);
+  /* Each building gets its own tiling phase, so the stucco lattice is
+     continuous *within* a house and deliberately out of step with its
+     neighbours — §8.17 is "every stucco wall has the same trowel texture at
+     the same scale and phase". */
+  const phaseU = (lot.seed % 311) / 311 * CASA.stuccoTile;
+  const phaseV = ((lot.seed >> 7) % 271) / 271 * CASA.stuccoTile;
+  const frame = makeFrame(p0.x, p0.y, p1.x, p1.y, floorY, phaseU, phaseV);
 
   const groundAt = (x: number): number => {
     const t = clamp01(x / Math.max(0.001, frame.len));
@@ -499,6 +514,13 @@ export function planLot(input: PlanInput): BuildingPlan {
     doorBay: bays === 1 ? 0 : bays % 2 === 1 ? (bays - 1) / 2 : rng.bool() ? bays / 2 - 1 : bays / 2,
     lightWell,
     balconies: [],
+    // §6.2 R6 — a third of the parapets break the skyline; corners more often
+    parapetProfile: rng.weighted<ParapetProfile>(
+      ['plain', 'piers', 'centre', 'stepped'],
+      input.cornerStart || input.cornerEnd ? [42, 20, 20, 18] : [68, 13, 11, 8],
+    ),
+    haze: lot.zone === 'waterfront' || lot.zone === 'fortress' ? rng.range(0.05, 0.12) : rng.range(0, 0.04),
+    hangSign: rng.bool(0.45),
     seed: lot.seed,
     rng,
   };
@@ -549,10 +571,15 @@ export function composeFacade(plan: BuildingPlan, b: GeomBuilder, atlas: FacadeA
   const rng = new RNG(plan.seed ^ 0x9111);
   const eW = CASA.encadrementW;
   const wall = plan.livery.wall;
+  /* §3.2 weathering: the wall bleaches upward on seaward elevations (salt
+     haze) and grimes downward at the pavement (splash). Both are constants of
+     the whole elevation, so every panel below shares them. */
+  const wallTop = 1.02 + plan.haze;
+  const wallBottom = 0.88;
 
   /* --- plinth: the podium that solves the street slope --- */
   const plinthTop = CASA.plinthH - 0.09;
-  plinth(k, 0, W, plinthTop, plan.groundAt, 0.55);
+  plinth(k, 0, W, plinthTop, plan.groundAt, 0.55, plan.spalled);
 
   /* --- storeys --- */
   for (let s = 0; s < plan.storeys; s++) {
@@ -602,22 +629,27 @@ export function composeFacade(plan: BuildingPlan, b: GeomBuilder, atlas: FacadeA
       if (blind) {
         panel(b, f, atlas, bayRect, bx0, yBandBottom, bx1, ye, 0, bayWall, {
           tile: CASA.stuccoTile,
-          shadeBottom: 0.9,
-          shadeTop: 1.03,
+          shadeBottom: wallBottom,
+          shadeTop: wallTop,
         });
       } else {
         const lx = Math.max(bx0, ox0 - eW);
         const rx = Math.min(bx1, ox1 + eW);
         const by = Math.max(yBandBottom, oy0 - eW);
         const ty = Math.min(ye, oy1 + eW);
-        panel(b, f, atlas, bayRect, bx0, yBandBottom, lx, ye, 0, bayWall, { tile: CASA.stuccoTile, shadeBottom: 0.9, shadeTop: 1.03 });
-        panel(b, f, atlas, bayRect, rx, yBandBottom, bx1, ye, 0, bayWall, { tile: CASA.stuccoTile, shadeBottom: 0.9, shadeTop: 1.03 });
-        if (by > yBandBottom) panel(b, f, atlas, bayRect, lx, yBandBottom, rx, by, 0, bayWall, { tile: CASA.stuccoTile, shadeBottom: 0.88, shadeTop: 1.0 });
-        if (ty < ye) panel(b, f, atlas, bayRect, lx, ty, rx, ye, 0, bayWall, { tile: CASA.stuccoTile, shadeBottom: 1.0, shadeTop: 1.03 });
+        const wOpts = { tile: CASA.stuccoTile, shadeBottom: wallBottom, shadeTop: wallTop };
+        panel(b, f, atlas, bayRect, bx0, yBandBottom, lx, ye, 0, bayWall, wOpts);
+        panel(b, f, atlas, bayRect, rx, yBandBottom, bx1, ye, 0, bayWall, wOpts);
+        if (by > yBandBottom) panel(b, f, atlas, bayRect, lx, yBandBottom, rx, by, 0, bayWall, { tile: CASA.stuccoTile, shadeBottom: wallBottom, shadeTop: 1.0 });
+        if (ty < ye) panel(b, f, atlas, bayRect, lx, ty, rx, ye, 0, bayWall, { tile: CASA.stuccoTile, shadeBottom: 1.0, shadeTop: wallTop });
 
         /* the opening itself */
         if (ground && plan.hasShop && i !== plan.doorBay) {
           shopfront(k, ox0, oy0, ox1, oy1, plan.shopSign, plan.shuttered, plan.awning && lod === 0);
+          // §7.1 — a projecting bracket sign on the bay next to the door
+          if (lod === 0 && plan.hangSign && i === (plan.doorBay + 1) % plan.bays) {
+            hangingSign(k, cx, oy1 + 1.15, plan.shopSign, i < plan.bays * 0.5 ? -1 : 1);
+          }
         } else if (ground && i === plan.doorBay) {
           const grand = plan.lot.zone === 'plazaMayor' || rng.bool(0.18);
           opening(k, ox0, oy0, ox1, oy1, {
@@ -642,7 +674,9 @@ export function composeFacade(plan: BuildingPlan, b: GeomBuilder, atlas: FacadeA
           if (lod === 0) {
             encadrement(k, ox0, oy0, ox1, oy1);
             plan.balconies.push({ kind: 'balconette', x0: ox0 - 0.18, x1: ox1 + 0.18, y: oy0 - 0.06, bays: 1, seed: plan.seed ^ (i * 131) });
-            if (rng.bool(0.35)) dripStreak(k, ox0, ox1, oy0 - 0.12, rng.range(0.12, 0.35));
+            // the guard's own contact shadow, then the sill's drip stain
+            undersideShadow(k, ox0 - 0.18, ox1 + 0.18, oy0 - 0.1, 0.34, 0.66);
+            if (rng.bool(0.45)) dripStreak(k, ox0 + 0.1, ox1 - 0.1, oy0 - 0.14, rng.range(0.35, 0.95));
           }
         } else {
           const shut = rng.bool(0.35);
@@ -665,8 +699,10 @@ export function composeFacade(plan: BuildingPlan, b: GeomBuilder, atlas: FacadeA
                 bays: 1,
                 seed: plan.seed ^ (s * 977) ^ (i * 313),
               });
+              // §8.2 — the balcony slab's contact shadow on the wall below it
+              undersideShadow(k, bx0 + 0.18, bx1 - 0.18, ys - 0.02, 0.85, 0.5);
             }
-            if (rng.bool(0.35)) dripStreak(k, ox0, ox1, oy0 - 0.05, rng.range(0.14, 0.35));
+            if (rng.bool(0.35)) dripStreak(k, ox0, ox1, oy0 - 0.05, rng.range(0.2, 0.6));
           }
         }
       }
@@ -682,6 +718,10 @@ export function composeFacade(plan: BuildingPlan, b: GeomBuilder, atlas: FacadeA
         bays: plan.bays,
         seed: plan.seed ^ (s * 6151),
       });
+      undersideShadow(k, 0.16, W - 0.16, ys - 0.02, 0.95, 0.46);
+      // rust and rain run off the slab ends onto the wall
+      if (rng.bool(0.5)) dripStreak(k, 0.3, 0.3 + rng.range(0.25, 0.5), ys - 0.2, rng.range(0.6, 1.6));
+      if (rng.bool(0.5)) dripStreak(k, W - 0.8, W - 0.8 + rng.range(0.25, 0.5), ys - 0.2, rng.range(0.6, 1.6));
     }
 
     /* a string course marking the floor line on the grander houses */
@@ -691,7 +731,10 @@ export function composeFacade(plan: BuildingPlan, b: GeomBuilder, atlas: FacadeA
   /* --- crowning: cornice, then parapet or eaves --- */
   cornice(k, 0, W, plan.topY);
   if (plan.roof === 'azotea') {
-    parapet(k, 0, W, plan.topY + CASA.corniceH, plan.parapetH, CASA.cornicePr * 0.55);
+    parapet(
+      k, 0, W, plan.topY + CASA.corniceH, plan.parapetH, CASA.cornicePr * 0.55,
+      CASA.parapetT, lod === 0 ? plan.parapetProfile : 'plain',
+    );
   }
 
   if (lod === 0) {
@@ -734,7 +777,7 @@ export function composeShell(
     if (e === front) continue;
     const a = poly[e];
     const c = poly[(e + 1) % n];
-    const ef = makeFrame(a.x, a.y, c.x, c.y, plan.floorY);
+    const ef = makeFrame(a.x, a.y, c.x, c.y, plan.floorY, plan.frame.tu, plan.frame.tv);
     const rear = e === (front + 2) % n;
     const nb = neighbourTop[e];
     const base = rear ? bottom : Math.max(bottom, nb - plan.floorY - 0.05);
@@ -742,8 +785,10 @@ export function composeShell(
 
     const rect = plan.spalled && !rear ? atlas.rect('rubble') : plan.stucco;
     const col = rear ? shadeRGB(wall, 0.94) : shadeRGB(wall, 0.9);
+    // party walls and rears are only ever seen across a block or from the air,
+    // so they tile at half density — a quarter of the quads for no visible loss
     panel(b, ef, atlas, rect, 0, base, ef.len, top, 0, col, {
-      tile: CASA.stuccoTile,
+      tile: CASA.bulkTile,
       shadeBottom: 0.82,
       shadeTop: 1.02,
     });
@@ -795,8 +840,8 @@ export function composeLightWell(plan: BuildingPlan, b: GeomBuilder, atlas: Faca
   const yFloor = yTop - depth;
   const wallCol = shadeRGB(plan.livery.trim, 0.94);
   // four walls, facing inward
-  panel(b, f, atlas, plan.stucco, w.x0, yFloor, w.x1, yTop, w.z0, wallCol, { tile: CASA.stuccoTile, face: -1 });
-  panel(b, f, atlas, plan.stucco, w.x0, yFloor, w.x1, yTop, w.z1, wallCol, { tile: CASA.stuccoTile });
+  panel(b, f, atlas, plan.stucco, w.x0, yFloor, w.x1, yTop, w.z0, wallCol, { tile: CASA.bulkTile, face: -1 });
+  panel(b, f, atlas, plan.stucco, w.x0, yFloor, w.x1, yTop, w.z1, wallCol, { tile: CASA.bulkTile });
   sidePanel(b, f, atlas, plan.stucco, w.z1, yFloor, w.z0, yTop, w.x0, wallCol, 1);
   sidePanel(b, f, atlas, plan.stucco, w.z1, yFloor, w.z0, yTop, w.x1, wallCol, -1);
   // the patio floor — warm tile catching the light shaft

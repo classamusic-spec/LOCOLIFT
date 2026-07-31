@@ -1,0 +1,19 @@
+{
+  "url": "http://127.0.0.1:5173",
+  "shots": [
+    ".captures-facade/01-title.png",
+    ".captures-facade/02-shift-start.png",
+    ".captures-facade/03-driving.png"
+  ],
+  "errors": [
+    "harness: page.evaluate: TypeError: Cannot read properties of undefined (reading 'setInput')\n    at eval (eval at evaluate (:311:30), <anonymous>:1:21)\n    at UtilityScript.evaluate (<anonymous>:313:16)\n    at UtilityScript.<anonymous> (<anonymous>:1:44)"
+  ],
+  "warnings": [
+    "using deprecated parameters for the initialization function; pass a single object instead",
+    "THREE.WebGLShadowMap: PCFSoftShadowMap has been deprecated. Using PCFShadowMap instead.",
+    "using deprecated parameters for the initialization function; pass a single object instead",
+    "THREE.WebGLShadowMap: PCFSoftShadowMap has been deprecated. Using PCFShadowMap instead."
+  ],
+  "perf": null,
+  "ok": false
+}

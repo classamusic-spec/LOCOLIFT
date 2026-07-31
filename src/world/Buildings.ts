@@ -27,6 +27,7 @@ import {
   type BuildingPlan,
 } from './Facades';
 import { getFacadeAtlas, type FacadeAtlas } from './FacadeTextures';
+import { Roofs, type RoofStats } from './Roofs';
 import type { TextureFactory } from './TextureFactory';
 import type { CityLayout, Lot, WorldLayer, WorldOpts } from './WorldTypes';
 
@@ -37,9 +38,18 @@ export interface BuildingStats {
   instancedMeshes: number;
   instances: number;
   triangles: number;
+  /** triangles in the merged per-block shells */
+  shellTriangles: number;
+  /** triangles across every instance of every repeated part */
+  instancedTriangles: number;
+  /** shell split: street elevations / mass + courtyards / roofs */
+  facadeTriangles: number;
+  massTriangles: number;
+  roofTriangles: number;
   drawCalls: number;
   buildMs: number;
   balconies: BalconyStats;
+  roofs: RoofStats;
 }
 
 /** Hours over which lit windows fade in and out. */
@@ -70,6 +80,11 @@ export class Buildings implements WorldLayer {
     instancedMeshes: 0,
     instances: 0,
     triangles: 0,
+    shellTriangles: 0,
+    instancedTriangles: 0,
+    facadeTriangles: 0,
+    massTriangles: 0,
+    roofTriangles: 0,
     drawCalls: 0,
     buildMs: 0,
     balconies: {
@@ -80,6 +95,7 @@ export class Buildings implements WorldLayer {
       laundry: 0,
       plantedFraction: 0,
     },
+    roofs: { azoteas: 0, tiled: 0, tanks: 0, aerials: 0, bulkheads: 0, scuppers: 0, clotheslines: 0 },
   };
 
   constructor(quality: QualityTier, private textures: TextureFactory) {
@@ -128,8 +144,12 @@ export class Buildings implements WorldLayer {
     /* ---------------- pass 2: geometry, merged per block ---------------- */
     const registry = new InstanceRegistry(layout.bounds, 4, 3);
     const balconies = new BalconyFactory(registry, this.atlas);
+    const roofs = new Roofs(registry, this.atlas, balconies);
 
-    let triangles = 0;
+    let shellTris = 0;
+    let facadeTris = 0;
+    let massTris = 0;
+    let roofTris = 0;
     for (const block of layout.blocks) {
       const b = new GeomBuilder();
       let built = 0;
@@ -139,9 +159,16 @@ export class Buildings implements WorldLayer {
         const plan = plans.get(lotId);
         if (!lot || !plan) continue;
 
+        const t1 = b.triangleCount;
         composeFacade(plan, b, this.atlas, 0);
+        const t2 = b.triangleCount;
         composeShell(plan, b, this.atlas, 0, this.neighbourTops(lot, layout, plans));
         composeLightWell(plan, b, this.atlas);
+        const t3 = b.triangleCount;
+        roofs.place(plan, b);
+        roofTris += b.triangleCount - t3;
+        facadeTris += t2 - t1;
+        massTris += t3 - t2;
         balconies.place(plan);
         built++;
       }
@@ -159,7 +186,7 @@ export class Buildings implements WorldLayer {
       this.group.add(mesh);
       this.meshes.push(mesh);
       this.ownedGeometries.push(geo);
-      triangles += geo.index ? geo.index.count / 3 : 0;
+      shellTris += geo.index ? geo.index.count / 3 : 0;
       this._stats.lots += built;
     }
 
@@ -170,19 +197,26 @@ export class Buildings implements WorldLayer {
       foliage: this.foliageMat,
     };
     this.instanced = registry.build(instMats);
+    let instTris = 0;
     for (const m of this.instanced) {
       this.group.add(m);
       const g = m.geometry;
-      triangles += (g.index ? g.index.count / 3 : 0) * m.count;
+      instTris += (g.index ? g.index.count / 3 : 0) * m.count;
     }
 
     this._stats.blocks = this.meshes.length;
     this._stats.shellMeshes = this.meshes.length;
     this._stats.instancedMeshes = this.instanced.length;
     this._stats.instances = registry.instanceCount;
-    this._stats.triangles = Math.round(triangles);
+    this._stats.shellTriangles = Math.round(shellTris);
+    this._stats.facadeTriangles = facadeTris;
+    this._stats.massTriangles = massTris;
+    this._stats.roofTriangles = roofTris;
+    this._stats.instancedTriangles = Math.round(instTris);
+    this._stats.triangles = Math.round(shellTris + instTris);
     this._stats.drawCalls = this.meshes.length + this.instanced.length;
     this._stats.balconies = balconies.results;
+    this._stats.roofs = roofs.stats;
     this._stats.buildMs = Math.round(performance.now() - t0);
   }
 
@@ -245,15 +279,30 @@ export class Buildings implements WorldLayer {
       roughness: 1,
       metalness: 0,
     });
+    // §5 — painted lime stucco wants nScale 0.35, not the implicit 1.0 that
+    // §8.22 calls out as the reason procedural stucco reads as plastic.
+    this.shellMat.normalScale.set(0.42, 0.42);
+    this.shellMat.side = THREE.DoubleSide; // TEMP winding probe
     this.injectGlow(this.shellMat);
 
     const tf = this.textures;
+    /**
+     * §5 wrought iron: rough 0.45, metal 0.35. `alphaTest` is not optional —
+     * the balustrade band of the iron atlas is a cut-out, and an opaque
+     * material renders its cleared pixels as solid black, which is what put a
+     * continuous black band along every balcony line. Cutting instead of
+     * blending also keeps the rails in the depth pre-pass and in the shadow
+     * map, so a railing throws a railing's shadow.
+     */
     this.ironMat = new THREE.MeshStandardMaterial({
       name: 'buildings/iron',
       map: ironTexture(tf),
       vertexColors: true,
-      roughness: 0.62,
-      metalness: 0.45,
+      roughness: 0.45,
+      metalness: 0.35,
+      alphaTest: 0.42,
+      transparent: false,
+      side: THREE.DoubleSide,
     });
     this.injectGlow(this.ironMat);
 

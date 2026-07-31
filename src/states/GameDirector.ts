@@ -1,0 +1,411 @@
+/**
+ * Loco Lift — the state machine over the whole game.
+ *
+ *      boot ──► title ──► playing ⇄ paused
+ *                 ▲          │
+ *                 └── results ┘        (settings / garage overlay either side)
+ *
+ * The director owns *when* things run, never *how*. It starts and stops the
+ * mission loop, the combo chain and the score system, hands the active mode
+ * controller its ticks, gates everything behind the 3·2·1 countdown, and pumps
+ * the three UI setters that are not event-driven. Screens follow the
+ * `game:state` event, so the UI needs no direct call from here.
+ */
+import * as THREE from 'three';
+import type { EventBus } from '../core/EventBus';
+import { RNG } from '../core/RNG';
+import type {
+  GameContext,
+  GameMode,
+  GameStateId,
+  PassengerArchetype,
+  POI,
+  QualityTier,
+  System,
+} from '../core/types';
+import { ARCHETYPES } from '../passengers/Archetypes';
+import { CART_ARCHETYPE, type MissionSystem } from '../passengers/MissionSystem';
+import type { ComboSystem } from '../scoring/ComboSystem';
+import type { ScoreSystem } from '../scoring/ScoreSystem';
+import { ArcadeShift, type ShiftController } from './ArcadeShift';
+import { Challenges, CHECKPOINT_ARCHETYPE, type ChallengeId } from './Challenges';
+import { FreeRide } from './FreeRide';
+
+/* ------------------------------------------------------ structural inputs */
+
+/** The three UI setters that cannot be driven by events. */
+export interface DirectorUI {
+  setArchetypes(list: ReadonlyArray<PassengerArchetype>): void;
+  setWaitingFares(points: ReadonlyArray<{ readonly x: number; readonly z: number }>): void;
+  setPassengerPatience(fraction: number): void;
+}
+
+export interface DirectorVehicle {
+  readonly position: THREE.Vector3;
+  readonly speed: number;
+  readonly isDrifting: boolean;
+  readonly isAirborne: boolean;
+  respawn(pos: THREE.Vector3, heading: number): void;
+}
+
+export interface DirectorWorld {
+  pois: ReadonlyArray<POI>;
+  spawnPoint: { pos: THREE.Vector3; heading: number };
+}
+
+/** The shape `UISystem.onAction` delivers. Kept loose so it stays assignable. */
+export interface DirectorAction {
+  readonly kind: string;
+  readonly mode?: GameMode;
+}
+
+export interface GameDirectorOptions {
+  bus: EventBus;
+  missions: MissionSystem;
+  combo: ComboSystem;
+  score: ScoreSystem;
+  ui?: DirectorUI | null;
+  save?: import('../save/SaveSystem').SaveSystem | null;
+  vehicle?: DirectorVehicle | null;
+  world?: DirectorWorld | null;
+  rng?: RNG;
+  /** seconds the HUD's 3·2·1 holds gameplay before the shift is live */
+  countdownSeconds?: number;
+  /** move the Jeep back to the world spawn when a run begins */
+  respawnOnStart?: boolean;
+}
+
+/* ------------------------------------------------------------------ class */
+
+export class GameDirector implements System {
+  readonly name = 'director';
+
+  /** Set by `main` so the engine can be paused/unpaused with the state. */
+  onPauseChanged: ((paused: boolean) => void) | null = null;
+  /** Fired on every state transition, after `game:state` has gone out. */
+  onStateChanged: ((state: GameStateId) => void) | null = null;
+
+  private readonly bus: EventBus;
+  private readonly missions: MissionSystem;
+  private readonly combo: ComboSystem;
+  private readonly score: ScoreSystem;
+  private ui: DirectorUI | null;
+  private readonly vehicle: DirectorVehicle | null;
+  private readonly world: DirectorWorld | null;
+  private readonly respawnOnStart: boolean;
+  private readonly countdownSeconds: number;
+
+  readonly arcade: ArcadeShift;
+  readonly freeRide: FreeRide;
+  readonly challenges: Challenges;
+
+  private controller: ShiftController | null = null;
+  private state: GameStateId = 'boot';
+  private previousState: GameStateId = 'title';
+  private mode: GameMode = 'arcade';
+  private pendingChallenge: ChallengeId = 'drift-marathon';
+
+  private countdown = 0;
+  private live = false;
+
+  constructor(opts: GameDirectorOptions) {
+    this.bus = opts.bus;
+    this.missions = opts.missions;
+    this.combo = opts.combo;
+    this.score = opts.score;
+    this.ui = opts.ui ?? null;
+    this.vehicle = opts.vehicle ?? null;
+    this.world = opts.world ?? null;
+    this.respawnOnStart = opts.respawnOnStart ?? true;
+    this.countdownSeconds = opts.countdownSeconds ?? 3.05;
+
+    const rng = opts.rng ?? new RNG(0x10c0_d17e);
+    this.arcade = new ArcadeShift({ bus: this.bus });
+    this.freeRide = new FreeRide({ bus: this.bus });
+    this.challenges = new Challenges({
+      bus: this.bus,
+      vehicle: opts.vehicle ?? FALLBACK_VEHICLE,
+      world: opts.world ?? null,
+      save: opts.save ?? null,
+      fares: opts.missions,
+      rng: rng.fork(0xc4a1),
+    });
+  }
+
+  /* ------------------------------------------------------------ lifecycle */
+
+  init(_ctx: GameContext): void {
+    this.publishArchetypes();
+    this.go('title');
+  }
+
+  setUI(ui: DirectorUI | null): void {
+    this.ui = ui;
+    this.publishArchetypes();
+  }
+
+  private publishArchetypes(): void {
+    if (!this.ui) return;
+    const list: PassengerArchetype[] = ARCHETYPES.slice();
+    list.push(CHECKPOINT_ARCHETYPE, CART_ARCHETYPE);
+    this.ui.setArchetypes(list);
+  }
+
+  onQualityChange(tier: QualityTier): void {
+    this.missions.onQualityChange(tier);
+  }
+
+  dispose(): void {
+    this.arcade.dispose();
+    this.freeRide.dispose();
+    this.challenges.dispose();
+    this.controller = null;
+  }
+
+  /* ---------------------------------------------------------- inspection */
+
+  get currentState(): GameStateId {
+    return this.state;
+  }
+
+  get currentMode(): GameMode {
+    return this.mode;
+  }
+
+  get isPlaying(): boolean {
+    return this.state === 'playing';
+  }
+
+  get isLive(): boolean {
+    return this.live;
+  }
+
+  /** Seconds left in the active mode, or Infinity in free ride. */
+  get timeRemaining(): number {
+    return this.controller ? this.controller.timeRemaining : 0;
+  }
+
+  get countdownRemaining(): number {
+    return Math.max(0, this.countdown);
+  }
+
+  /* --------------------------------------------------------- transitions */
+
+  private go(to: GameStateId): void {
+    if (to === this.state) return;
+    const from = this.state;
+    if (to === 'settings' || to === 'garage') this.previousState = from;
+    this.state = to;
+    this.bus.emit('game:state', { from, to });
+    this.onStateChanged?.(to);
+  }
+
+  showTitle(): void {
+    this.abandonRun(true);
+    this.go('title');
+    this.onPauseChanged?.(false);
+  }
+
+  /** Choose which challenge `startMode('challenge')` will run. */
+  selectChallenge(id: ChallengeId): boolean {
+    if (!this.challenges.select(id)) return false;
+    this.pendingChallenge = id;
+    return true;
+  }
+
+  startMode(mode: GameMode, challenge?: ChallengeId): void {
+    this.abandonRun(false);
+
+    this.mode = mode === 'story' ? 'arcade' : mode;
+    if (this.mode === 'challenge') {
+      const id = challenge ?? this.pendingChallenge;
+      this.challenges.select(id);
+      this.pendingChallenge = id;
+      this.challenges.setWorld(this.world);
+    }
+
+    if (this.respawnOnStart && this.vehicle && this.world) {
+      const spawn = this.world.spawnPoint;
+      this.vehicle.respawn(spawn.pos, spawn.heading);
+    }
+
+    this.controller = this.controllerFor(this.mode);
+    this.score.beginShift(this.mode);
+    this.missions.reset();
+    this.combo.reset();
+
+    this.bus.emit('game:mode', { mode: this.mode });
+    this.controller.start();
+
+    /* held down until the HUD's 3·2·1 lands on ¡DALE! */
+    this.countdown = this.countdownSeconds;
+    this.live = false;
+    this.controller.setRunning(false);
+    this.combo.setActive(false);
+    this.missions.setActive(false);
+
+    this.go('playing');
+    this.onPauseChanged?.(false);
+  }
+
+  private controllerFor(mode: GameMode): ShiftController {
+    switch (mode) {
+      case 'freeRide':
+        return this.freeRide;
+      case 'challenge':
+        return this.challenges;
+      case 'arcade':
+      case 'story':
+      default:
+        return this.arcade;
+    }
+  }
+
+  pause(): void {
+    if (this.state !== 'playing') return;
+    this.go('paused');
+    this.onPauseChanged?.(true);
+  }
+
+  resume(): void {
+    if (this.state !== 'paused' && this.state !== 'settings') return;
+    this.go('playing');
+    this.onPauseChanged?.(false);
+  }
+
+  restart(): void {
+    this.startMode(this.mode, this.pendingChallenge);
+  }
+
+  quitToTitle(): void {
+    this.abandonRun(true);
+    this.go('title');
+    this.onPauseChanged?.(false);
+  }
+
+  openSettings(): void {
+    this.go('settings');
+  }
+
+  closeSettings(): void {
+    const back = this.previousState === 'settings' ? 'title' : this.previousState;
+    this.go(back);
+    this.onPauseChanged?.(back === 'paused');
+  }
+
+  openGarage(): void {
+    this.go('garage');
+  }
+
+  /** Route `UISystem.onAction` straight into the director. */
+  handleUIAction(action: DirectorAction): void {
+    switch (action.kind) {
+      case 'startMode':
+        this.startMode(action.mode ?? 'arcade');
+        break;
+      case 'resume':
+        this.resume();
+        break;
+      case 'restart':
+        this.restart();
+        break;
+      case 'quitToTitle':
+        this.quitToTitle();
+        break;
+      case 'openSettings':
+        this.openSettings();
+        break;
+      case 'closeSettings':
+        this.closeSettings();
+        break;
+      case 'openGarage':
+        this.openGarage();
+        break;
+      default:
+        break;
+    }
+  }
+
+  /* --------------------------------------------------------------- ending */
+
+  /** Normal end-of-run: bank everything and show the results screen. */
+  endRun(): void {
+    if (!this.controller) return;
+    this.live = false;
+    this.missions.setActive(false);
+    this.combo.break();
+    this.combo.setActive(false);
+    this.controller.stop();
+
+    const summary = this.score.endShift();
+    this.bus.emit('shift:end', {
+      score: summary.score,
+      fares: summary.fares,
+      rating: summary.rating,
+    });
+    this.controller = null;
+    this.go('results');
+    this.onPauseChanged?.(false);
+  }
+
+  /** Tear a run down without showing results (quit, or starting a new run). */
+  private abandonRun(bank: boolean): void {
+    if (!this.controller) {
+      this.live = false;
+      return;
+    }
+    this.live = false;
+    this.missions.setActive(false);
+    this.combo.break();
+    this.combo.setActive(false);
+    this.controller.stop();
+    if (bank) this.score.endShift();
+    this.controller = null;
+  }
+
+  /* ---------------------------------------------------------------- frame */
+
+  update(_ctx: GameContext, dt: number): void {
+    if (this.state !== 'playing' || !this.controller) return;
+
+    if (!this.live) {
+      this.countdown -= dt;
+      if (this.countdown <= 0) {
+        this.countdown = 0;
+        this.live = true;
+        this.controller.setRunning(true);
+        this.combo.setActive(true);
+        this.missions.setActive(true);
+      }
+      return;
+    }
+
+    this.controller.update(dt);
+    if (this.controller.finished) this.endRun();
+  }
+
+  lateUpdate(ctx: GameContext, _dt: number): void {
+    /* the pause key has to work while the engine itself is paused, and
+     * `lateUpdate` is the only hook that still runs in that state */
+    const input = ctx.input;
+    if (input && input.pausePressed) {
+      if (this.state === 'playing') this.pause();
+      else if (this.state === 'paused') this.resume();
+    }
+
+    const ui = this.ui;
+    if (!ui) return;
+    if (this.state === 'playing' || this.state === 'paused') {
+      ui.setWaitingFares(this.missions.waitingMarkers);
+      ui.setPassengerPatience(this.missions.patienceFraction);
+    }
+  }
+}
+
+/** Keeps `Challenges` constructible when the director is built without a Jeep. */
+const FALLBACK_VEHICLE = {
+  position: { x: 0, y: 0, z: 0 },
+  speed: 0,
+  isDrifting: false,
+  isAirborne: false,
+};

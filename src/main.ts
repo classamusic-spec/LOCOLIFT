@@ -25,6 +25,10 @@ import { Vehicle } from './vehicle/Vehicle';
 import { ChaseCamera } from './camera/ChaseCamera';
 import { AudioSystem } from './audio/AudioSystem';
 import { UISystem } from './ui/UISystem';
+import { MissionSystem } from './passengers/MissionSystem';
+import { ComboSystem } from './scoring/ComboSystem';
+import { ScoreSystem } from './scoring/ScoreSystem';
+import { GameDirector } from './states/GameDirector';
 
 /**
  * Steps the solver. Registered last so every system has already applied its
@@ -111,9 +115,41 @@ async function boot(): Promise<void> {
     world,
   });
 
+  /* ---- gameplay ---- */
+  const combo = new ComboSystem({ bus: engine.bus, vehicle });
+  const score = new ScoreSystem({ bus: engine.bus, save, vehicle });
+  const missions = new MissionSystem({
+    scene: engine.scene,
+    bus: engine.bus,
+    world,
+    vehicle,
+    combo,
+    rng: new RNG(CONFIG.worldSeed ^ 0xfa2e),
+    quality: settingsStore.current.quality,
+  });
+  const director = new GameDirector({
+    bus: engine.bus,
+    missions,
+    combo,
+    score,
+    ui,
+    save,
+    vehicle,
+    world,
+  });
+  director.onPauseChanged = (paused) => {
+    engine.paused = paused;
+  };
+  ui.onAction = (a) => director.handleUIAction(a);
+
   engine.add(world);
   engine.add(vehicle);
   engine.add(new PhysicsStepper(physics));
+  engine.add(combo);
+  engine.add(missions);
+  engine.add(score);
+  // Before the UI: the director's marker/patience pump must land the same frame.
+  engine.add(director);
   engine.add(camera);
   // After the camera: the listener is refreshed in lateUpdate from final transforms.
   engine.add(audio);
@@ -129,7 +165,7 @@ async function boot(): Promise<void> {
   engine.timeOfDay = 15.5;
   engine.start();
 
-  installTestHook(engine, input, world, vehicle, camera, save, ui, audio);
+  installTestHook(engine, input, world, vehicle, camera, save, audio, director);
 }
 
 function installTestHook(
@@ -139,26 +175,24 @@ function installTestHook(
   vehicle: Vehicle,
   camera: ChaseCamera,
   save: SaveSystem,
-  ui: UISystem,
   audio: AudioSystem,
+  director: GameDirector,
 ): void {
   const hook: LocoTestHook = {
     ready: true,
     showTitle() {
       camera.setShowcase(true, vehicle.object3d);
-      ui.setState('title');
+      director.showTitle();
     },
     startArcade() {
       camera.setShowcase(false);
       camera.snapToTarget();
-      engine.paused = false;
-      ui.setState('playing');
-      ui.showCountdown();
       void audio.unlock();
+      director.startMode('arcade');
     },
     pause() {
-      engine.paused = !engine.paused;
-      ui.setState(engine.paused ? 'paused' : 'playing');
+      if (director.currentState === 'paused') director.resume();
+      else director.pause();
     },
     setInput(partial) {
       input.setOverride({ ...(input.state as InputState), ...partial });
