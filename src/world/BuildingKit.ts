@@ -227,6 +227,26 @@ export function makeFrame(
   return { ox: p0x, oz: p0z, ux, uz, nx: uz, nz: -ux, y0, len, tu, tv };
 }
 
+/**
+ * **The frame is left-handed.** With the outward normal at (uz, -ux) and y up,
+ * `u x ŷ = -n`: a quad authored counter-clockwise in local (x, y) comes out
+ * clockwise in world space and is back-face culled.
+ *
+ * That single sign is worth spelling out, because it is what made every wall
+ * panel in the district invisible from the street while the window jambs —
+ * which are wound off a different pair of axes and happen to come out right —
+ * stayed. The result was an elevation reduced to a row of pale vertical
+ * slivers floating in front of the block's interior walls: the "stretched
+ * blank rectangles" artifact. Every quad emitted in frame space therefore
+ * picks its winding from {@link facing} rather than from argument order.
+ */
+const FRAME_HANDEDNESS = -1;
+
+/** true when (a, b, c, d) must be reversed to face `normalSign` */
+function flipWinding(normalSign: number): boolean {
+  return normalSign * FRAME_HANDEDNESS > 0;
+}
+
 /* ------------------------------------------------------------ tile lattice */
 
 /** One cell of a tiled run: world span [a0,a1] carrying tile coords [t0,t1]. */
@@ -394,8 +414,10 @@ export function panel(
       const i1 = b.vertex(worldX(f, c.a1, z), f.y0 + r.a0, worldZ(f, c.a1, z), nx, 0, nz, u1, v0, ca, g[0], g[1], g[2]);
       const i2 = b.vertex(worldX(f, c.a1, z), f.y0 + r.a1, worldZ(f, c.a1, z), nx, 0, nz, u1, v1, cb, g[0], g[1], g[2]);
       const i3 = b.vertex(worldX(f, c.a0, z), f.y0 + r.a1, worldZ(f, c.a0, z), nx, 0, nz, u0, v1, cb, g[0], g[1], g[2]);
-      if (face > 0) b.quad(i0, i1, i2, i3);
-      else b.quad(i0, i3, i2, i1);
+      // (x0,y0)->(x1,y0)->(x1,y1) winds along u x ŷ, which the frame's
+      // handedness puts opposite the surface normal — so it is reversed here.
+      if (flipWinding(face)) b.quad(i0, i3, i2, i1);
+      else b.quad(i0, i1, i2, i3);
     }
   }
 }

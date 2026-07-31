@@ -1833,15 +1833,19 @@ function buildRamp(
   colIdx: number[],
   model: CoastModel,
 ): void {
-  const SEG = 12;
+  const SEG = 18;
   const dx = r.dx;
   const dz = r.dz;
   const px = -dz;
   const pz = dx;
   const hw = r.width * 0.5;
 
-  const concrete = r.kind === 'sandKicker' ? 0xd8c8a2 : 0xdcd6c4;
-  const kerbCol = r.kind === 'sandKicker' ? 0xc0ae86 : 0xb9553a;
+  // Real slipways and ramps are cast with transverse grip ribs, which is both
+  // what they look like and what makes an otherwise blank wedge read as a
+  // surface with a direction from 55 m out (§6.2 R4).
+  const concrete = r.kind === 'sandKicker' ? 0xc9b894 : 0xc3bfb2;
+  const ribCol = r.kind === 'sandKicker' ? 0xb2a17c : 0xa9a598;
+  const kerbCol = r.kind === 'sandKicker' ? 0xb08d5a : 0xb9553a;
 
   const deckY = (t: number): number => {
     if (r.kind === 'slipway') return r.y + r.rise * t;
@@ -1873,7 +1877,10 @@ function buildRamp(
     at(t0, 1, b);
     at(t1, 1, c);
     at(t1, -1, d);
-    gb.quad(a.clone(), b.clone(), c.clone(), d.clone(), concrete, 0.4);
+    // grip ribs: alternating cast bands. Colour only — a real raised rib would
+    // put a 3 cm staircase into the collider and make the launch judder.
+    const rib = (i & 1) === 0;
+    gb.quad(a.clone(), b.clone(), c.clone(), d.clone(), rib ? ribCol : concrete, 0.4);
     addColQuad(a.clone(), b.clone(), c.clone(), d.clone());
 
     // skirts down to the ground on both sides + the underside apron
