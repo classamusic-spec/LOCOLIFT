@@ -465,7 +465,7 @@ export function safeDisconnect(node: AudioNode | null | undefined): void {
  * tube-ish warmth to a hard, fuzzy overdrive. Used on the engine, on impacts
  * and on the brass stabs.
  */
-export function distortionCurve(amount: number, samples = 2048): Float32Array {
+export function distortionCurve(amount: number, samples = 2048) {
   const a = clamp01(finiteOr(amount, 0.3));
   const k = a * 120 + 0.6;
   const curve = new Float32Array(samples);
@@ -482,7 +482,7 @@ export function distortionCurve(amount: number, samples = 2048): Float32Array {
 }
 
 /** Symmetric soft clipper — transparent limiting for busy busses. */
-export function softClipCurve(drive = 1, samples = 2048): Float32Array {
+export function softClipCurve(drive = 1, samples = 2048) {
   const d = Math.max(0.1, finiteOr(drive, 1));
   const curve = new Float32Array(samples);
   const norm = Math.tanh(d);

@@ -7,8 +7,9 @@
  *    cross-section (crowned carriageway, gutter, kerb face, kerb stone,
  *    pavement), stepped treads and risers for the stair streets, wedges for
  *    the jump ramps and a central channel for the alleys;
- *  - **intersection pads** built from the convex hull of the incoming ribbon
- *    corners, so junctions read as one continuous stone surface;
+ *  - **intersection pads** fanned through every incoming ribbon corner in
+ *    bearing order, so junctions read as one continuous stone surface even
+ *    where a 20% street meets a 4 m alley;
  *  - **open areas** (plazas, market floor, glacis, apron, beach) triangulated
  *    and uniformly subdivided so they conform to the carved ground;
  *  - **filler terrain** on a coarse grid, with every quad that lives under a
@@ -202,32 +203,6 @@ function flatProfile(hw: number, mat: MaterialId, crown = 0.04): Profile {
   };
 }
 
-/* ------------------------------------------------------------ 2D helpers */
-
-/** Andrew's monotone chain over XZ; returns indices into `pts` */
-function convexHullXZ(pts: Array<{ x: number; z: number }>): number[] {
-  const n = pts.length;
-  if (n < 3) return pts.map((_, i) => i);
-  const order = pts.map((_, i) => i).sort((a, b) =>
-    pts[a].x === pts[b].x ? pts[a].z - pts[b].z : pts[a].x - pts[b].x);
-  const cross = (o: number, a: number, b: number): number =>
-    (pts[a].x - pts[o].x) * (pts[b].z - pts[o].z) - (pts[a].z - pts[o].z) * (pts[b].x - pts[o].x);
-  const lower: number[] = [];
-  for (const i of order) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], i) <= 0) lower.pop();
-    lower.push(i);
-  }
-  const upper: number[] = [];
-  for (let k = order.length - 1; k >= 0; k--) {
-    const i = order[k];
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], i) <= 0) upper.pop();
-    upper.push(i);
-  }
-  lower.pop();
-  upper.pop();
-  return lower.concat(upper);
-}
-
 /* ----------------------------------------------------------------- ground */
 
 export interface GroundStats {
@@ -403,7 +378,7 @@ export class Ground implements WorldLayer {
       case 'stairs':
         return stairProfile(hw);
       case 'ramp':
-        return flatProfile(hw, 'ramp', 0.02);
+        return flatProfile(hw, 'ramp', 0.09);
       case 'plaza':
         return flatProfile(hw, 'roadPlaza', 0.05);
       default:
@@ -434,7 +409,8 @@ export class Ground implements WorldLayer {
         lateral.push(acc);
       }
 
-      const rA = ed.kind === 'ramp' ? this.padRadius(roads, ed.a) : this.padRadius(roads, ed.a);
+      // a ramp starts at its foot node so its deck meets the junction pad
+      const rA = ed.kind === 'ramp' ? 0 : this.padRadius(roads, ed.a);
       const rB = ed.kind === 'ramp' ? 0 : this.padRadius(roads, ed.b);
       const t0 = clamp01(rA / ed.length);
       const t1 = 1 - clamp01(rB / ed.length);
@@ -566,11 +542,16 @@ export class Ground implements WorldLayer {
         const bucket = this.bucket('ramp', this.chunkOf(centreX, centreZ));
         const nx = sgn * rx[s];
         const nz = sgn * rz[s];
+        // orient the face outward: (b-a) x (d-a) must agree with the side normal
+        const fx = (b.y - a.y) * (d.z - a.z) - (b.z - a.z) * (d.y - a.y);
+        const fz = (b.x - a.x) * (d.y - a.y) - (b.y - a.y) * (d.x - a.x);
+        const outward = fx * nx + fz * nz > 0;
+        const run = Math.hypot(b.x - a.x, b.z - a.z) / tile;
         const i0 = bucket.vertex(a.x, a.y, a.z, nx, 0, nz, 0, py[s] / tile);
-        const i1 = bucket.vertex(b.x, b.y, b.z, nx, 0, nz, Math.hypot(b.x - a.x, b.z - a.z) / tile, py[s + 1] / tile);
-        const i2 = bucket.vertex(c.x, c.y, c.z, nx, 0, nz, Math.hypot(b.x - a.x, b.z - a.z) / tile, c.y / tile);
+        const i1 = bucket.vertex(b.x, b.y, b.z, nx, 0, nz, run, py[s + 1] / tile);
+        const i2 = bucket.vertex(c.x, c.y, c.z, nx, 0, nz, run, c.y / tile);
         const i3 = bucket.vertex(d.x, d.y, d.z, nx, 0, nz, 0, d.y / tile);
-        if (sgn > 0) bucket.quad(i0, i1, i2, i3);
+        if (outward) bucket.quad(i0, i1, i2, i3);
         else bucket.quad(i3, i2, i1, i0);
         this.collideQuad(a, b, c, d);
       }
@@ -591,7 +572,11 @@ export class Ground implements WorldLayer {
 
     for (let ni = 0; ni < roads.nodes.length; ni++) {
       const node = roads.nodes[ni];
-      const incident = node.edges.filter((e) => roads.edges[e].kind !== 'rooftop');
+      // Ramps are separate wedges: their deck climbs away from the junction, so
+      // folding their corners into the pad fan lifts the whole intersection.
+      const incident = node.edges.filter(
+        (e) => roads.edges[e].kind !== 'rooftop' && roads.edges[e].kind !== 'ramp',
+      );
       if (incident.length === 0) continue;
       const r = this.padRadius(roads, ni);
       if (r <= 0.2) continue;
@@ -643,36 +628,45 @@ export class Ground implements WorldLayer {
         });
       }
 
-      /* — the carriageway pad: convex hull of the incoming ribbon corners — */
-      const hullPts: Array<{ x: number; y: number; z: number }> = [];
+      /*
+       * The carriageway pad is a star fan through *every* incoming ribbon
+       * corner, sorted by bearing around the node — not a convex hull. A hull
+       * discards the corners of the narrow approaches and then bulges past
+       * them, which on a 20% street leaves a knee-high lip across the alley
+       * mouth. The star always meets each ribbon exactly where it starts.
+       */
+      const ringPts: Array<{ x: number; y: number; z: number; ang: number }> = [];
       for (const co of corners) {
-        hullPts.push({ x: co.x + co.rx * co.hw, y: co.y, z: co.z + co.rz * co.hw });
-        hullPts.push({ x: co.x - co.rx * co.hw, y: co.y, z: co.z - co.rz * co.hw });
+        for (const sgn of [1, -1]) {
+          const x = co.x + co.rx * co.hw * sgn;
+          const z = co.z + co.rz * co.hw * sgn;
+          ringPts.push({ x, y: co.y, z, ang: Math.atan2(z - node.pos.z, x - node.pos.x) });
+        }
       }
-      const hull = convexHullXZ(hullPts);
+      ringPts.sort((u, v) => u.ang - v.ang);
       const cy = node.pos.y + CROWN;
       const tile = this.materials.tileMeters(padMat);
       const bucket = this.bucket(padMat, this.chunkOf(node.pos.x, node.pos.z));
-      if (hull.length >= 3) {
+      if (ringPts.length >= 3) {
         const centreIdx = bucket.vertex(
           node.pos.x, cy, node.pos.z, 0, 1, 0,
           node.pos.x / tile, node.pos.z / tile,
         );
         const ring: number[] = [];
-        for (const hi of hull) {
-          const h = hullPts[hi];
+        for (const h of ringPts) {
           ring.push(bucket.vertex(h.x, h.y, h.z, 0, 1, 0, h.x / tile, h.z / tile));
         }
         for (let k = 0; k < ring.length; k++) {
-          const n0 = hullPts[hull[k]];
-          const n1 = hullPts[hull[(k + 1) % ring.length]];
-          // keep the winding consistent with the up normal
+          const k1 = (k + 1) % ring.length;
+          const n0 = ringPts[k];
+          const n1 = ringPts[k1];
           const cross = (n0.x - node.pos.x) * (n1.z - node.pos.z) - (n0.z - node.pos.z) * (n1.x - node.pos.x);
+          if (Math.abs(cross) < 1e-5) continue;
           a.set(node.pos.x, cy, node.pos.z);
           b.set(n0.x, n0.y, n0.z);
           c.set(n1.x, n1.y, n1.z);
-          if (cross < 0) bucket.tri(centreIdx, ring[k], ring[(k + 1) % ring.length]);
-          else bucket.tri(centreIdx, ring[(k + 1) % ring.length], ring[k]);
+          if (cross < 0) bucket.tri(centreIdx, ring[k], ring[k1]);
+          else bucket.tri(centreIdx, ring[k1], ring[k]);
           this.collideTri(a, b, c);
         }
       }
@@ -848,6 +842,21 @@ export class Ground implements WorldLayer {
       point: new THREE.Vector3(), tangent: new THREE.Vector3(),
     };
 
+    // bboxes so the per-corner area test is a cheap reject in the common case
+    const areaBox = layout.areas.map((area) => {
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minZ = Infinity;
+      let maxZ = -Infinity;
+      for (const p of area.polygon) {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minZ) minZ = p.y;
+        if (p.y > maxZ) maxZ = p.y;
+      }
+      return { minX, maxX, minZ, maxZ, poly: area.polygon };
+    });
+
     /** true when this point already has a paved surface over it */
     const covered = (x: number, z: number): boolean => {
       probe.set(x, 0, z);
@@ -858,8 +867,9 @@ export class Ground implements WorldLayer {
           if (sample.dist < ed.width * 0.5 + GUTTER_W + KERB_W + sw + 0.4) return true;
         }
       }
-      for (const area of layout.areas) {
-        if (pointInPoly(area.polygon, x, z)) return true;
+      for (const box of areaBox) {
+        if (x < box.minX || x > box.maxX || z < box.minZ || z > box.maxZ) continue;
+        if (pointInPoly(box.poly, x, z)) return true;
       }
       return false;
     };
@@ -920,8 +930,9 @@ export class Ground implements WorldLayer {
           const bl = lerp(0.74, 0.98, dry);
           idx.push(bucket.vertex(p.x, p.y, p.z, nx, ny, nz, p.x / tile, p.z / tile, r, g, bl));
         }
-        bucket.quad(idx[0], idx[1], idx[2], idx[3]);
-        this.collideQuad(a, b, c, d);
+        // wind CCW seen from above (+Y): (x0,z0) -> (x0,z1) -> (x1,z1) -> (x1,z0)
+        bucket.quad(idx[0], idx[3], idx[2], idx[1]);
+        this.collideQuad(a, d, c, b);
       }
     }
   }

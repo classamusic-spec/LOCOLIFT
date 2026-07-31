@@ -205,6 +205,7 @@ export class HUD {
   private readonly cardFare: TextSlot;
   private readonly patienceBar: VarSlot;
   private readonly patienceLow: FlagSlot;
+  private readonly patienceMid: FlagSlot;
   private readonly portrait: SVGSVGElement;
   private readonly portraitBg: SVGCircleElement;
   private readonly portraitSkin: SVGGElement;
@@ -236,12 +237,18 @@ export class HUD {
   /* countdown + time extension */
   private readonly countNode: HTMLElement;
   private readonly countText: TextSlot;
+  /** seconds left; `-1` means idle. Negative-but-above-−1 is the "¡DALE!" hold. */
   private countdownT = -1;
   private countdownStep = -1;
   private readonly extNode: HTMLElement;
   private readonly extText: TextSlot;
   private readonly extWhy: TextSlot;
   private extLife = 0;
+
+  /* state flags */
+  private readonly flashLayer: HTMLElement;
+  private readonly driftFlag: FlagSlot;
+  private readonly airFlag: FlagSlot;
 
   constructor(theme: UITheme) {
     this.theme = theme;
@@ -387,6 +394,7 @@ export class HUD {
     this.cardFare = new TextSlot(fareEl);
     this.patienceBar = new VarSlot(patTrack, '--fill', 0.004);
     this.patienceLow = new FlagSlot(card, 'is-impatient');
+    this.patienceMid = new FlagSlot(card, 'is-restless');
     bl.append(card);
 
     /* ------------------------------------------------------ bottom-right */
@@ -459,7 +467,23 @@ export class HUD {
     this.extText = new TextSlot(extV);
     this.extWhy = new TextSlot(extW);
 
-    root.append(tl, tc, tr, bl, br, sub, this.arrowSlot, this.popupLayer, count, ext);
+    this.flashLayer = el('div', 'll-flash');
+    this.driftFlag = new FlagSlot(root, 'is-drifting');
+    this.airFlag = new FlagSlot(root, 'is-airborne');
+
+    root.append(
+      this.flashLayer,
+      tl,
+      tc,
+      tr,
+      bl,
+      br,
+      sub,
+      this.arrowSlot,
+      this.popupLayer,
+      count,
+      ext,
+    );
 
     this.setPassenger(null);
     this.setDestination(null);
@@ -547,9 +571,9 @@ export class HUD {
             { opacity: 1 },
           ]
         : [
-            { transform: 'translate3d(46%, 0, 0) scale(0.72)', opacity: 0 },
-            { transform: 'translate3d(-4%, 0, 0) scale(1.06)', opacity: 1, offset: 0.62 },
-            { transform: 'translate3d(0, 0, 0) scale(1)', opacity: 1 },
+            { transform: 'skewX(-8deg) translate3d(46%, 0, 0) scale(0.72)', opacity: 0 },
+            { transform: 'skewX(-8deg) translate3d(-4%, 0, 0) scale(1.06)', opacity: 1, offset: 0.62 },
+            { transform: 'skewX(-8deg) translate3d(0, 0, 0) scale(1)', opacity: 1 },
           ],
       { duration: dur, easing: this.theme.ease('back'), fill: 'none' },
     );
@@ -669,9 +693,34 @@ export class HUD {
     this.popupWorld[i].copy(world);
   }
 
-  /** "3 · 2 · 1 · ¡DALE!" */
+  /**
+   * A soft edge pulse — near miss, impact, pickup. Always suppressed under
+   * `photosensitiveSafe` / `prefers-reduced-motion`: this is exactly the kind of
+   * full-frame luminance jump those settings exist to remove.
+   */
+  flash(role: PopupRole): void {
+    if (this.theme.flashSafe) return;
+    this.flashLayer.dataset.role = role;
+    this.flashLayer.animate([{ opacity: 0 }, { opacity: 0.85, offset: 0.18 }, { opacity: 0 }], {
+      duration: this.theme.duration(300),
+      easing: this.theme.ease('outExpo'),
+    });
+  }
+
+  /** Drift / air state, used for subtle HUD reactions only. */
+  setDriveState(drifting: boolean, airborne: boolean): void {
+    this.driftFlag.set(drifting);
+    this.airFlag.set(airborne);
+  }
+
+  /** Dim the HUD while a menu owns the screen. */
+  setDimmed(dim: boolean): void {
+    this.el.classList.toggle('is-dimmed', dim);
+  }
+
+  /** "3 · 2 · 1 · ¡DALE!" — three ticks, then the go card holds for ~0.8 s. */
   startCountdown(): void {
-    this.countdownT = 3.999;
+    this.countdownT = 2.999;
     this.countdownStep = -1;
     this.countNode.classList.add('is-live');
   }
@@ -764,6 +813,7 @@ export class HUD {
     /* patience ---------------------------------------------------------- */
     this.patienceBar.set(this.patience);
     this.patienceLow.set(this.patience < 0.28);
+    this.patienceMid.set(this.patience < 0.58 && this.patience >= 0.28);
 
     /* destination distance ---------------------------------------------- */
     if (this.pendingDistance >= 0) {
@@ -786,7 +836,7 @@ export class HUD {
     this.updatePopups(frame);
 
     /* countdown --------------------------------------------------------- */
-    if (this.countdownT >= 0) {
+    if (this.countdownT > -1) {
       this.countdownT -= raw;
       const step = Math.max(0, Math.ceil(this.countdownT));
       if (step !== this.countdownStep) {
@@ -808,7 +858,8 @@ export class HUD {
           );
         }
       }
-      if (this.countdownT < 0) {
+      if (this.countdownT < -0.85) {
+        this.countdownT = -1;
         this.countNode.classList.remove('is-live');
         this.countdownStep = -1;
         const done = this.onCountdownDone;

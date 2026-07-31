@@ -579,7 +579,7 @@ function genSeaFoam(size: number): Field {
       const small = tileFbm(u * 17, v * 17, 17, 4, 7433);
       const chop = Math.sin((u * 3 + big * 2) * Math.PI * 2) * 0.5 + 0.5;
       f.height[i] = clamp01(0.4 + (big - 0.5) * 0.5 + (small - 0.5) * 0.34 + chop * 0.12);
-      const foam = clamp01((small - 0.74) * 3.4) * clamp01((big - 0.5) * 2);
+      const foam = clamp01((small - 0.60) * 4.2) * clamp01((big - 0.46) * 2.6);
       const col = mixRGB(hexRGB(PALETTE.sea), hexRGB(0xd8ecf4), foam * 0.85);
       setRGB(f, i, col[0], col[1], col[2]);
       f.rough[i] = clamp01(0.10 + foam * 0.55);
@@ -593,6 +593,8 @@ function genSeaFoam(size: number): Field {
 interface SurfaceSpec {
   gen: (size: number) => Field;
   baseSize: number;
+  /** hard ceiling — only the hero surface earns a 1k map */
+  maxSize?: number;
   tileMeters: number;
   normalStrength: number;
   /** relief scale fed to the Sobel — bigger = deeper apparent relief */
@@ -602,7 +604,7 @@ interface SurfaceSpec {
 }
 
 const SPECS: Record<SurfaceId, SurfaceSpec> = {
-  cobblestone: { gen: genCobblestone, baseSize: 512, tileMeters: 1.9, normalStrength: 1.15, relief: 3.4, wantNormal: true, wantRoughness: true },
+  cobblestone: { gen: genCobblestone, baseSize: 512, maxSize: 1024, tileMeters: 1.9, normalStrength: 1.15, relief: 3.4, wantNormal: true, wantRoughness: true },
   flagstone: { gen: genFlagstone, baseSize: 512, tileMeters: 4.2, normalStrength: 0.7, relief: 2.4, wantNormal: true, wantRoughness: true },
   kerbstone: { gen: genKerbstone, baseSize: 256, tileMeters: 2.6, normalStrength: 0.8, relief: 2.6, wantNormal: true, wantRoughness: true },
   sand: { gen: genSand, baseSize: 256, tileMeters: 5.0, normalStrength: 0.55, relief: 1.6, wantNormal: true, wantRoughness: false },
@@ -703,7 +705,7 @@ export class TextureFactory {
     if (hit) return hit;
 
     const spec = SPECS[id];
-    const size = pow2(spec.baseSize * TIER_SCALE[this.quality]);
+    const size = this.sizeFor(spec);
     const field = spec.gen(size);
 
     const albedo = new Uint8Array(size * size * 4);
@@ -769,10 +771,14 @@ export class TextureFactory {
     return maps;
   }
 
+  private sizeFor(spec: SurfaceSpec): number {
+    return pow2(Math.min(spec.baseSize * TIER_SCALE[this.quality], spec.maxSize ?? 512));
+  }
+
   /** Raw height field for a surface — useful for displacement or decals. */
   heightField(id: SurfaceId): { data: Float32Array; size: number } {
     const spec = SPECS[id];
-    const size = pow2(spec.baseSize * TIER_SCALE[this.quality]);
+    const size = this.sizeFor(spec);
     return { data: spec.gen(size).height, size };
   }
 

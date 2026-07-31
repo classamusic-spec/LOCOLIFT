@@ -39,7 +39,6 @@ export class DestinationArrow {
 
   private readonly theme: UITheme;
   private readonly arrow: HTMLElement;
-  private readonly arrowDist: TextSlot;
   private readonly pin: HTMLElement;
   private readonly pinDist: TextSlot;
   private readonly wrongNode: HTMLElement;
@@ -64,11 +63,6 @@ export class DestinationArrow {
     /* the compass arrow ------------------------------------------------- */
     this.arrow = el('div', 'll-nav__arrow');
     this.arrow.append(buildArrow());
-    const distWrap = el('div', 'll-nav__dist');
-    const distVal = el('span', 'll-nav__dist-value', '');
-    distWrap.append(distVal);
-    this.arrow.append(distWrap);
-    this.arrowDist = new TextSlot(distVal);
     this.arrowWrong = new FlagSlot(this.arrow, 'is-wrong');
 
     /* wrong-way banner -------------------------------------------------- */
@@ -165,10 +159,9 @@ export class DestinationArrow {
     const rounded = this.distance >= 1000 ? Math.round(this.distance / 100) : Math.round(this.distance / 5) * 5;
     if (rounded !== this.lastDistText) {
       this.lastDistText = rounded;
-      const text =
-        this.distance >= 1000 ? `${(this.distance / 1000).toFixed(1)} km` : `${rounded} m`;
-      this.arrowDist.set(text);
-      this.pinDist.set(text);
+      this.pinDist.set(
+        this.distance >= 1000 ? `${(this.distance / 1000).toFixed(1)} km` : `${rounded} m`,
+      );
     }
 
     /* world pin ---------------------------------------------------------- */

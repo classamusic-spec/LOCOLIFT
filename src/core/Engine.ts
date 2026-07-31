@@ -38,6 +38,13 @@ export class Engine {
   /** swapped in by the post-processing pipeline */
   private renderHook: ((dt: number) => void) | null = null;
 
+  /**
+   * Runs once per frame before the fixed-step loop. Input must be sampled here:
+   * polling it per fixed step would read the same edge-triggered press several
+   * times in one frame.
+   */
+  private preFrameHook: ((dt: number) => void) | null = null;
+
   /** rolling frame-time ring buffer for perf stats */
   private frameTimes = new Float32Array(180);
   private frameCursor = 0;
@@ -140,6 +147,10 @@ export class Engine {
     this.renderHook = fn;
   }
 
+  setPreFrameHook(fn: ((dt: number) => void) | null): void {
+    this.preFrameHook = fn;
+  }
+
   setInput(input: GameContext['input']): void {
     this.ctx.input = input;
   }
@@ -213,6 +224,9 @@ export class Engine {
     ctx.timeOfDay = this._timeOfDay;
 
     this.renderer.info.reset();
+
+    // Sampled before the fixed loop so edge-triggered presses fire exactly once.
+    this.preFrameHook?.(dt);
 
     if (!this._paused) {
       this.elapsed += dt;

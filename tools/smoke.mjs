@@ -24,7 +24,10 @@ const HEIGHT = Number(arg('height', '900'));
 async function main() {
   await mkdir(OUT, { recursive: true });
 
+  // The environment ships a pinned Chromium that may not match the npm
+  // playwright build number, and we must not re-download browsers here.
   const browser = await chromium.launch({
+    executablePath: process.env.CHROMIUM_PATH ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
     args: [
       '--use-gl=angle',
       '--use-angle=swiftshader',

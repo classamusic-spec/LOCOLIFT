@@ -86,11 +86,11 @@ const SPECS: Record<MaterialId, MaterialSpec> = {
   grass: { surface: 'grass', tile: 4.0, color: 0xffffff, roughness: 1, metalness: 0, normal: 1, wetness: 0.5 },
 
   /* — water — */
-  sea: { surface: 'seaFoam', tile: 26, color: 0x9fd3e4, roughness: 0.08, metalness: 0.08, normal: 1, wetness: 0 },
-  seaDeep: { surface: 'seaFoam', tile: 52, color: 0x5f97b8, roughness: 0.12, metalness: 0.05, normal: 0.7, wetness: 0 },
+  sea: { surface: 'seaFoam', tile: 26, color: PALETTE.sea, roughness: 0.08, metalness: 0.08, normal: 1, wetness: 0 },
+  seaDeep: { surface: 'seaFoam', tile: 52, color: PALETTE.seaDeep, roughness: 0.12, metalness: 0.05, normal: 0.7, wetness: 0 },
 
   /* — vertical surfaces later modules will want — */
-  fortStone: { surface: 'sandstone', tile: 4.5, color: 0xffffff, roughness: 1, metalness: 0, normal: 1, wetness: 0.8 },
+  fortStone: { surface: 'sandstone', tile: 4.5, color: PALETTE.fortStone, roughness: 1, metalness: 0, normal: 1, wetness: 0.8 },
   stucco: { surface: 'stucco', tile: 3.2, color: 0xffffff, roughness: 1, metalness: 0, normal: 1, wetness: 0.7 },
   roofTile: { surface: 'roofTile', tile: 2.2, color: 0xffffff, roughness: 1, metalness: 0, normal: 1, wetness: 0.9 },
 };
@@ -149,17 +149,18 @@ export class MaterialLibrary {
 
     const spec = SPECS[id];
     const maps = this.textures.surface(spec.surface);
-    const mat = new THREE.MeshStandardMaterial({
+    const params: THREE.MeshStandardMaterialParameters = {
       name: `loco/${id}`,
       color: spec.color,
       map: maps.map,
-      normalMap: maps.normalMap ?? undefined,
-      roughnessMap: maps.roughnessMap ?? undefined,
       roughness: spec.roughness,
       metalness: spec.metalness,
       side: spec.side ?? THREE.FrontSide,
       envMapIntensity: id === 'sea' || id === 'seaDeep' ? 1.5 : 0.85,
-    });
+    };
+    if (maps.normalMap) params.normalMap = maps.normalMap;
+    if (maps.roughnessMap) params.roughnessMap = maps.roughnessMap;
+    const mat = new THREE.MeshStandardMaterial(params);
     if (maps.normalMap) {
       const s = maps.normalStrength * spec.normal;
       mat.normalScale = new THREE.Vector2(s, s);
@@ -270,5 +271,3 @@ export class MaterialLibrary {
 export function accentMaterial(hex: number, roughness = 0.7): THREE.MeshStandardMaterial {
   return new THREE.MeshStandardMaterial({ color: hex, roughness, metalness: 0.05 });
 }
-
-export { PALETTE };

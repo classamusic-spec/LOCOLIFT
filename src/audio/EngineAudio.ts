@@ -164,8 +164,8 @@ export class EngineAudio {
   private lastGear = 1;
   private gearShiftTimer = 0;
   private crackleTimer = 0;
-  private curveSoft: Float32Array;
-  private curveHard: Float32Array;
+  private curveSoft: ReturnType<typeof distortionCurve>;
+  private curveHard: ReturnType<typeof distortionCurve>;
   private hardCurveActive = false;
 
   constructor(ctx: BaseAudioContext, destination: AudioNode, opts: EngineAudioOptions = {}) {

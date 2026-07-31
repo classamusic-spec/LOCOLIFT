@@ -34,13 +34,14 @@ const HEIGHT_CELL = 3;
 /** zone field resolution, metres */
 const ZONE_CELL = 8;
 
-/** lattice size — 9 north-south lines x 7 east-west lines = 48 blocks */
+/** lattice size — 9 north-south lines x 8 east-west lines */
 const COLS = 9;
-const ROWS = 7;
+const ROWS = 8;
 const GRID_X0 = -330;
 const GRID_X1 = 330;
 const GRID_Z0 = -250;
-const GRID_Z1 = 190;
+/** the last row is the seaside corniche itself */
+const GRID_Z1 = 244;
 
 const PLAZA_CELL = { i: 2, j: 3 };
 const MARKET_CELL = { i: 5, j: 4 };
@@ -328,10 +329,15 @@ export function baseTerrain(x: number, z: number): number {
   h -= smoothstep((z - 30) / 60) * (1 - smoothstep((z - 150) / 60)) * smoothstep((x - 30) / 120) * 16;
 
   // open water off the western shore
-  h = lerp(h, -11, smoothstep((-x - 372) / 44));
-  // the fortified promontory sits on a raised platform (north-west only)
-  const tip = smoothstep((-x - 292) / 90) * (1 - smoothstep((z + 30) / 90));
-  h = lerp(h, 23, tip * 0.88);
+  h = lerp(h, -11, smoothstep((-x - 356) / 40));
+  // the fortified promontory: a walled platform on the north-western point,
+  // bounded on every side so the headland actually reads as a headland
+  const tip =
+    smoothstep((-x - 340) / 46) *
+    (1 - smoothstep((-x - 400) / 34)) *
+    (1 - smoothstep((z + 30) / 96)) *
+    smoothstep((z + 292) / 46);
+  h = lerp(h, 23, tip * 0.92);
   // the district is walled in by rising ground to the east
   const wall = smoothstep((x - 398) / 44) * smoothstep((z + 300) / 60) * (1 - smoothstep((z - 200) / 100));
   h = lerp(h, 42, wall);
@@ -432,9 +438,36 @@ export function generateCityLayout(rng: RNG): CityLayout {
 
   const builder = new RoadGraphBuilder();
 
-  const xs = spreadLine(rLat, GRID_X0, GRID_X1, COLS, 0.16);
-  const zs = spreadLine(rLat, GRID_Z0, GRID_Z1, ROWS, 0.15);
+  const xs = spreadLine(rLat, GRID_X0, GRID_X1, COLS, 0.26);
+  const zs = spreadLine(rLat, GRID_Z0, GRID_Z1, ROWS, 0.24);
 
+  /**
+   * Each grid line meanders: a bounded random walk of lateral offsets along its
+   * own length. Streets stay recognisably straight over one block but drift and
+   * kink over several, which is what makes a colonial grid feel hand-laid.
+   */
+  const colOff: number[][] = [];
+  for (let i = 0; i < COLS; i++) {
+    const walk: number[] = [];
+    let v = rLat.range(-9, 9);
+    for (let j = 0; j < ROWS; j++) {
+      v = clamp(v + rLat.range(-8.5, 8.5), -13, 13);
+      walk.push(v);
+    }
+    colOff.push(walk);
+  }
+  const rowOff: number[][] = [];
+  for (let j = 0; j < ROWS; j++) {
+    const walk: number[] = [];
+    let v = rLat.range(-8, 8);
+    for (let i = 0; i < COLS; i++) {
+      v = clamp(v + rLat.range(-7.5, 7.5), -11, 11);
+      walk.push(v);
+    }
+    rowOff.push(walk);
+  }
+
+  const SHEAR = 5.4;
   const latticeX: number[][] = [];
   const latticeZ: number[][] = [];
   const nodeId: number[][] = [];
@@ -443,18 +476,20 @@ export function generateCityLayout(rng: RNG): CityLayout {
     latticeZ.push([]);
     nodeId.push([]);
     for (let j = 0; j < ROWS; j++) {
-      const x = xs[i] + fbm2D(i * 1.9 + 3.1, j * 2.7 + 0.4, 2, 4409) * 9 + (j - 3) * 4.6;
-      const z = zs[j] + fbm2D(i * 1.3 + 21.7, j * 2.1 + 9.9, 2, 8123) * 8;
+      const x = xs[i] + colOff[i][j] + (j - (ROWS - 1) * 0.5) * SHEAR;
+      const z = zs[j] + rowOff[j][i] + (i - (COLS - 1) * 0.5) * 1.6;
       latticeX[i].push(x);
       latticeZ[i].push(z);
       nodeId[i].push(builder.addNode(new THREE.Vector3(x, baseTerrain(x, z), z)));
     }
   }
 
+  const COAST_ROW = ROWS - 1;
+
   const cellZone = (i: number, j: number): DistrictZone => {
     if (i === PLAZA_CELL.i && j === PLAZA_CELL.j) return 'plazaMayor';
     if (i === MARKET_CELL.i && j === MARKET_CELL.j) return 'marketRow';
-    if (j >= 5) return 'waterfront';
+    if (j >= COAST_ROW - 2) return 'waterfront';
     if (i >= 5 && j >= 3) return 'hillside';
     if (i >= 4 && j <= 1) return 'artQuarter';
     if (i === 0 && j <= 1) return 'fortress';
@@ -465,12 +500,84 @@ export function generateCityLayout(rng: RNG): CityLayout {
   const touchesPlaza = (i: number, j: number): boolean =>
     (i === PLAZA_CELL.i || i === PLAZA_CELL.i + 1) && (j === PLAZA_CELL.j || j === PLAZA_CELL.j + 1);
 
-  const colEdge: number[][] = []; // colEdge[i][j] : node(i,j) -> node(i,j+1)
+  /* --- pick a few internal streets to delete, merging their blocks --- */
+
+  interface Merge {
+    i: number;
+    j: number;
+    /** 'h' merges (i,j) with (i+1,j) by deleting colEdge[i+1][j] */
+    axis: 'h' | 'v';
+  }
+  const merges: Merge[] = [];
+  const mergedInto = new Map<string, Merge>();
+  const suppressedCol = new Set<string>();
+  const suppressedRow = new Set<string>();
+
+  const specialCell = (i: number, j: number): boolean =>
+    (i === PLAZA_CELL.i && j === PLAZA_CELL.j) ||
+    (i === MARKET_CELL.i && j === MARKET_CELL.j) ||
+    (i === PLAZUELA_CELL.i && j === PLAZUELA_CELL.j);
+
+  const cellPoint = (i: number, j: number): V2 => v2(latticeX[i][j], latticeZ[i][j]);
+  const convex = (poly: V2[]): boolean => {
+    let sign = 0;
+    for (let k = 0; k < poly.length; k++) {
+      const a = poly[k];
+      const b = poly[(k + 1) % poly.length];
+      const c = poly[(k + 2) % poly.length];
+      const cr = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+      if (Math.abs(cr) < 1e-6) continue;
+      const s = cr > 0 ? 1 : -1;
+      if (sign === 0) sign = s;
+      else if (s !== sign) return false;
+    }
+    return true;
+  };
+
+  for (let attempt = 0; attempt < 26 && merges.length < 7; attempt++) {
+    const axis: 'h' | 'v' = rLat.bool(0.5) ? 'h' : 'v';
+    const i = rLat.int(0, COLS - 2 - (axis === 'h' ? 1 : 0));
+    const j = rLat.int(0, COAST_ROW - 2 - (axis === 'v' ? 1 : 0));
+    if (j >= COAST_ROW - 1) continue;
+    const a: [number, number] = [i, j];
+    const b: [number, number] = axis === 'h' ? [i + 1, j] : [i, j + 1];
+    if (specialCell(a[0], a[1]) || specialCell(b[0], b[1])) continue;
+    if (mergedInto.has(`${a[0]},${a[1]}`) || mergedInto.has(`${b[0]},${b[1]}`)) continue;
+    const key = axis === 'h' ? `c${i + 1},${j}` : `r${i},${j + 1}`;
+    if (axis === 'h' ? suppressedCol.has(key) : suppressedRow.has(key)) continue;
+
+    const poly = ensureCCW(
+      axis === 'h'
+        ? [
+            cellPoint(i, j), cellPoint(i + 1, j), cellPoint(i + 2, j),
+            cellPoint(i + 2, j + 1), cellPoint(i + 1, j + 1), cellPoint(i, j + 1),
+          ]
+        : [
+            cellPoint(i, j), cellPoint(i + 1, j),
+            cellPoint(i + 1, j + 1), cellPoint(i + 1, j + 2),
+            cellPoint(i, j + 2), cellPoint(i, j + 1),
+          ],
+    );
+    if (!convex(poly)) continue;
+
+    const m: Merge = { i, j, axis };
+    merges.push(m);
+    mergedInto.set(`${a[0]},${a[1]}`, m);
+    mergedInto.set(`${b[0]},${b[1]}`, m);
+    if (axis === 'h') suppressedCol.add(key);
+    else suppressedRow.add(key);
+  }
+
+  const colEdge: number[][] = []; // colEdge[i][j] : node(i,j) -> node(i,j+1), -1 when deleted
   const rowEdge: number[][] = []; // rowEdge[i][j] : node(i,j) -> node(i+1,j)
 
   for (let i = 0; i < COLS; i++) {
     colEdge.push([]);
     for (let j = 0; j < ROWS - 1; j++) {
+      if (i > 0 && i < COLS - 1 && suppressedCol.has(`c${i},${j}`)) {
+        colEdge[i].push(-1);
+        continue;
+      }
       const wide = touchesPlaza(i, j) || touchesPlaza(i, j + 1);
       const w = wide ? 10.5 : 7 + rLat.range(0, 2);
       colEdge[i].push(builder.addEdge(nodeId[i][j], nodeId[i][j + 1], { kind: 'street', width: w }));
@@ -479,6 +586,22 @@ export function generateCityLayout(rng: RNG): CityLayout {
   for (let i = 0; i < COLS - 1; i++) {
     rowEdge.push([]);
     for (let j = 0; j < ROWS; j++) {
+      if (j > 0 && j < COAST_ROW && suppressedRow.has(`r${i},${j}`)) {
+        rowEdge[i].push(-1);
+        continue;
+      }
+      if (j === COAST_ROW) {
+        // the bottom line of the grid *is* the wide seaside corniche
+        const a = builder.pos(nodeId[i][j]);
+        const b = builder.pos(nodeId[i + 1][j]);
+        const mid = new THREE.Vector3().lerpVectors(a, b, 0.5);
+        mid.z += rLat.range(-9, 9);
+        mid.y = baseTerrain(mid.x, mid.z);
+        rowEdge[i].push(
+          builder.addEdge(nodeId[i][j], nodeId[i + 1][j], { kind: 'coastal', width: 14, via: [mid] }),
+        );
+        continue;
+      }
       const wide = touchesPlaza(i, j) || touchesPlaza(i + 1, j);
       const w = j === 0 ? 11 : wide ? 10.5 : 7 + rLat.range(0, 2);
       rowEdge[i].push(builder.addEdge(nodeId[i][j], nodeId[i + 1][j], { kind: 'street', width: w }));
@@ -488,30 +611,52 @@ export function generateCityLayout(rng: RNG): CityLayout {
   /* ----------------------------------------------- 2. cell geometry pass */
 
   const cells: CellGeom[] = [];
+  const emitCell = (i: number, j: number, poly: V2[], edgeIds: number[]): void => {
+    const quad = ensureCCW(poly);
+    const zone = cellZone(i, j);
+    const open = zone === 'plazaMayor' || zone === 'marketRow';
+    const widths = quadEdgeWidths(quad, builder, edgeIds.filter((e) => e >= 0));
+    const inset = widths.map((w) => w * 0.5 + SIDEWALK_W + 0.7);
+    let buildable = insetPolygon(quad, inset);
+    if (!buildable) buildable = uniformInset(quad, Math.max(...inset));
+    let courtyard: V2[] | null = null;
+    if (buildable) {
+      // per-side depths: the ring thickness varies around the block, which is
+      // what makes the patios read as organic rather than stamped
+      const depths = buildable.map(() => rLot.range(11, 18));
+      courtyard = bestInsetVarying(buildable, depths);
+    }
+    cells.push({ i, j, zone, quad, buildable, courtyard, open });
+  };
+
   for (let i = 0; i < COLS - 1; i++) {
-    for (let j = 0; j < ROWS - 1; j++) {
-      const quad = ensureCCW([
-        v2(latticeX[i][j], latticeZ[i][j]),
-        v2(latticeX[i + 1][j], latticeZ[i + 1][j]),
-        v2(latticeX[i + 1][j + 1], latticeZ[i + 1][j + 1]),
-        v2(latticeX[i][j + 1], latticeZ[i][j + 1]),
-      ]);
-      const zone = cellZone(i, j);
-      const open = zone === 'plazaMayor' || zone === 'marketRow';
-      const widths = quadEdgeWidths(quad, builder, [
-        rowEdge[i][j],
-        colEdge[i + 1][j],
-        rowEdge[i][j + 1],
-        colEdge[i][j],
-      ]);
-      const inset = widths.map((w) => w * 0.5 + SIDEWALK_W + 0.7);
-      const buildable = insetPolygon(quad, inset);
-      let courtyard: V2[] | null = null;
-      if (buildable) {
-        const want = rLot.range(12.5, 17.5);
-        courtyard = bestInset(buildable, want);
+    for (let j = 0; j < COAST_ROW; j++) {
+      const merge = mergedInto.get(`${i},${j}`);
+      if (merge) {
+        if (merge.i !== i || merge.j !== j) continue; // emitted by the anchor cell
+        if (merge.axis === 'h') {
+          emitCell(i, j, [
+            cellPoint(i, j), cellPoint(i + 1, j), cellPoint(i + 2, j),
+            cellPoint(i + 2, j + 1), cellPoint(i + 1, j + 1), cellPoint(i, j + 1),
+          ], [
+            rowEdge[i][j], rowEdge[i + 1][j], colEdge[i + 2][j],
+            rowEdge[i + 1][j + 1], rowEdge[i][j + 1], colEdge[i][j],
+          ]);
+        } else {
+          emitCell(i, j, [
+            cellPoint(i, j), cellPoint(i + 1, j),
+            cellPoint(i + 1, j + 1), cellPoint(i + 1, j + 2),
+            cellPoint(i, j + 2), cellPoint(i, j + 1),
+          ], [
+            rowEdge[i][j], colEdge[i + 1][j], colEdge[i + 1][j + 1],
+            rowEdge[i][j + 2], colEdge[i][j + 1], colEdge[i][j],
+          ]);
+        }
+        continue;
       }
-      cells.push({ i, j, zone, quad, buildable, courtyard, open });
+      emitCell(i, j, [
+        cellPoint(i, j), cellPoint(i + 1, j), cellPoint(i + 1, j + 1), cellPoint(i, j + 1),
+      ], [rowEdge[i][j], colEdge[i + 1][j], rowEdge[i][j + 1], colEdge[i][j]]);
     }
   }
 
@@ -532,83 +677,65 @@ export function generateCityLayout(rng: RNG): CityLayout {
       colEdge[PLAZA_CELL.i][PLAZA_CELL.j],
     ];
     for (const e of ring) {
+      if (e < 0 || builder.edge(e).via.length > 0) continue;
       const nid = builder.splitEdge(e, 0.5, 'plaza');
       builder.addEdge(nid, centreId, { kind: 'plaza', width: 12, noTraffic: false });
     }
   }
 
-  /* --------------------------------------------- 4. coastal road & berths */
+  /* ------------------------------------------------ 4. berths & the apron */
 
-  const coastNodes: number[] = [];
-  const coastCount = 9;
-  for (let k = 0; k < coastCount; k++) {
-    const t = k / (coastCount - 1);
-    const x = lerp(-312, 336, t);
-    const z = 243 + fbm2D(x * 0.006, 4.4, 2, 5501) * 13;
-    coastNodes.push(builder.addNode(new THREE.Vector3(x, baseTerrain(x, z), z)));
-  }
-  for (let k = 0; k < coastCount - 1; k++) {
-    const a = builder.pos(coastNodes[k]);
-    const b = builder.pos(coastNodes[k + 1]);
-    const mid = new THREE.Vector3().lerpVectors(a, b, 0.5);
-    mid.z += fbm2D(mid.x * 0.02, 9.1, 2, 3313) * 7;
-    mid.y = baseTerrain(mid.x, mid.z);
-    builder.addEdge(coastNodes[k], coastNodes[k + 1], { kind: 'coastal', width: 14, via: [mid] });
-  }
-  // connect the bottom lattice row down to the coast road
-  for (let i = 1; i < COLS; i += 2) {
-    const from = nodeId[i][ROWS - 1];
-    let best = 0;
-    let bestD = Infinity;
-    for (let k = 0; k < coastCount; k++) {
-      const d = builder.pos(coastNodes[k]).distanceToSquared(builder.pos(from));
-      if (d < bestD) {
-        bestD = d;
-        best = k;
-      }
-    }
-    builder.addEdge(from, coastNodes[best], { kind: 'street', width: 9 });
-  }
-  // cruise berth spurs reaching out over the water on piles
+  // Cruise berths hang off the corniche on piles, over the bay.
   const berthApron: number[] = [];
-  for (const k of [2, 4]) {
-    const base = builder.pos(coastNodes[k]);
-    const px = base.x + 6;
-    const pz = base.z + 34;
-    const apron = builder.addNode(new THREE.Vector3(px, baseTerrain(px, pz), pz));
-    builder.addEdge(coastNodes[k], apron, { kind: 'street', width: 12 });
+  for (const i of [2, 4]) {
+    const base = builder.pos(nodeId[i][COAST_ROW]);
+    const bx = base.x + rLat.range(-8, 8);
+    const bz = base.z + 32;
+    const apron = builder.addNode(new THREE.Vector3(bx, baseTerrain(bx, bz), bz));
+    builder.addEdge(nodeId[i][COAST_ROW], apron, { kind: 'street', width: 12 });
     berthApron.push(apron);
   }
   if (berthApron.length === 2) {
     const a = builder.pos(berthApron[0]);
     const b = builder.pos(berthApron[1]);
     const mid = new THREE.Vector3().lerpVectors(a, b, 0.5);
-    mid.z += 6;
+    mid.z += 7;
     mid.y = baseTerrain(mid.x, mid.z);
     builder.addEdge(berthApron[0], berthApron[1], { kind: 'coastal', width: 12, via: [mid] });
   }
 
   /* --------------------------------------------- 5. fortress spur & glacis */
 
-  const fortGateX = -388;
-  const fortGateZ = -150;
+  const fortGateX = -382;
+  const fortGateZ = -146;
   const gateNode = builder.addNode(
     new THREE.Vector3(fortGateX, baseTerrain(fortGateX, fortGateZ), fortGateZ),
   );
   // approach road from the westernmost lattice column, hugging the promontory
   {
-    const mid = new THREE.Vector3(-372, 0, -116);
+    const from = builder.pos(nodeId[0][2]);
+    const mid = new THREE.Vector3((from.x + fortGateX) * 0.5 - 6, 0, (from.z + fortGateZ) * 0.5 + 10);
     mid.y = baseTerrain(mid.x, mid.z);
     builder.addEdge(nodeId[0][2], gateNode, { kind: 'street', width: 10, via: [mid] });
   }
-  // glacis road curving north from the gate back to the cliff-top corniche
-  const glacisTurn = new THREE.Vector3(-396, 0, -212);
-  glacisTurn.y = baseTerrain(glacisTurn.x, glacisTurn.z);
-  const glacisMid = new THREE.Vector3(-374, 0, -252);
-  glacisMid.y = baseTerrain(glacisMid.x, glacisMid.z);
-  builder.addEdge(gateNode, nodeId[0][0], { kind: 'street', width: 9, via: [glacisTurn, glacisMid] });
-  // a second, tighter approach used as a shortcut
-  const postern = new THREE.Vector3(-368, 0, -178);
+  // the covered way running north along the ramparts to the cliff-top corniche
+  const rampartNodes: number[] = [];
+  for (const p of [
+    [-396, -196],
+    [-390, -246],
+  ] as const) {
+    rampartNodes.push(builder.addNode(new THREE.Vector3(p[0], baseTerrain(p[0], p[1]), p[1])));
+  }
+  builder.addEdge(gateNode, rampartNodes[0], { kind: 'street', width: 9 });
+  builder.addEdge(rampartNodes[0], rampartNodes[1], { kind: 'street', width: 9 });
+  builder.addEdge(rampartNodes[1], nodeId[0][0], { kind: 'street', width: 9 });
+  // southern battery road, out along the point and back to the same street the
+  // approach leaves from — a triangle, so the two never cross mid-block
+  const battery = builder.addNode(new THREE.Vector3(-390, baseTerrain(-390, -92), -92));
+  builder.addEdge(gateNode, battery, { kind: 'street', width: 8 });
+  builder.addEdge(battery, nodeId[0][2], { kind: 'street', width: 8 });
+  // a postern gate: narrow, steep, a shortcut only a taxi driver would take
+  const postern = new THREE.Vector3(-364, 0, -184);
   postern.y = baseTerrain(postern.x, postern.z);
   const posternNode = builder.addNode(postern);
   builder.addEdge(gateNode, posternNode, { kind: 'alley', width: 4.5, noTraffic: true, oneWay: false });
@@ -617,12 +744,16 @@ export function generateCityLayout(rng: RNG): CityLayout {
   /* --------------------------------------------------- 6. alleys & stairs */
 
   const alleyCells: Array<[number, number]> = [
+    [PLAZUELA_CELL.i, PLAZUELA_CELL.j],
     [1, 1],
     [3, 1],
     [1, 4],
     [4, 3],
     [6, 1],
-    [PLAZUELA_CELL.i, PLAZUELA_CELL.j],
+    [2, 5],
+    [5, 2],
+    [7, 1],
+    [0, 3],
   ];
   for (const [ci, cj] of alleyCells) {
     if (ci < 0 || ci >= COLS - 1 || cj < 0 || cj >= ROWS - 1) continue;
@@ -631,6 +762,7 @@ export function generateCityLayout(rng: RNG): CityLayout {
     const vertical = rMisc.bool(0.5);
     const eTop = vertical ? rowEdge[ci][cj] : colEdge[ci][cj];
     const eBot = vertical ? rowEdge[ci][cj + 1] : colEdge[ci + 1][cj];
+    if (!splittable(builder, eTop) || !splittable(builder, eBot)) continue;
     const t0 = rMisc.range(0.38, 0.62);
     const t1 = rMisc.range(0.38, 0.62);
     const nA = builder.splitEdge(eTop, t0);
@@ -638,21 +770,34 @@ export function generateCityLayout(rng: RNG): CityLayout {
     builder.addEdge(nA, nB, { kind: 'alley', width: 4, noTraffic: true, oneWay: false });
   }
 
-  const stairCells: Array<[number, number]> = [
-    [5, 3],
-    [6, 4],
-    [7, 3],
-    [4, 4],
-  ];
-  for (const [ci, cj] of stairCells) {
-    if (ci < 0 || ci >= COLS - 1 || cj < 0 || cj >= ROWS - 1) continue;
-    const cell = cellAt(ci, cj);
-    if (!cell || cell.open) continue;
-    const eTop = rowEdge[ci][cj];
-    const eBot = rowEdge[ci][cj + 1];
-    const nA = builder.splitEdge(eTop, rMisc.range(0.32, 0.5));
-    const nB = builder.splitEdge(eBot, rMisc.range(0.5, 0.68));
+  // Stair streets go where the ground falls hardest: score every hillside block
+  // by the drop across it and cut the steepest ones.
+  const stairCandidates: Array<{ i: number; j: number; drop: number }> = [];
+  for (let ci = 3; ci < COLS - 1; ci++) {
+    for (let cj = 1; cj < COAST_ROW - 1; cj++) {
+      const cell = cellAt(ci, cj);
+      if (!cell || cell.open) continue;
+      if (!splittable(builder, rowEdge[ci][cj]) || !splittable(builder, rowEdge[ci][cj + 1])) continue;
+      const top = builder.pos(nodeId[ci][cj]).y;
+      const bot = builder.pos(nodeId[ci][cj + 1]).y;
+      const run = Math.max(20, Math.abs(latticeZ[ci][cj + 1] - latticeZ[ci][cj]));
+      stairCandidates.push({ i: ci, j: cj, drop: Math.abs(top - bot) / run });
+    }
+  }
+  stairCandidates.sort((a, b) => b.drop - a.drop);
+  const stairUsed = new Set<string>();
+  let stairsPlaced = 0;
+  for (const cand of stairCandidates) {
+    if (stairsPlaced >= 5) break;
+    if (stairUsed.has(`${cand.i},${cand.j}`)) continue;
+    if (!splittable(builder, rowEdge[cand.i][cand.j]) || !splittable(builder, rowEdge[cand.i][cand.j + 1])) continue;
+    const nA = builder.splitEdge(rowEdge[cand.i][cand.j], rMisc.range(0.32, 0.5));
+    const nB = builder.splitEdge(rowEdge[cand.i][cand.j + 1], rMisc.range(0.5, 0.68));
     builder.addEdge(nA, nB, { kind: 'stairs', width: 5, noTraffic: true });
+    stairUsed.add(`${cand.i},${cand.j}`);
+    stairUsed.add(`${cand.i - 1},${cand.j}`);
+    stairUsed.add(`${cand.i + 1},${cand.j}`);
+    stairsPlaced++;
   }
 
   /* ---------------------------------------------------------- 7. ramps */
@@ -661,13 +806,14 @@ export function generateCityLayout(rng: RNG): CityLayout {
     // a timber ramp off the fort ravelin, out over the glacis
     { from: gateNode, dir: new THREE.Vector2(0.62, -0.78), rise: 2.9, len: 16 },
     // a loading ramp on the cruise apron
-    { from: berthApron.length ? berthApron[0] : coastNodes[2], dir: new THREE.Vector2(0.97, 0.24), rise: 2.4, len: 14 },
+    { from: berthApron.length ? berthApron[0] : nodeId[3][COAST_ROW], dir: new THREE.Vector2(0.97, 0.24), rise: 2.4, len: 14 },
     // builders' ramp where the hillside meets the boundary wall
-    { from: nodeId[COLS - 1][3], dir: new THREE.Vector2(0.98, 0.2), rise: 3.2, len: 17 },
+    { from: nodeId[COLS - 1][4], dir: new THREE.Vector2(0.98, 0.2), rise: 3.2, len: 17 },
   ];
   for (const spec of rampSpecs) {
     const base = builder.pos(spec.from);
-    const d = spec.dir.clone().normalize();
+    const d = clearRampDirection(builder, spec.from, spec.dir.clone().normalize());
+    if (!d) continue;
     const tip = new THREE.Vector3(base.x + d.x * spec.len, base.y + spec.rise, base.z + d.y * spec.len);
     const tipId = builder.addNode(tip, 'ramp');
     builder.addEdge(spec.from, tipId, { kind: 'ramp', width: 7, noTraffic: true });
@@ -745,7 +891,7 @@ export function generateCityLayout(rng: RNG): CityLayout {
 
   // the fort's cleared field of fire, west of the last street
   const glacis = pushArea(
-    [v2(-418, -246), v2(-356, -258), v2(-352, -104), v2(-402, -92)],
+    [v2(-404, -252), v2(-352, -258), v2(-348, -74), v2(-398, -66)],
     'fortress',
     'grass',
     true,
@@ -762,7 +908,7 @@ export function generateCityLayout(rng: RNG): CityLayout {
   );
 
   const dockApron = pushArea(
-    [v2(-150, 260), v2(160, 264), v2(160, 292), v2(-150, 288)],
+    [v2(-150, 266), v2(160, 270), v2(160, 296), v2(-150, 292)],
     'waterfront',
     'asphalt',
     true,
@@ -771,7 +917,7 @@ export function generateCityLayout(rng: RNG): CityLayout {
 
   // small sand cove west of the berths, waterline runs through it
   const caleta = pushArea(
-    [v2(-304, 284), v2(-198, 290), v2(-196, 322), v2(-306, 316)],
+    [v2(-300, 278), v2(-206, 284), v2(-204, 320), v2(-302, 312)],
     'waterfront',
     'sand',
     true,
@@ -780,7 +926,7 @@ export function generateCityLayout(rng: RNG): CityLayout {
 
   // Roads win the final say: a second, tighter pass puts every carriageway back
   // exactly on its own centreline, including where one crosses a plaza floor.
-  carveRoads(grid, roads, 7);
+  carveRoads(grid, roads, 9);
 
   for (const a of areas) a.center.y = groundHeight(a.center.x, a.center.z);
 
@@ -939,6 +1085,52 @@ export function generateCityLayout(rng: RNG): CityLayout {
 
 /* ------------------------------------------------------------- utilities */
 
+/**
+ * A ramp deck must not overhang the streets meeting the same junction, or the
+ * car drives into the underside of it. Rotate the requested heading until it
+ * clears every incident approach by a comfortable margin.
+ */
+function clearRampDirection(
+  builder: RoadGraphBuilder,
+  fromNode: number,
+  want: THREE.Vector2,
+): THREE.Vector2 | null {
+  const node = builder.node(fromNode);
+  const base = builder.pos(fromNode);
+  const taken: number[] = [];
+  for (const e of node.edges) {
+    const ed = builder.edge(e);
+    const other = ed.a === fromNode ? ed.b : ed.a;
+    const p = ed.via.length > 0 && ed.a === fromNode ? ed.via[0] : builder.pos(other);
+    taken.push(Math.atan2(p.z - base.z, p.x - base.x));
+  }
+  const wantA = Math.atan2(want.y, want.x);
+  const MIN_SEP = (46 * Math.PI) / 180;
+  for (let step = 0; step <= 10; step++) {
+    for (const sign of step === 0 ? [1] : [1, -1]) {
+      const a = wantA + sign * step * ((18 * Math.PI) / 180);
+      let ok = true;
+      for (const t of taken) {
+        let d = Math.abs(((a - t + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
+        d = Math.PI - d;
+        if (d < MIN_SEP) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) return new THREE.Vector2(Math.cos(a), Math.sin(a));
+    }
+  }
+  return null;
+}
+
+/** an edge can host an alley or stair mouth only if it exists and is straight */
+function splittable(builder: RoadGraphBuilder, edgeId: number): boolean {
+  if (edgeId < 0) return false;
+  const e = builder.edge(edgeId);
+  return !!e && e.via.length === 0 && e.length > 22;
+}
+
 /** n positions between a and b with jittered but monotone spacing */
 function spreadLine(rng: RNG, a: number, b: number, n: number, jitter: number): number[] {
   const raw: number[] = [0];
@@ -976,12 +1168,71 @@ function quadEdgeWidths(quad: V2[], builder: RoadGraphBuilder, edgeIds: number[]
 /** biggest inset up to `want` that still yields a healthy courtyard */
 function bestInset(poly: V2[], want: number): V2[] | null {
   let d = want;
-  const target = signedArea(poly) * 0.1;
-  for (let k = 0; k < 8; k++) {
+  const target = signedArea(poly) * 0.09;
+  for (let k = 0; k < 9; k++) {
     const r = uniformInset(poly, d);
     if (r && signedArea(r) > target) return r;
     d *= 0.78;
-    if (d < 5) break;
+    if (d < 4.5) break;
+  }
+  return null;
+}
+
+/**
+ * A courtyard is only usable if the ring between it and the block boundary
+ * partitions cleanly: every segment must have positive area and no two spokes
+ * (the party walls running back from the street) may cross. Without this an
+ * uneven inset silently produces overlapping lots.
+ */
+function validRing(outer: readonly V2[], inner: readonly V2[]): boolean {
+  const n = outer.length;
+  if (inner.length !== n) return false;
+  if (signedArea(inner) < signedArea(outer) * 0.05) return false;
+  for (let k = 0; k < n; k++) {
+    if (!pointInPolygon(outer, inner[k].x, inner[k].y)) return false;
+    const back = Math.hypot(inner[k].x - outer[k].x, inner[k].y - outer[k].y);
+    if (back < 7 || back > 28) return false;
+  }
+  for (let k = 0; k < n; k++) {
+    const k1 = (k + 1) % n;
+    // ring segment must wind the same way as the block
+    const quad = [outer[k], outer[k1], inner[k1], inner[k]];
+    if (signedArea(quad) < 4) return false;
+    // spokes must stay clear of one another
+    for (let m = k + 1; m < n; m++) {
+      if (m === k1 || (k === 0 && m === n - 1)) continue;
+      if (
+        segSegDist(
+          outer[k].x, outer[k].y, inner[k].x, inner[k].y,
+          outer[m].x, outer[m].y, inner[m].x, inner[m].y,
+        ) < 0.05
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/**
+ * Courtyard inset with a different depth on every side — the block ring ends up
+ * thicker on some frontages than others, like a real patio block.
+ */
+function bestInsetVarying(poly: V2[], depths: number[]): V2[] | null {
+  let scale = 1;
+  for (let k = 0; k < 10; k++) {
+    const r = insetPolygon(poly, depths.map((d) => d * scale));
+    if (r && validRing(poly, r)) return r;
+    scale *= 0.84;
+    if (scale < 0.35) break;
+  }
+  // fall back to a uniform ring, then to a solid block
+  let d = Math.min(...depths);
+  for (let k = 0; k < 10; k++) {
+    const r = uniformInset(poly, d);
+    if (r && validRing(poly, r)) return r;
+    d *= 0.86;
+    if (d < 7) break;
   }
   return null;
 }
@@ -1831,6 +2082,62 @@ export function validateCityLayout(layout: CityLayout): LayoutValidation {
     for (const e of n.edges) {
       const ed = roads.edges[e];
       if (!ed || (ed.a !== n.id && ed.b !== n.id)) errors.push(`node ${n.id} lists a foreign edge ${e}`);
+    }
+  }
+
+  /* no two streets may cross except at a shared node — the district has no
+     grade separation, so a crossing is always a missing intersection */
+  const net = roads as RoadNetworkImpl;
+  let crossings = 0;
+  const box = roads.edges.map((e) => {
+    const b = net.polyline(e.id);
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    for (let i = 0; i < b.count; i++) {
+      const x = b.points[i * 3];
+      const z = b.points[i * 3 + 2];
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (z < minZ) minZ = z;
+      if (z > maxZ) maxZ = z;
+    }
+    return { minX, maxX, minZ, maxZ };
+  });
+  for (let a = 0; a < roads.edges.length; a++) {
+    const ea = roads.edges[a];
+    if (ea.kind === 'ramp' || ea.kind === 'rooftop') continue;
+    const ba = net.polyline(a);
+    for (let b = a + 1; b < roads.edges.length; b++) {
+      const eb = roads.edges[b];
+      if (eb.kind === 'ramp' || eb.kind === 'rooftop') continue;
+      if (ea.a === eb.a || ea.a === eb.b || ea.b === eb.a || ea.b === eb.b) continue;
+      if (
+        box[a].maxX < box[b].minX || box[b].maxX < box[a].minX ||
+        box[a].maxZ < box[b].minZ || box[b].maxZ < box[a].minZ
+      ) {
+        continue;
+      }
+      const bb = net.polyline(b);
+      let hit = false;
+      for (let i = 0; i < ba.count - 1 && !hit; i++) {
+        for (let k = 0; k < bb.count - 1; k++) {
+          if (
+            segSegDist(
+              ba.points[i * 3], ba.points[i * 3 + 2], ba.points[i * 3 + 3], ba.points[i * 3 + 5],
+              bb.points[k * 3], bb.points[k * 3 + 2], bb.points[k * 3 + 3], bb.points[k * 3 + 5],
+            ) < 0.01
+          ) {
+            hit = true;
+            break;
+          }
+        }
+      }
+      if (hit) {
+        crossings++;
+        if (crossings <= 6) errors.push(`edges ${a} (${ea.kind}) and ${b} (${eb.kind}) cross without an intersection`);
+      }
     }
   }
 
