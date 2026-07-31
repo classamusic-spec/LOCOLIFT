@@ -32,7 +32,6 @@ import {
   svg,
   TextSlot,
   UITheme,
-  VarSlot,
 } from './UITheme';
 
 /* ------------------------------------------------------------------- types */
@@ -176,13 +175,11 @@ export class HUD {
 
   /* fare */
   private readonly fareValue: TextSlot;
-  private readonly fareNode: HTMLElement;
   private readonly fareTicking: FlagSlot;
   private scoreTarget = 0;
   private scoreShown = 0;
 
   /* combo */
-  private readonly comboNode: HTMLElement;
   private readonly comboValue: TextSlot;
   private readonly comboBar: ScaleSlot;
   private readonly comboOn: FlagSlot;
@@ -196,7 +193,6 @@ export class HUD {
 
   /* boost */
   private readonly boostFill: ScaleSlot;
-  private readonly boostNode: HTMLElement;
   private readonly boostFull: FlagSlot;
   private readonly boostActive: FlagSlot;
 
@@ -279,7 +275,6 @@ export class HUD {
     fare.append(fareLabel, fareRow);
     fare.setAttribute('role', 'status');
     fare.setAttribute('aria-label', 'Fare total');
-    this.fareNode = fare;
     this.fareValue = new TextSlot(fareVal);
     this.fareTicking = new FlagSlot(fare, 'is-ticking');
 
@@ -295,7 +290,6 @@ export class HUD {
     comboTrack.append(comboFill);
     comboStack.append(comboLabel, comboTrack);
     combo.append(comboChip, comboStack);
-    this.comboNode = combo;
     this.comboValue = new TextSlot(comboV);
     this.comboBar = new ScaleSlot(comboFill, 0.004);
     this.comboOn = new FlagSlot(combo, 'is-on');
@@ -439,7 +433,6 @@ export class HUD {
     const boostFill = el('div', 'll-boost__fill');
     boostTrack.append(boostFill, el('div', 'll-boost__ticks'));
     boost.append(boostLabel, boostTrack);
-    this.boostNode = boost;
     this.boostFill = new ScaleSlot(boostFill, 0.004);
     this.boostFull = new FlagSlot(boost, 'is-full');
     this.boostActive = new FlagSlot(boost, 'is-active');

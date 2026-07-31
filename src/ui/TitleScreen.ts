@@ -251,6 +251,15 @@ export class TitleScreen implements NavigableScreen {
       this.panelTitle.set('CRÉDITOS · Credits');
       this.renderCredits();
     }
+    if (!this.theme.flashSafe) {
+      this.panel.animate(
+        [
+          { transform: 'translateY(-50%) translate3d(24px, 0, 0)', opacity: 0 },
+          { transform: 'translateY(-50%) translate3d(0, 0, 0)', opacity: 1 },
+        ],
+        { duration: this.theme.duration(260), easing: this.theme.ease('outExpo') },
+      );
+    }
     this.panelNav.focusFirst();
   }
 

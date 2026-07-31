@@ -168,7 +168,6 @@ export class UISystem implements System {
   private viewH = 720;
 
   private score = 0;
-  private comboMultiplier = 1;
 
   private readonly frame: HudFrame;
   private readonly forward = new THREE.Vector3();
@@ -537,7 +536,6 @@ export class UISystem implements System {
         this.tally.bestComboAtStart = d.biggestCombo;
       }
       this.score = 0;
-      this.comboMultiplier = 1;
       this.hud.setScore(0, true);
       this.hud.breakCombo();
       this.hud.setTime(p.duration, p.duration);
@@ -576,7 +574,6 @@ export class UISystem implements System {
     });
 
     on('combo:multiplier', (p) => {
-      this.comboMultiplier = p.multiplier;
       this.tally.bestCombo = Math.max(this.tally.bestCombo, p.multiplier);
       this.hud.setCombo(p.multiplier, COMBO_WINDOW);
     });

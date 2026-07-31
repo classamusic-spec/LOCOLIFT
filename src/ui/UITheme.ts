@@ -435,7 +435,8 @@ export function svg<K extends keyof SVGElementTagNameMap>(
  */
 export class TextSlot {
   readonly el: HTMLElement;
-  private last = ' ';
+  /** null = never written, so the first `set` always lands. */
+  private last: string | null = null;
 
   constructor(target: HTMLElement) {
     this.el = target;

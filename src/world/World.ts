@@ -2,15 +2,21 @@
  * Loco Lift — the world system.
  *
  * Owns the district: generates the layout, builds the ground and the collider,
- * holds the shared texture and material libraries, and runs the sun / sky /
- * ambient rig. Everything else in the game reads the world through `WorldAPI`.
+ * and holds the shared texture and material libraries. Everything else in the
+ * game reads the world through `WorldAPI`.
  *
- * Later visual modules (buildings, props, vegetation, weather) attach with
+ * The sun / sky / fog / weather rig lives in `src/fx` and is *delegated*, not
+ * duplicated: `Lighting` owns the key light, fill, shadow camera, fog and the
+ * street-lamp field; `Sky` owns the dome and the environment capture; `Weather`
+ * owns rain, storms and the wet-surface drive. `World` keeps the public
+ * surface (`setTimeOfDay`, `setWeather`, `sun`, `spawnPoint`, `registerLayer`)
+ * exactly as it was so `main.ts` and every other system are unaffected.
+ *
+ * Later visual modules (buildings, props, vegetation) attach with
  * {@link World.registerLayer} and are built, updated and disposed by the world.
  */
 import * as THREE from 'three';
 import { QUALITY_BUDGET } from '../core/Config';
-import { clamp, clamp01, damp, lerp, smoothstep } from '../core/MathUtils';
 import type {
   GameContext,
   POI,
@@ -21,90 +27,21 @@ import type {
   WorldAPI,
 } from '../core/types';
 import type { RNG } from '../core/RNG';
+import { Lighting } from '../fx/Lighting';
+import { Sky } from '../fx/Sky';
+import { Weather } from '../fx/Weather';
+import type { SkyWeather } from '../fx/LightingPresets';
 import { generateCityLayout, DISTRICT_BOUNDS, SEA_LEVEL } from './CityLayout';
 import { Ground } from './Ground';
 import { MaterialLibrary } from './Materials';
 import { TextureFactory } from './TextureFactory';
 import type { CityLayout, WorldLayer, WorldOpts } from './WorldTypes';
 
-export type WeatherKind = 'clear' | 'rain' | 'storm' | 'sunset' | 'night';
+export type WeatherKind = SkyWeather;
 
-/* ---------------------------------------------------------------- sky dome */
-
-const SKY_VERT = /* glsl */ `
-varying vec3 vDir;
-void main() {
-  vDir = position;
-  gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
-}
-`;
-
-const SKY_FRAG = /* glsl */ `
-uniform vec3 uZenith;
-uniform vec3 uHorizon;
-uniform vec3 uGround;
-uniform vec3 uSunColor;
-uniform vec3 uSunDir;
-uniform float uHaze;
-varying vec3 vDir;
-
-// NOTE: three injects tonemapping_pars_fragment and colorspace_pars_fragment
-// into the fragment prefix for every ShaderMaterial, so including them here
-// too redefines toneMappingExposure and every tone-mapping function. Only the
-// apply-chunks below are ours to include.
-#include <common>
-
-void main() {
-  vec3 d = normalize( vDir );
-  float up = d.y;
-
-  // vertical gradient: horizon haze -> zenith
-  float t = pow( clamp( up, 0.0, 1.0 ), 0.62 );
-  vec3 col = mix( uHorizon, uZenith, t );
-  // below the horizon fades into a dull sea haze
-  col = mix( uGround, col, smoothstep( -0.22, 0.02, up ) );
-
-  float sd = max( dot( d, uSunDir ), 0.0 );
-  // broad atmospheric scatter around the sun, strongest near the horizon
-  col += uSunColor * pow( sd, 3.0 ) * 0.22 * uHaze;
-  col += uSunColor * pow( sd, 32.0 ) * 0.45;
-  // the disc itself
-  col += uSunColor * smoothstep( 0.9975, 0.99925, sd ) * 5.0;
-
-  gl_FragColor = vec4( col, 1.0 );
-
-  #include <tonemapping_fragment>
-  #include <colorspace_fragment>
-}
-`;
-
-/* ------------------------------------------------------- lighting profile */
-
-interface SkyState {
-  zenith: THREE.Color;
-  horizon: THREE.Color;
-  ground: THREE.Color;
-  sunColor: THREE.Color;
-  sunIntensity: number;
-  hemiSky: THREE.Color;
-  hemiGround: THREE.Color;
-  hemiIntensity: number;
-  ambient: number;
-  fogColor: THREE.Color;
-  fogNear: number;
-  fogFar: number;
-  haze: number;
-}
-
-const LATITUDE = (18.46 * Math.PI) / 180;
-const DECLINATION = (14 * Math.PI) / 180;
-
-const SHADOW_EXTENT: Record<QualityTier, number> = {
-  low: 70,
-  medium: 95,
-  high: 125,
-  ultra: 155,
-};
+/** Canonical hours the two "weather" shorthands jump the clock to (§4.2). */
+const SUNSET_HOUR = 18.25;
+const NIGHT_HOUR = 22.0;
 
 /* ------------------------------------------------------------------ world */
 
@@ -126,26 +63,13 @@ export class World implements System, WorldAPI {
   /** private stream, so world queries never shift another system's draws */
   private rng: RNG;
 
-  /* lighting rig */
-  private _sun = new THREE.DirectionalLight(0xffffff, 3);
-  private hemi = new THREE.HemisphereLight(0x9fc7ef, 0xb59a72, 0.9);
-  private ambient = new THREE.AmbientLight(0xffffff, 0.12);
-  private skyMesh: THREE.Mesh;
-  private skyUniforms: {
-    uZenith: { value: THREE.Color };
-    uHorizon: { value: THREE.Color };
-    uGround: { value: THREE.Color };
-    uSunColor: { value: THREE.Color };
-    uSunDir: { value: THREE.Vector3 };
-    uHaze: { value: number };
-  };
-  private fog = new THREE.Fog(0x8fb8d8, 60, 900);
+  /* lighting / sky / weather rig — owned by src/fx, driven from here */
+  readonly lighting: Lighting;
+  readonly sky: Sky;
+  readonly weatherFx: Weather;
 
   private _timeOfDay = 12;
   private _weather: WeatherKind = 'clear';
-  private sunDir = new THREE.Vector3(0.3, 0.85, 0.4);
-  private shadowFocus = new THREE.Vector3();
-  private focusTarget = new THREE.Vector3();
 
   /* lot lookup for isBlocked */
   private lotCell = 18;
@@ -156,9 +80,6 @@ export class World implements System, WorldAPI {
   private pending: Array<Promise<void>> = [];
   private unsubs: Array<() => void> = [];
   private disposed = false;
-
-  private tmpV = new THREE.Vector3();
-  private tmpV2 = new THREE.Vector3();
 
   private constructor(opts: WorldOpts, layout: CityLayout) {
     this.opts = opts;
@@ -178,60 +99,34 @@ export class World implements System, WorldAPI {
     this.materials = new MaterialLibrary(this.textures, opts.quality);
     this.ground = new Ground(this.materials, opts.physics, opts.quality);
 
-    /* --- lighting rig --- */
-    this._sun.name = 'world/sun';
-    this._sun.castShadow = true;
-    const shadowMap = QUALITY_BUDGET[opts.quality].shadowMapSize;
-    this._sun.shadow.mapSize.set(shadowMap, shadowMap);
-    const ext = SHADOW_EXTENT[opts.quality];
-    const cam = this._sun.shadow.camera;
-    cam.left = -ext;
-    cam.right = ext;
-    cam.top = ext;
-    cam.bottom = -ext;
-    cam.near = 1;
-    cam.far = 780;
-    cam.updateProjectionMatrix();
-    this._sun.shadow.bias = -0.0007;
-    this._sun.shadow.normalBias = 0.55;
-    this._sun.target.position.set(0, 0, 0);
-    this.root.add(this._sun);
-    this.root.add(this._sun.target);
-    this.root.add(this.hemi);
-    this.root.add(this.ambient);
-
-    this.skyUniforms = {
-      uZenith: { value: new THREE.Color(0x2f79c9) },
-      uHorizon: { value: new THREE.Color(0xbcd8ea) },
-      uGround: { value: new THREE.Color(0x2a3844) },
-      uSunColor: { value: new THREE.Color(0xfff0d8) },
-      uSunDir: { value: new THREE.Vector3(0, 1, 0) },
-      uHaze: { value: 1 },
-    };
-    const skyGeo = new THREE.SphereGeometry(1, 32, 20);
-    const skyMat = new THREE.ShaderMaterial({
-      name: 'loco/sky',
-      uniforms: this.skyUniforms,
-      vertexShader: SKY_VERT,
-      fragmentShader: SKY_FRAG,
-      side: THREE.BackSide,
-      depthWrite: false,
-      depthTest: false,
-      fog: false,
+    /* --- lighting / sky / weather rig (src/fx) --- */
+    this.lighting = new Lighting({
+      scene: opts.scene,
+      quality: opts.quality,
+      roads: this.roads,
+      materials: this.materials,
+      groundHeight: (x, z) => layout.groundHeight(x, z),
     });
-    this.skyMesh = new THREE.Mesh(skyGeo, skyMat);
-    this.skyMesh.name = 'world/sky';
-    this.skyMesh.renderOrder = -1000;
-    this.skyMesh.frustumCulled = false;
-    this.skyMesh.scale.setScalar(400);
-    this.root.add(this.skyMesh);
+    this.root.add(this.lighting.group);
+
+    this.sky = new Sky(opts.quality);
+    this.root.add(this.sky.mesh);
 
     opts.scene.add(this.root);
-    opts.scene.fog = this.fog;
+    opts.scene.fog = this.lighting.fog;
 
     this.ground.build(layout, opts);
     this.root.add(this.ground.group);
 
+    this.weatherFx = new Weather({
+      materials: this.materials,
+      lighting: this.lighting,
+      quality: opts.quality,
+      rng: this.rng,
+    });
+    this.registerLayer(this.weatherFx);
+
+    this.lighting.focusOn(layout.spawn.pos);
     this.setTimeOfDay(12);
   }
 
@@ -278,7 +173,7 @@ export class World implements System, WorldAPI {
   }
 
   get sun(): THREE.DirectionalLight {
-    return this._sun;
+    return this.lighting.sun;
   }
 
   get timeOfDay(): number {
@@ -329,161 +224,24 @@ export class World implements System, WorldAPI {
   /* ------------------------------------------------------------- lighting */
 
   /**
-   * `hours` in 0..24. Drives the sun elevation and azimuth from a real solar
-   * model at San Juan's latitude, then the sky, fog and fill lights from that.
+   * `hours` in 0..24. Interpolates the §4.2 time-of-day presets and pushes the
+   * result into the lighting rig, the sky dome and the post-processing state.
    */
   setTimeOfDay(hours: number): void {
     this._timeOfDay = ((hours % 24) + 24) % 24;
-    const hourAngle = (this._timeOfDay - 12) * (Math.PI / 12);
-    const sinEl =
-      Math.sin(DECLINATION) * Math.sin(LATITUDE) +
-      Math.cos(DECLINATION) * Math.cos(LATITUDE) * Math.cos(hourAngle);
-    const elevation = Math.asin(clamp(sinEl, -1, 1));
-    const cosEl = Math.cos(elevation);
-
-    // east at dawn (+X), west at dusk (-X), leaning a touch south at midday
-    this.sunDir.set(-Math.sin(hourAngle) * cosEl, Math.sin(elevation), 0.32 * cosEl * Math.cos(hourAngle));
-    if (this.sunDir.lengthSq() < 1e-6) this.sunDir.set(0, 1, 0);
-    this.sunDir.normalize();
-
-    const state = this.skyState(elevation);
-    this.applySkyState(state);
+    this.lighting.setTimeOfDay(this._timeOfDay);
+    this.sky.apply(this.lighting.state);
   }
 
   setWeather(kind: WeatherKind): void {
     this._weather = kind;
-    if (kind === 'sunset') this.setTimeOfDay(18.15);
-    else if (kind === 'night') this.setTimeOfDay(0.6);
+    if (kind === 'sunset') this.setTimeOfDay(SUNSET_HOUR);
+    else if (kind === 'night') this.setTimeOfDay(NIGHT_HOUR);
     else this.setTimeOfDay(this._timeOfDay);
-  }
-
-  /** Full lighting/sky description for a sun elevation, modulated by weather. */
-  private skyState(elevation: number): SkyState {
-    const day = clamp01(smoothstep((elevation + 0.10) / 0.24));
-    const noon = clamp01(smoothstep((elevation - 0.12) / 0.8));
-    const golden = clamp01(1 - Math.abs(elevation - 0.10) / 0.28);
-    const night = 1 - day;
-
-    const zenith = new THREE.Color(0x060c22).lerp(new THREE.Color(0x2668b8), day);
-    zenith.lerp(new THREE.Color(0x1f6ecb), noon);
-    const horizon = new THREE.Color(0x101a30).lerp(new THREE.Color(0xf2a765), day);
-    horizon.lerp(new THREE.Color(0xc7e0f2), noon);
-    horizon.lerp(new THREE.Color(0xff8f52), golden * 0.7);
-    const ground = new THREE.Color(0x090f18).lerp(new THREE.Color(0x4c5a5e), day);
-
-    const sunColor = new THREE.Color(0xff5a1f)
-      .lerp(new THREE.Color(0xffb46a), clamp01(elevation / 0.25))
-      .lerp(new THREE.Color(0xfff3e0), noon);
-
-    let sunIntensity = lerp(0.0, 3.5, day) * lerp(0.72, 1, noon);
-    if (night > 0.85) sunIntensity = 0.34; // moonlight takes over
-
-    const hemiSky = new THREE.Color(0x0a1430).lerp(new THREE.Color(0x9ec9f2), day);
-    const hemiGround = new THREE.Color(0x100e14).lerp(new THREE.Color(0xb2916a), day);
-    let hemiIntensity = lerp(0.28, 1.15, day);
-    let ambient = lerp(0.09, 0.16, day);
-
-    const budget = QUALITY_BUDGET[this.quality];
-    let fogNear = budget.drawDistance * 0.30;
-    let fogFar = budget.drawDistance * 1.45;
-    const fogColor = horizon.clone().lerp(zenith, 0.25);
-    let haze = lerp(0.35, 1.3, golden) + noon * 0.2;
-
-    switch (this._weather) {
-      case 'rain':
-        sunIntensity *= 0.32;
-        hemiIntensity *= 1.05;
-        ambient *= 1.5;
-        fogNear *= 0.35;
-        fogFar *= 0.5;
-        fogColor.lerp(new THREE.Color(0x6d7986), 0.62);
-        zenith.lerp(new THREE.Color(0x53606d), 0.7);
-        horizon.lerp(new THREE.Color(0x7b8794), 0.72);
-        haze *= 0.4;
-        break;
-      case 'storm':
-        sunIntensity *= 0.16;
-        hemiIntensity *= 0.85;
-        ambient *= 1.4;
-        fogNear *= 0.2;
-        fogFar *= 0.32;
-        fogColor.lerp(new THREE.Color(0x40474f), 0.8);
-        zenith.lerp(new THREE.Color(0x2f363e), 0.85);
-        horizon.lerp(new THREE.Color(0x4d545c), 0.85);
-        haze *= 0.25;
-        break;
-      case 'night':
-        fogFar *= 0.8;
-        break;
-      case 'sunset':
-        haze *= 1.4;
-        break;
-      default:
-        break;
-    }
-
-    return {
-      zenith,
-      horizon,
-      ground,
-      sunColor,
-      sunIntensity,
-      hemiSky,
-      hemiGround,
-      hemiIntensity,
-      ambient,
-      fogColor,
-      fogNear,
-      fogFar,
-      haze,
-    };
-  }
-
-  private applySkyState(s: SkyState): void {
-    this.skyUniforms.uZenith.value.copy(s.zenith);
-    this.skyUniforms.uHorizon.value.copy(s.horizon);
-    this.skyUniforms.uGround.value.copy(s.ground);
-    this.skyUniforms.uSunColor.value.copy(s.sunColor);
-    this.skyUniforms.uSunDir.value.copy(this.sunDir);
-    this.skyUniforms.uHaze.value = s.haze;
-
-    const night = this.sunDir.y < -0.02;
-    this._sun.color.copy(night ? new THREE.Color(0xa8c2ea) : s.sunColor);
-    this._sun.intensity = s.sunIntensity;
-    // the moon stands opposite the sun so nights are still readable
-    this.tmpV.copy(this.sunDir);
-    if (night) this.tmpV.multiplyScalar(-1).setY(Math.max(0.32, -this.sunDir.y));
-    this.tmpV.normalize();
-    this.tmpV2.copy(this.tmpV);
-
-    this.hemi.color.copy(s.hemiSky);
-    this.hemi.groundColor.copy(s.hemiGround);
-    this.hemi.intensity = s.hemiIntensity;
-    this.ambient.intensity = s.ambient;
-
-    this.fog.color.copy(s.fogColor);
-    this.fog.near = s.fogNear;
-    this.fog.far = s.fogFar;
-
-    const wet = this._weather === 'rain' ? 1 : this._weather === 'storm' ? 1 : 0;
-    this.materials.setWetness(wet);
-
-    this.positionSun();
-  }
-
-  /** Places the shadow camera around the current focus point. */
-  private positionSun(): void {
-    const dir = this.tmpV2.lengthSq() > 0.1 ? this.tmpV2 : this.sunDir;
-    const ext = SHADOW_EXTENT[this.quality];
-    // snap the focus to the shadow texel grid to keep edges from crawling
-    const texel = (ext * 2) / QUALITY_BUDGET[this.quality].shadowMapSize;
-    const fx = Math.round(this.shadowFocus.x / texel) * texel;
-    const fz = Math.round(this.shadowFocus.z / texel) * texel;
-    const fy = this.shadowFocus.y;
-    this._sun.target.position.set(fx, fy, fz);
-    this._sun.target.updateMatrixWorld();
-    this._sun.position.set(fx + dir.x * 300, fy + dir.y * 300, fz + dir.z * 300);
-    this._sun.updateMatrixWorld();
+    // `false`: World is normally reacting to `weather:changed` already, and the
+    // weather layer re-announces only when it changes state on its own.
+    this.weatherFx.setKind(kind, false);
+    this.sky.apply(this.lighting.state);
   }
 
   /* --------------------------------------------------------------- system */
@@ -492,7 +250,8 @@ export class World implements System, WorldAPI {
     this.unsubs.push(
       ctx.bus.on('weather:changed', (e) => this.setWeather(e.kind as WeatherKind)),
     );
-    this.shadowFocus.copy(this.layout.spawn.pos);
+    this.weatherFx.attach(ctx);
+    this.lighting.focusOn(this.layout.spawn.pos);
     this.setTimeOfDay(ctx.timeOfDay);
   }
 
@@ -501,46 +260,22 @@ export class World implements System, WorldAPI {
 
     this.materials.update(dt);
 
-    // keep the sky dome wrapped around the viewer, inside the far plane
+    // Key light, fill, shadow-camera fit and the lamp pool.
+    this.lighting.update(ctx, dt);
+
+    // Layers (weather included) run next so a weather crossfade is already
+    // folded into the lighting state before the sky reads it.
     const cam = ctx.camera;
-    this.skyMesh.position.copy(cam.position);
-    const radius = clamp(cam.far * 0.4, 60, 1400);
-    if (Math.abs(this.skyMesh.scale.x - radius) > 1) this.skyMesh.scale.setScalar(radius);
-
-    // aim the shadow volume a little ahead of the camera
-    cam.getWorldDirection(this.tmpV);
-    const ext = SHADOW_EXTENT[this.quality];
-    this.focusTarget.set(
-      cam.position.x + this.tmpV.x * ext * 0.45,
-      0,
-      cam.position.z + this.tmpV.z * ext * 0.45,
-    );
-    this.focusTarget.y = this.groundHeight(this.focusTarget.x, this.focusTarget.z);
-    const rate = dt > 0 ? 9 : 0;
-    this.shadowFocus.set(
-      damp(this.shadowFocus.x, this.focusTarget.x, rate, dt),
-      damp(this.shadowFocus.y, this.focusTarget.y, rate, dt),
-      damp(this.shadowFocus.z, this.focusTarget.z, rate, dt),
-    );
-    this.positionSun();
-
     for (const layer of this.layers) layer.update?.(cam.position, dt, this._timeOfDay);
+
+    this.sky.apply(this.lighting.state);
+    this.sky.update(dt, cam, ctx.renderer, ctx.scene);
   }
 
   onQualityChange(tier: QualityTier, settings: SettingsState): void {
     this.quality = tier;
-    const map = QUALITY_BUDGET[tier].shadowMapSize;
-    this._sun.castShadow = settings.shadows;
-    this._sun.shadow.mapSize.set(map, map);
-    this._sun.shadow.map?.dispose();
-    this._sun.shadow.map = null;
-    const ext = SHADOW_EXTENT[tier];
-    const cam = this._sun.shadow.camera;
-    cam.left = -ext;
-    cam.right = ext;
-    cam.top = ext;
-    cam.bottom = -ext;
-    cam.updateProjectionMatrix();
+    this.lighting.onQualityChange(tier, settings);
+    this.sky.onQualityChange(tier);
     this.ground.onQualityChange?.(tier);
     for (const layer of this.layers) layer.onQualityChange?.(tier);
     this.setTimeOfDay(this._timeOfDay);
@@ -554,14 +289,13 @@ export class World implements System, WorldAPI {
     for (const layer of this.layers) layer.dispose();
     this.layers.length = 0;
     this.ground.dispose();
+    this.sky.dispose();
+    this.lighting.dispose();
     this.materials.dispose();
     this.textures.dispose();
-    this.skyMesh.geometry.dispose();
-    (this.skyMesh.material as THREE.Material).dispose();
-    this._sun.shadow.map?.dispose();
     this.root.removeFromParent();
     this.root.clear();
-    if (this.opts.scene.fog === this.fog) this.opts.scene.fog = null;
+    if (this.opts.scene.fog === this.lighting.fog) this.opts.scene.fog = null;
   }
 
   /* --------------------------------------------------------------- lookup */
@@ -619,6 +353,8 @@ export class World implements System, WorldAPI {
       layers: this.layers.length,
       timeOfDay: this._timeOfDay,
       seaLevel: SEA_LEVEL,
+      ...this.lighting.stats(),
+      ...this.weatherFx.stats(),
     };
   }
 }

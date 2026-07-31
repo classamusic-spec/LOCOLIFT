@@ -24,6 +24,7 @@ import { World, type WeatherKind } from './world/World';
 import { Vehicle } from './vehicle/Vehicle';
 import { ChaseCamera } from './camera/ChaseCamera';
 import { AudioSystem } from './audio/AudioSystem';
+import { UISystem } from './ui/UISystem';
 
 /**
  * Steps the solver. Registered last so every system has already applied its
@@ -103,12 +104,20 @@ async function boot(): Promise<void> {
   audio.setVehicle(vehicle);
   audio.setWorld(world);
 
+  const ui = new UISystem({
+    settings: settingsStore,
+    save,
+    vehicle,
+    world,
+  });
+
   engine.add(world);
   engine.add(vehicle);
   engine.add(new PhysicsStepper(physics));
   engine.add(camera);
   // After the camera: the listener is refreshed in lateUpdate from final transforms.
   engine.add(audio);
+  engine.add(ui);
 
   // Input is sampled once per frame; `airborne` remaps steering to air control.
   engine.setPreFrameHook((dt) => {
@@ -120,7 +129,7 @@ async function boot(): Promise<void> {
   engine.timeOfDay = 15.5;
   engine.start();
 
-  installTestHook(engine, input, world, vehicle, camera, save);
+  installTestHook(engine, input, world, vehicle, camera, save, ui, audio);
 }
 
 function installTestHook(
@@ -130,19 +139,26 @@ function installTestHook(
   vehicle: Vehicle,
   camera: ChaseCamera,
   save: SaveSystem,
+  ui: UISystem,
+  audio: AudioSystem,
 ): void {
   const hook: LocoTestHook = {
     ready: true,
     showTitle() {
       camera.setShowcase(true, vehicle.object3d);
+      ui.setState('title');
     },
     startArcade() {
       camera.setShowcase(false);
       camera.snapToTarget();
       engine.paused = false;
+      ui.setState('playing');
+      ui.showCountdown();
+      void audio.unlock();
     },
     pause() {
       engine.paused = !engine.paused;
+      ui.setState(engine.paused ? 'paused' : 'playing');
     },
     setInput(partial) {
       input.setOverride({ ...(input.state as InputState), ...partial });
