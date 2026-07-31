@@ -32,6 +32,7 @@ import { Sky } from '../fx/Sky';
 import { Weather } from '../fx/Weather';
 import type { SkyWeather } from '../fx/LightingPresets';
 import { generateCityLayout, DISTRICT_BOUNDS, SEA_LEVEL } from './CityLayout';
+import { Buildings } from './Buildings';
 import { Ground } from './Ground';
 import { MaterialLibrary } from './Materials';
 import { TextureFactory } from './TextureFactory';
@@ -57,6 +58,7 @@ export class World implements System, WorldAPI {
   readonly textures: TextureFactory;
   readonly materials: MaterialLibrary;
   readonly ground: Ground;
+  readonly buildings: Buildings;
 
   private quality: QualityTier;
   private opts: WorldOpts;
@@ -117,6 +119,10 @@ export class World implements System, WorldAPI {
 
     this.ground.build(layout, opts);
     this.root.add(this.ground.group);
+
+    // Façades come before weather so the wetness pass sees the full district.
+    this.buildings = new Buildings(opts.quality, this.textures);
+    this.registerLayer(this.buildings);
 
     this.weatherFx = new Weather({
       materials: this.materials,
