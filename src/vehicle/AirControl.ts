@@ -15,12 +15,20 @@ import * as THREE from 'three';
 import type { EventBus } from '../core/EventBus';
 import { clamp, clamp01 } from '../core/MathUtils';
 import type { BodyHandle } from '../physics/PhysicsTypes';
-import { AIR } from './VehicleTuning';
+import { JEEP_TUNING } from './VehicleTuning';
+import type { AirTuning, VehicleTuningSet } from './VehicleTuning';
 import type { VehicleFrame } from './Suspension';
 
 const WORLD_UP = /* @__PURE__ */ new THREE.Vector3(0, 1, 0);
 
 export class AirControl {
+  /** this vehicle's air constants */
+  private readonly T: AirTuning;
+
+  constructor(tuning: VehicleTuningSet = JEEP_TUNING) {
+    this.T = tuning.air;
+  }
+
   /** seconds since the last wheel left the ground; 0 while grounded */
   airtime = 0;
   /** true once airtime passed the jump threshold — the public `isAirborne` */
@@ -94,7 +102,7 @@ export class AirControl {
     bus: EventBus,
   ): number {
     const grounded = groundedCount > 0;
-    this.levelEnough = Math.acos(clamp(frame.upDot, -1, 1)) <= AIR.cleanLandingAngle;
+    this.levelEnough = Math.acos(clamp(frame.upDot, -1, 1)) <= this.T.cleanLandingAngle;
 
     if (grounded) {
       let landedPoints = 0;
@@ -122,12 +130,12 @@ export class AirControl {
     if (frame.pos.y > this.peakY) this.peakY = frame.pos.y;
     this.height = this.peakY - this.takeoffY;
 
-    if (!this.jumpAnnounced && this.airtime >= AIR.minAirtimeForJump) {
+    if (!this.jumpAnnounced && this.airtime >= this.T.minAirtimeForJump) {
       this.jumpAnnounced = true;
       this.airborne = true;
       bus.emit('vehicle:jumpStart', { speed: frame.speed });
     }
-    if (this.airtime >= AIR.minAirtimeForJump) this.airborne = true;
+    if (this.airtime >= this.T.minAirtimeForJump) this.airborne = true;
 
     this.integrateTricks(dt, frame, bus);
     this.applyRotation(dt, frame, body, airPitch, airRoll);
@@ -144,8 +152,8 @@ export class AirControl {
   ): void {
     const pitchIn = clamp(airPitch, -1, 1);
     const rollIn = clamp(airRoll, -1, 1);
-    const pitchActive = Math.abs(pitchIn) > AIR.autoLevelInputDeadzone;
-    const rollActive = Math.abs(rollIn) > AIR.autoLevelInputDeadzone;
+    const pitchActive = Math.abs(pitchIn) > this.T.autoLevelInputDeadzone;
+    const rollActive = Math.abs(rollIn) > this.T.autoLevelInputDeadzone;
 
     /* read live rather than trusting the frame snapshot: impulses applied
      * earlier this step have already changed the body's angular velocity */
@@ -155,19 +163,19 @@ export class AirControl {
      * +rate about `right`   = nose up
      * +rate about `forward` = right side down (roll right)
      * +rate about `up`      = nose swings left                                */
-    ang.addScaledVector(frame.right, AIR.pitchAccel * pitchIn * dt);
-    ang.addScaledVector(frame.forward, AIR.rollAccel * rollIn * dt);
-    ang.addScaledVector(frame.up, -AIR.yawAccel * rollIn * dt);
+    ang.addScaledVector(frame.right, this.T.pitchAccel * pitchIn * dt);
+    ang.addScaledVector(frame.forward, this.T.rollAccel * rollIn * dt);
+    ang.addScaledVector(frame.up, -this.T.yawAccel * rollIn * dt);
 
-    clampAxis(ang, frame.right, AIR.maxPitchRate);
-    clampAxis(ang, frame.forward, AIR.maxRollRate);
-    clampAxis(ang, frame.up, AIR.maxYawRate);
+    clampAxis(ang, frame.right, this.T.maxPitchRate);
+    clampAxis(ang, frame.forward, this.T.maxRollRate);
+    clampAxis(ang, frame.up, this.T.maxYawRate);
 
     /* --- passive damping: a real car in the air does not spin forever --- */
-    ang.multiplyScalar(Math.exp(-AIR.angularDamping * dt));
-    if (!pitchActive) dampAxis(ang, frame.right, AIR.idleAxisDamping, dt);
-    if (!rollActive) dampAxis(ang, frame.forward, AIR.idleAxisDamping, dt);
-    dampAxis(ang, frame.up, AIR.idleAxisDamping * 0.5, dt);
+    ang.multiplyScalar(Math.exp(-this.T.angularDamping * dt));
+    if (!pitchActive) dampAxis(ang, frame.right, this.T.idleAxisDamping, dt);
+    if (!rollActive) dampAxis(ang, frame.forward, this.T.idleAxisDamping, dt);
+    dampAxis(ang, frame.up, this.T.idleAxisDamping * 0.5, dt);
 
     /* --- auto-level assist ---
      * A PD controller that drives the chassis up-axis back to vertical. It
@@ -177,10 +185,10 @@ export class AirControl {
      * player keeps whatever heading they chose. */
     if (!pitchActive && !rollActive) {
       const ramp =
-        clamp01(this.airtime / Math.max(1e-3, AIR.autoLevelRampTime)) *
+        clamp01(this.airtime / Math.max(1e-3, this.T.autoLevelRampTime)) *
         (1 +
-          AIR.autoLevelDescentBoost *
-            clamp01(-frame.linVel.y / AIR.autoLevelDescentSpeed));
+          this.T.autoLevelDescentBoost *
+            clamp01(-frame.linVel.y / this.T.autoLevelDescentSpeed));
       const axis = this.axis.copy(frame.up).cross(WORLD_UP);
       const sinA = axis.length();
       if (sinA > 1e-5) {
@@ -188,9 +196,9 @@ export class AirControl {
         const angle = Math.atan2(sinA, clamp(frame.upDot, -1, 1));
         const rateAlong = ang.dot(axis);
         const accel = clamp(
-          AIR.autoLevelStrength * angle * ramp - AIR.autoLevelDamping * rateAlong,
-          -AIR.autoLevelMaxAccel,
-          AIR.autoLevelMaxAccel,
+          this.T.autoLevelStrength * angle * ramp - this.T.autoLevelDamping * rateAlong,
+          -this.T.autoLevelMaxAccel,
+          this.T.autoLevelMaxAccel,
         );
         ang.addScaledVector(axis, accel * dt);
       }
@@ -207,18 +215,18 @@ export class AirControl {
 
   /** Watch for completed rotations and pay them out the instant they land. */
   private integrateTricks(dt: number, frame: VehicleFrame, bus: EventBus): void {
-    if (this.airtime < AIR.minAirtimeForJump) return;
+    if (this.airtime < this.T.minAirtimeForJump) return;
 
     this.rollAccum += frame.rollRate * dt;
     this.pitchAccum += frame.pitchRate * dt;
     this.yawAccum += frame.yawRate * dt;
 
-    const full = AIR.trickFullTurn;
+    const full = this.T.trickFullTurn;
 
     while (Math.abs(this.rollAccum) >= full) {
       this.rollAccum -= Math.sign(this.rollAccum) * full;
       this.rollCount++;
-      this.award(bus, chainName('Barrel Roll', this.rollCount), AIR.barrelRollPoints, this.rollCount);
+      this.award(bus, chainName('Barrel Roll', this.rollCount), this.T.barrelRollPoints, this.rollCount);
     }
 
     while (Math.abs(this.pitchAccum) >= full) {
@@ -226,18 +234,18 @@ export class AirControl {
       this.pitchAccum -= sign * full;
       this.flipCount++;
       const base = sign > 0 ? 'Backflip' : 'Frontflip';
-      this.award(bus, chainName(base, this.flipCount), AIR.flipPoints, this.flipCount);
+      this.award(bus, chainName(base, this.flipCount), this.T.flipPoints, this.flipCount);
     }
 
     while (Math.abs(this.yawAccum) >= full) {
       this.yawAccum -= Math.sign(this.yawAccum) * full;
       this.spinCount++;
-      this.award(bus, `${this.spinCount * 360} Spin`, AIR.spinPoints, this.spinCount);
+      this.award(bus, `${this.spinCount * 360} Spin`, this.T.spinPoints, this.spinCount);
     }
   }
 
   private award(bus: EventBus, name: string, base: number, chain: number): void {
-    const points = Math.round(base * Math.pow(AIR.trickChainMultiplier, chain - 1));
+    const points = Math.round(base * Math.pow(this.T.trickChainMultiplier, chain - 1));
     this.trickPoints += points;
     bus.emit('vehicle:airTrick', { name, points });
   }
@@ -250,10 +258,10 @@ export class AirControl {
     this.lastLandingClean = clean;
 
     let points = 0;
-    if (airtime >= AIR.minScoringAirtime) {
+    if (airtime >= this.T.minScoringAirtime) {
       points = Math.round(
-        (airtime * AIR.pointsPerSecond + height * AIR.pointsPerMetre) *
-          (clean ? AIR.cleanLandingBonus : 1),
+        (airtime * this.T.pointsPerSecond + height * this.T.pointsPerMetre) *
+          (clean ? this.T.cleanLandingBonus : 1),
       );
     }
     points += this.trickPoints;

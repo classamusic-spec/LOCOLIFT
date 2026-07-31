@@ -1,14 +1,19 @@
 /**
- * Loco Lift — the Jeep.
+ * Loco Lift — the player's vehicle.
  *
  * One dynamic box body plus four raycast struts. Everything the player feels is
  * produced here: torque curve and gearbox, per-wheel slip-angle tyres,
  * speed-sensitive steering with a bounded yaw-rate assist, drift, boost, air
- * control and every anti-frustration net that stops the Jeep getting stuck.
+ * control and every anti-frustration net that stops the player getting stuck.
+ *
+ * This class is vehicle-agnostic. Which vehicle it is comes entirely from the
+ * `VehicleTuningSet` it is handed at construction (`opts.vehicleId`, resolved
+ * through `VehicleRoster`): the Jeep and the Chinchorreo bus run the exact same
+ * code and feel nothing alike. There is not one branch on vehicle type below.
  *
  * Design rules this file follows without exception:
  *  - No realistic tyre sim. Arcade responsiveness wins every argument.
- *  - Every feel constant lives in VehicleTuning.ts. Nothing is hard-coded here.
+ *  - Every feel constant lives in a tuning record. Nothing is hard-coded here.
  *  - Forces are applied as impulses (force · dt) so we never depend on whether
  *    the physics backend clears accumulated forces between steps.
  *  - Zero allocation in fixedUpdate / update / lateUpdate.
@@ -39,55 +44,60 @@ import { GROUP } from '../physics/PhysicsTypes';
 import { AirControl } from './AirControl';
 import { BoostSystem } from './BoostSystem';
 import { DriftModel } from './DriftModel';
-import { JeepModel } from './JeepModel';
 import { Suspension } from './Suspension';
 import type { VehicleFrame } from './Suspension';
 import {
-  AIR,
-  BOOST,
-  BRAKE,
-  CHASSIS,
-  COLLISION,
-  DRIFT,
-  ENGINE,
-  GEAR_COUNT,
-  MODEL,
-  NEAR_MISS,
-  RECOVERY,
-  SPEED,
-  STEER,
-  SUSPENSION,
-  TWO_WHEELS,
-  TYRE,
+  DEFAULT_VEHICLE_ID,
+  getVehicleDefinition,
+  type VehicleDefinition,
+  type VehicleId,
+} from './VehicleRoster';
+import {
+  JEEP_TUNING,
+  staticCompression,
+  staticRideHeight,
+} from './VehicleTuning';
+import type {
+  BeatSource,
+  BoostTuning,
+  BrakeTuning,
+  ChassisTuning,
+  CollisionTuning,
+  EngineTuning,
+  ModelFeel,
+  NearMissTuning,
+  RecoveryTuning,
+  SpeedTuning,
+  SteerTuning,
+  SuspensionTuning,
+  TwoWheelTuning,
+  TyreTuning,
+  VehicleModel,
+  VehicleTuningSet,
 } from './VehicleTuning';
 
 export interface VehicleOpts {
   scene: THREE.Scene;
   physics: PhysicsWorldAPI;
-  /** where the Jeep starts; defaults to the origin at ride height */
+  /** where the vehicle starts; defaults to the origin at ride height */
   position?: THREE.Vector3;
   /** starting heading in radians (rotation about +Y) */
   heading?: number;
   quality?: QualityTier;
+  /**
+   * Which vehicle to drive. Defaults to the Jeep, so every existing call site
+   * keeps exactly the vehicle it always had. See `VehicleRoster.ts`.
+   */
+  vehicleId?: VehicleId;
 }
 
 type CollisionKind = 'traffic' | 'prop' | 'wall' | 'ped';
 
-/** Static ride height of the body origin above the road, metres. */
-const STATIC_RIDE_HEIGHT =
-  SUSPENSION.wheelRadius +
-  SUSPENSION.restLength -
-  (CHASSIS.mass * Math.abs(CONFIG.gravity)) /
-    4 /
-    ((SUSPENSION.springRateFront + SUSPENSION.springRateRear) * 0.5) -
-  SUSPENSION.anchorY;
+/** Static ride height of the Jeep's body origin above the road, metres. */
+const STATIC_RIDE_HEIGHT = staticRideHeight(JEEP_TUNING, CONFIG.gravity);
 
-/** Static compression the springs settle at under the Jeep's own weight, 0..1 */
-const STATIC_COMPRESSION =
-  (CHASSIS.mass * Math.abs(CONFIG.gravity)) /
-  4 /
-  ((SUSPENSION.springRateFront + SUSPENSION.springRateRear) * 0.5) /
-  SUSPENSION.restLength;
+/** Static compression the Jeep's springs settle at under its own weight, 0..1 */
+const STATIC_COMPRESSION = staticCompression(JEEP_TUNING, CONFIG.gravity);
 
 const WORLD_UP = /* @__PURE__ */ new THREE.Vector3(0, 1, 0);
 const NEAR_MISS_MASK = GROUP.TRAFFIC | GROUP.PED;
@@ -95,18 +105,45 @@ const NEAR_MISS_MASK = GROUP.TRAFFIC | GROUP.PED;
 export class Vehicle implements System {
   readonly name = 'vehicle';
 
-  /** root transform of the Jeep — the chase camera parents/reads off this */
+  /** root transform of the vehicle — the chase camera parents/reads off this */
   readonly object3d: THREE.Object3D;
   readonly body: BodyHandle;
-  readonly model: JeepModel;
+  readonly model: VehicleModel;
+
+  /** which vehicle from the roster this is */
+  readonly definition: VehicleDefinition;
+  /** every feel constant for this vehicle, in one record */
+  readonly tuning: VehicleTuningSet;
 
   private readonly physics: PhysicsWorldAPI;
   private readonly scene: THREE.Scene;
 
-  private readonly suspension = new Suspension();
-  private readonly drift = new DriftModel();
-  private readonly boost = new BoostSystem();
-  private readonly air = new AirControl();
+  private readonly suspension: Suspension;
+  private readonly drift: DriftModel;
+  private readonly boost: BoostSystem;
+  private readonly air: AirControl;
+
+  /* ---------------------------------------------------------------- tuning
+   * Local aliases onto `tuning`, so the simulation below reads exactly as it
+   * did when these were module constants. Assigned in the constructor because
+   * class field initialisers run before it. */
+  private readonly chassisT: ChassisTuning;
+  private readonly suspT: SuspensionTuning;
+  private readonly engineT: EngineTuning;
+  private readonly speedT: SpeedTuning;
+  private readonly brakeT: BrakeTuning;
+  private readonly steerT: SteerTuning;
+  private readonly tyreT: TyreTuning;
+  private readonly boostT: BoostTuning;
+  private readonly modelT: ModelFeel;
+  private readonly twoWheelsT: TwoWheelTuning;
+  private readonly nearMissT: NearMissTuning;
+  private readonly collisionT: CollisionTuning;
+  private readonly recoveryT: RecoveryTuning;
+
+  /** static ride height and spring compression for THIS vehicle */
+  private readonly rideHeight: number;
+  private readonly restCompression: number;
 
   /* ------------------------------------------------------------ frame state */
   private readonly frame: VehicleFrame = {
@@ -136,8 +173,8 @@ export class Vehicle implements System {
   private reverseMode = false;
   private reverseHold = 0;
   private shiftTimer = 0;
-  private rpm: number = ENGINE.idleRpm;
-  private rpmSmoothed: number = ENGINE.idleRpm;
+  private rpm = 0;
+  private rpmSmoothed = 0;
 
   /* ---------------------------------------------------------------- steering */
   private _steerAngle = 0;
@@ -195,6 +232,14 @@ export class Vehicle implements System {
   private visualHeave = 0;
   private headlightsOn = false;
   private brakeLightsOn = false;
+  private lightShowScale = -1;
+
+  /* -------------------------------------------------------- horn + air brakes */
+  private hornWasDown = false;
+  private lastHornAt = -999;
+  /** seconds of hard braking banked in the air reservoir */
+  private airBrakeCharge = 0;
+  private lastHissAt = -999;
 
   /* ------------------------------------------------------------------ scratch */
   private readonly tmpForce = new THREE.Vector3();
@@ -213,9 +258,37 @@ export class Vehicle implements System {
     this.physics = opts.physics;
     this.scene = opts.scene;
 
+    /* --- pick the vehicle and unpack its tuning before anything else --- */
+    this.definition = getVehicleDefinition(opts.vehicleId ?? DEFAULT_VEHICLE_ID);
+    const t = this.definition.tuning;
+    this.tuning = t;
+    this.chassisT = t.chassis;
+    this.suspT = t.suspension;
+    this.engineT = t.engine;
+    this.speedT = t.speed;
+    this.brakeT = t.brake;
+    this.steerT = t.steer;
+    this.tyreT = t.tyre;
+    this.boostT = t.boost;
+    this.modelT = t.model;
+    this.twoWheelsT = t.twoWheels;
+    this.nearMissT = t.nearMiss;
+    this.collisionT = t.collision;
+    this.recoveryT = t.recovery;
+    this.rideHeight = staticRideHeight(t, CONFIG.gravity);
+    this.restCompression = staticCompression(t, CONFIG.gravity);
+
+    this.suspension = new Suspension(t);
+    this.drift = new DriftModel(t);
+    this.boost = new BoostSystem(t);
+    this.air = new AirControl(t);
+
+    this.rpm = this.engineT.idleRpm;
+    this.rpmSmoothed = this.engineT.idleRpm;
+
     const spawn = opts.position
       ? scratch.v1.copy(opts.position)
-      : scratch.v1.set(0, STATIC_RIDE_HEIGHT, 0);
+      : scratch.v1.set(0, this.rideHeight, 0);
     const heading = opts.heading ?? 0;
     const quat = new THREE.Quaternion().setFromAxisAngle(WORLD_UP, heading);
 
@@ -223,30 +296,35 @@ export class Vehicle implements System {
       kind: 'dynamic',
       shape: {
         type: 'box',
-        hx: CHASSIS.colliderHalfX,
-        hy: CHASSIS.colliderHalfY,
-        hz: CHASSIS.colliderHalfZ,
+        hx: this.chassisT.colliderHalfX,
+        hy: this.chassisT.colliderHalfY,
+        hz: this.chassisT.colliderHalfZ,
       },
       position: spawn.clone(),
       quaternion: quat,
-      mass: CHASSIS.mass,
-      friction: CHASSIS.friction,
-      restitution: CHASSIS.restitution,
-      linearDamping: CHASSIS.linearDamping,
-      angularDamping: CHASSIS.angularDamping,
+      mass: this.chassisT.mass,
+      friction: this.chassisT.friction,
+      restitution: this.chassisT.restitution,
+      linearDamping: this.chassisT.linearDamping,
+      angularDamping: this.chassisT.angularDamping,
       group: GROUP.VEHICLE,
       mask: GROUP.WORLD | GROUP.PROP | GROUP.TRAFFIC | GROUP.PED | GROUP.TRIGGER | GROUP.DEBRIS,
       ccd: true,
-      centerOfMass: new THREE.Vector3(CHASSIS.comLocalX, CHASSIS.comLocalY, CHASSIS.comLocalZ),
+      centerOfMass: new THREE.Vector3(this.chassisT.comLocalX, this.chassisT.comLocalY, this.chassisT.comLocalZ),
       userData: { kind: 'vehicle', tag: 'player' },
     };
 
+    /* A tall body (the bus) needs its collider lifted clear of the axle line,
+     * which the physics layer supports as a collider-local translation. The
+     * Jeep's offset is 0, so its box is authored symmetric about the origin
+     * exactly as it always was. */
+    if (t.colliderOffsetY !== 0) {
+      desc.colliderOffset = new THREE.Vector3(0, t.colliderOffsetY, 0);
+    }
+
     this.body = this.physics.createBody(desc);
 
-    /* the collider box is offset up from the body origin; the physics interface
-     * has no per-collider offset, so the visual model absorbs the difference and
-     * the box is authored symmetric about a raised origin instead. */
-    this.model = new JeepModel(opts.quality ?? 'high');
+    this.model = this.definition.createModel(opts.quality ?? 'high');
     this.object3d = this.model.object3d;
     this.object3d.position.copy(spawn);
     this.object3d.quaternion.copy(quat);
@@ -274,7 +352,7 @@ export class Vehicle implements System {
 
   init(ctx: GameContext): void {
     this.busRef = ctx.bus;
-    this.unsubContact = this.physics.onContact(this.handleContact, COLLISION.minImpulse);
+    this.unsubContact = this.physics.onContact(this.handleContact, this.collisionT.minImpulse);
     this.model.setHeadlights(this.isNight(ctx.timeOfDay));
   }
 
@@ -376,11 +454,11 @@ export class Vehicle implements System {
     if (landPoints > 0 && this.air.lastLandingClean) {
       /* `air.airtime` is already zeroed by the landing — use the recorded value */
       this.boost.add(
-        BOOST.gainCleanLandingPerSecond * Math.min(3, this.air.lastLandingAirtime),
+        this.boostT.gainCleanLandingPerSecond * Math.min(3, this.air.lastLandingAirtime),
       );
     }
     if (grounded === 0) {
-      this.boost.add(BOOST.gainAirtimePerSecond * dt);
+      this.boost.add(this.boostT.gainAirtimePerSecond * dt);
     }
 
     /* 11. two-wheel stunt ---------------------------------------------------*/
@@ -406,6 +484,7 @@ export class Vehicle implements System {
       ctx.bus.emit('ui:toast', { text: 'Recolocado', icon: 'reset', ms: 1200 });
     }
 
+    this.updateHornAndAir(ctx, dt);
     this.updateNearMiss(dt, ctx.bus);
     this.suspension.updateVisual(dt);
     this.updateModel(ctx, dt);
@@ -413,6 +492,20 @@ export class Vehicle implements System {
   }
 
   /* ============================================================== public API */
+
+  /** roster id of the vehicle being driven — save data and UI key off this */
+  get vehicleId(): VehicleId {
+    return this.definition.id;
+  }
+
+  /**
+   * Hand the model a musical clock so any light show it has can pulse in time
+   * with the score. Anything exposing a `beatPhase` getter works; the vehicle
+   * module never imports the audio module.
+   */
+  setBeatSource(src: BeatSource | null): void {
+    this.model.setBeatSource?.(src);
+  }
 
   get position(): THREE.Vector3 {
     return this.frame.pos;
@@ -472,7 +565,7 @@ export class Vehicle implements System {
   /** 0..1 between idle and redline, smoothed for engine audio */
   get engineRpmNorm(): number {
     return clamp01(
-      (this.rpmSmoothed - ENGINE.idleRpm) / (ENGINE.redlineRpm - ENGINE.idleRpm),
+      (this.rpmSmoothed - this.engineT.idleRpm) / (this.engineT.redlineRpm - this.engineT.idleRpm),
     );
   }
 
@@ -561,8 +654,8 @@ export class Vehicle implements System {
     if (this.disposed) return;
 
     this.tmpPoint.copy(pos);
-    if (!Number.isFinite(this.tmpPoint.x)) this.tmpPoint.set(0, STATIC_RIDE_HEIGHT, 0);
-    this.tmpPoint.y += RECOVERY.respawnHeight;
+    if (!Number.isFinite(this.tmpPoint.x)) this.tmpPoint.set(0, this.rideHeight, 0);
+    this.tmpPoint.y += this.recoveryT.respawnHeight;
 
     const h = Number.isFinite(heading) ? heading : 0;
     this.tmpQuat.setFromAxisAngle(WORLD_UP, h);
@@ -581,13 +674,13 @@ export class Vehicle implements System {
     this.reverseMode = false;
     this.reverseHold = 0;
     this.shiftTimer = 0;
-    this.rpm = ENGINE.idleRpm;
-    this.rpmSmoothed = ENGINE.idleRpm;
+    this.rpm = this.engineT.idleRpm;
+    this.rpmSmoothed = this.engineT.idleRpm;
     this._steerAngle = 0;
     this.flipTimer = 0;
     this.twoWheelTimer = 0;
     this.twoWheelGrace = 0;
-    this.respawnFreeze = RECOVERY.respawnSettleTime;
+    this.respawnFreeze = this.recoveryT.respawnSettleTime;
     this.visualPitch = 0;
     this.visualRoll = 0;
     this.visualHeave = 0;
@@ -620,7 +713,7 @@ export class Vehicle implements System {
     f.up.set(0, 1, 0).applyQuaternion(f.quat);
 
     f.com
-      .set(CHASSIS.comLocalX, CHASSIS.comLocalY, CHASSIS.comLocalZ)
+      .set(this.chassisT.comLocalX, this.chassisT.comLocalY, this.chassisT.comLocalZ)
       .applyQuaternion(f.quat)
       .add(f.pos);
 
@@ -691,10 +784,10 @@ export class Vehicle implements System {
 
     /* speed-sensitive lock: wide at walking pace, tight at 100 mph */
     const t = Math.pow(
-      clamp01(f.speed / STEER.speedForMinAngle),
-      STEER.speedCurvePower,
+      clamp01(f.speed / this.steerT.speedForMinAngle),
+      this.steerT.speedCurvePower,
     );
-    const maxAngle = lerp(STEER.maxAngleLow, STEER.maxAngleHigh, t) + this.drift.steerBonus;
+    const maxAngle = lerp(this.steerT.maxAngleLow, this.steerT.maxAngleHigh, t) + this.drift.steerBonus;
 
     let target = this.steerInput * maxAngle;
 
@@ -702,20 +795,20 @@ export class Vehicle implements System {
      * making. Positive slip angle = tail out to the right = steer right. */
     if (
       this.assistSteering > 0 &&
-      f.speed > STEER.counterSteerMinSpeed &&
-      Math.abs(f.slipAngle) > STEER.counterSteerMinSlip &&
+      f.speed > this.steerT.counterSteerMinSpeed &&
+      Math.abs(f.slipAngle) > this.steerT.counterSteerMinSlip &&
       f.forwardSpeed > 0
     ) {
       const correction =
-        f.slipAngle * STEER.counterSteerGain * this.assistSteering;
+        f.slipAngle * this.steerT.counterSteerGain * this.assistSteering;
       target = clamp(target + correction, -maxAngle, maxAngle);
     }
 
     const towardCentre = Math.abs(target) < Math.abs(this._steerAngle);
-    const speedFrac = clamp01(f.speed / STEER.speedForMinAngle);
+    const speedFrac = clamp01(f.speed / this.steerT.speedForMinAngle);
     const rate = towardCentre
-      ? STEER.rateToCentre + STEER.returnRateBonus * speedFrac
-      : STEER.rateAwayFromCentre;
+      ? this.steerT.rateToCentre + this.steerT.returnRateBonus * speedFrac
+      : this.steerT.rateAwayFromCentre;
 
     this._steerAngle = moveTowards(this._steerAngle, target, rate * dt);
   }
@@ -728,63 +821,63 @@ export class Vehicle implements System {
 
     /* --- reverse latch: hold the brake at a standstill and it flips --- */
     if (!this.reverseMode) {
-      if (this.brakeInput > 0.25 && fwd < BRAKE.reverseThreshold) {
+      if (this.brakeInput > 0.25 && fwd < this.brakeT.reverseThreshold) {
         this.reverseHold += dt;
-        if (this.reverseHold >= BRAKE.reverseDelay) {
+        if (this.reverseHold >= this.brakeT.reverseDelay) {
           this.reverseMode = true;
           this.reverseHold = 0;
         }
       } else {
         this.reverseHold = 0;
       }
-    } else if (this.throttleInput > 0.1 && fwd > -BRAKE.reverseThreshold) {
+    } else if (this.throttleInput > 0.1 && fwd > -this.brakeT.reverseThreshold) {
       this.reverseMode = false;
       this.reverseHold = 0;
       this.gearIndex = 0;
     }
 
     /* --- rpm from road speed through the current ratio --- */
-    const wheelOmega = Math.abs(fwd) / SUSPENSION.wheelRadius;
-    const ratio = this.reverseMode ? ENGINE.reverseRatio : ENGINE.gearRatios[this.gearIndex];
-    const rawRpm = (wheelOmega * ratio * ENGINE.finalDrive * 60) / (Math.PI * 2);
+    const wheelOmega = Math.abs(fwd) / this.suspT.wheelRadius;
+    const ratio = this.reverseMode ? this.engineT.reverseRatio : this.engineT.gearRatios[this.gearIndex];
+    const rawRpm = (wheelOmega * ratio * this.engineT.finalDrive * 60) / (Math.PI * 2);
 
     /* an unloaded engine still revs with the throttle — flare on gearchanges */
     const demand = this.reverseMode ? this.brakeInput : this.throttleInput;
-    const flare = grounded === 0 ? demand * ENGINE.redlineRpm * 0.75 : 0;
-    this.rpm = clamp(Math.max(rawRpm, flare), ENGINE.idleRpm, ENGINE.redlineRpm);
+    const flare = grounded === 0 ? demand * this.engineT.redlineRpm * 0.75 : 0;
+    this.rpm = clamp(Math.max(rawRpm, flare), this.engineT.idleRpm, this.engineT.redlineRpm);
 
     /* --- automatic gearbox --- */
     if (this.shiftTimer > 0) {
       this.shiftTimer = Math.max(0, this.shiftTimer - dt);
     } else if (!this.reverseMode) {
-      if (this.rpm >= ENGINE.shiftUpRpm && this.gearIndex < GEAR_COUNT - 1) {
+      if (this.rpm >= this.engineT.shiftUpRpm && this.gearIndex < this.engineT.gearRatios.length - 1) {
         this.gearIndex++;
-        this.shiftTimer = ENGINE.shiftTimeSec;
-      } else if (this.rpm <= ENGINE.shiftDownRpm && this.gearIndex > 0) {
+        this.shiftTimer = this.engineT.shiftTimeSec;
+      } else if (this.rpm <= this.engineT.shiftDownRpm && this.gearIndex > 0) {
         this.gearIndex--;
-        this.shiftTimer = ENGINE.shiftTimeSec * 0.5;
+        this.shiftTimer = this.engineT.shiftTimeSec * 0.5;
       }
     }
 
-    this.rpmSmoothed = damp(this.rpmSmoothed, this.rpm, ENGINE.rpmSmoothRate, dt);
+    this.rpmSmoothed = damp(this.rpmSmoothed, this.rpm, this.engineT.rpmSmoothRate, dt);
 
     /* --- torque -> tractive force at the contact patch --- */
     const activeRatio = this.reverseMode
-      ? ENGINE.reverseRatio
-      : ENGINE.gearRatios[this.gearIndex];
+      ? this.engineT.reverseRatio
+      : this.engineT.gearRatios[this.gearIndex];
     const torque = this.shiftTimer > 0 ? 0 : this.torqueAt(this.rpm);
     let tractive =
-      (torque * activeRatio * ENGINE.finalDrive * ENGINE.efficiency) / SUSPENSION.wheelRadius;
+      (torque * activeRatio * this.engineT.finalDrive * this.engineT.efficiency) / this.suspT.wheelRadius;
 
     tractive *= demand;
     if (this.reverseMode) tractive = -tractive;
 
     /* --- soft speed limiter: ease into the top speed, never slam into it --- */
     const cap = this.reverseMode
-      ? SPEED.topSpeedReverse
-      : lerp(SPEED.topSpeed, SPEED.topSpeedBoost, this.boost.thrustEnvelope);
+      ? this.speedT.topSpeedReverse
+      : lerp(this.speedT.topSpeed, this.speedT.topSpeedBoost, this.boost.thrustEnvelope);
     const signedSpeed = this.reverseMode ? -fwd : fwd;
-    const headroom = smoothstep((cap - signedSpeed) / SPEED.limiterBand);
+    const headroom = smoothstep((cap - signedSpeed) / this.speedT.limiterBand);
     this.speedHeadroom = headroom;
     tractive *= headroom;
 
@@ -792,12 +885,12 @@ export class Vehicle implements System {
     let engineBrake = 0;
     if (demand < 0.05 && this.brakeInput < 0.05 && Math.abs(fwd) > 0.15) {
       engineBrake =
-        (ENGINE.engineBrakeBase + ENGINE.engineBrakeCoeff * Math.abs(fwd)) * -Math.sign(fwd);
+        (this.engineT.engineBrakeBase + this.engineT.engineBrakeCoeff * Math.abs(fwd)) * -Math.sign(fwd);
     }
 
     /* --- distribute drive + brake to the four wheels --- */
-    const rearShare = ENGINE.driveBiasRear * 0.5;
-    const frontShare = (1 - ENGINE.driveBiasRear) * 0.5;
+    const rearShare = this.engineT.driveBiasRear * 0.5;
+    const frontShare = (1 - this.engineT.driveBiasRear) * 0.5;
     const total = tractive + engineBrake;
     this.wheelDrive[0] = total * frontShare;
     this.wheelDrive[1] = total * frontShare;
@@ -805,9 +898,9 @@ export class Vehicle implements System {
     this.wheelDrive[3] = total * rearShare;
 
     const braking = this.reverseMode ? this.throttleInput : this.brakeInput;
-    const brakeFront = braking * BRAKE.maxForce * BRAKE.frontBias * 0.5;
-    const brakeRear = braking * BRAKE.maxForce * (1 - BRAKE.frontBias) * 0.5;
-    const hb = this.handbrakeInput * BRAKE.handbrakeForce;
+    const brakeFront = braking * this.brakeT.maxForce * this.brakeT.frontBias * 0.5;
+    const brakeRear = braking * this.brakeT.maxForce * (1 - this.brakeT.frontBias) * 0.5;
+    const hb = this.handbrakeInput * this.brakeT.handbrakeForce;
     this.wheelBrake[0] = brakeFront;
     this.wheelBrake[1] = brakeFront;
     this.wheelBrake[2] = brakeRear + hb;
@@ -816,8 +909,8 @@ export class Vehicle implements System {
 
   /** Linear interpolation through the torque curve, indexed by rpm fraction. */
   private torqueAt(rpm: number): number {
-    const curve = ENGINE.torqueCurve;
-    const t = clamp01(rpm / ENGINE.redlineRpm) * (curve.length - 1);
+    const curve = this.engineT.torqueCurve;
+    const t = clamp01(rpm / this.engineT.redlineRpm) * (curve.length - 1);
     const i = Math.min(curve.length - 2, Math.floor(t));
     return lerp(curve[i], curve[i + 1], t - i);
   }
@@ -839,7 +932,7 @@ export class Vehicle implements System {
     }
 
     const f = this.frame;
-    const massShare = CHASSIS.mass / grounded;
+    const massShare = this.chassisT.mass / grounded;
     const invDt = 1 / dt;
 
     for (let i = 0; i < 4; i++) {
@@ -874,33 +967,33 @@ export class Vehicle implements System {
       const vLat = w.contactVel.dot(right);
 
       /* --- load, with a little load sensitivity so weight transfer matters --- */
-      const load = clamp(w.load, TYRE.minLoad, TYRE.maxLoad);
+      const load = clamp(w.load, this.tyreT.minLoad, this.tyreT.maxLoad);
       const muScale = clamp(
-        1 - TYRE.loadSensitivity * (load / TYRE.loadReference - 1),
+        1 - this.tyreT.loadSensitivity * (load / this.tyreT.loadReference - 1),
         0.55,
         1.4,
       );
 
       /* --- lateral: slip-angle curve with a defined peak and a held plateau -- */
       const slipAngle = Math.atan2(vLat, Math.abs(vLong) + 0.6);
-      const gripShape = slipCurve(Math.abs(slipAngle));
+      const gripShape = slipCurve(Math.abs(slipAngle), this.tyreT);
       const gripMul = w.isFront ? this.drift.frontGripMul : this.drift.rearGripMul;
-      const baseMu = w.isFront ? TYRE.latGripFront : TYRE.latGripRear;
+      const baseMu = w.isFront ? this.tyreT.latGripFront : this.tyreT.latGripRear;
       const maxLat = baseMu * gripShape * muScale * gripMul * load;
 
       /* the force that would kill the slide outright, under-relaxed for stability */
-      const wantLat = -vLat * massShare * invDt * TYRE.latRecoveryFraction;
+      const wantLat = -vLat * massShare * invDt * this.tyreT.latRecoveryFraction;
       const fLat =
-        Math.abs(vLat) < TYRE.latDeadband ? 0 : clamp(wantLat, -maxLat, maxLat);
+        Math.abs(vLat) < this.tyreT.latDeadband ? 0 : clamp(wantLat, -maxLat, maxLat);
 
       /* --- longitudinal, sharing the friction budget with the lateral force -- */
-      const maxLong = TYRE.longGrip * muScale * load;
+      const maxLong = this.tyreT.longGrip * muScale * load;
       const latUse = maxLat > 1 ? Math.abs(fLat) / maxLat : 0;
       const longBudget =
-        maxLong * Math.sqrt(Math.max(0, 1 - TYRE.combinedSlip * latUse * latUse));
+        maxLong * Math.sqrt(Math.max(0, 1 - this.tyreT.combinedSlip * latUse * latUse));
 
       let wantLong = this.wheelDrive[i];
-      const rollDrag = SPEED.rollingResistance * Math.sign(vLong);
+      const rollDrag = this.speedT.rollingResistance * Math.sign(vLong);
       wantLong -= rollDrag;
       if (this.wheelBrake[i] > 0) {
         /* brakes can only ever oppose motion, never drive it */
@@ -918,7 +1011,7 @@ export class Vehicle implements System {
        * cheapest rollover fix there is, and the springs still do the leaning */
       this.tmpPoint
         .copy(w.contactNormal)
-        .multiplyScalar(TYRE.lateralForceHeight)
+        .multiplyScalar(this.tyreT.lateralForceHeight)
         .add(w.contactPoint);
       this.tmpForce.copy(right).multiplyScalar(fLat * dt);
       this.body.applyImpulse(this.tmpForce, this.tmpPoint);
@@ -931,19 +1024,19 @@ export class Vehicle implements System {
       let slipLong = 0;
       if (overDemand > 0) {
         slipLong =
-          clamp((overDemand / Math.max(1, maxLong)) * TYRE.slipSpeedGain, 0, 24) *
+          clamp((overDemand / Math.max(1, maxLong)) * this.tyreT.slipSpeedGain, 0, 24) *
           Math.sign(wantLong);
       }
       w.slipLong = slipLong;
 
-      let spin = (vLong + slipLong) / SUSPENSION.wheelRadius;
+      let spin = (vLong + slipLong) / this.suspT.wheelRadius;
       if (this.wheelBrake[i] > 0 && slipLong * vLong < 0) {
-        const surface = vLong / SUSPENSION.wheelRadius;
+        const surface = vLong / this.suspT.wheelRadius;
         spin = clamp(spin, Math.min(0, surface), Math.max(0, surface));
       }
       w.spinRate = spin;
 
-      w.slip = clamp01(Math.hypot(w.slipLat, slipLong) / TYRE.slipNormalise);
+      w.slip = clamp01(Math.hypot(w.slipLat, slipLong) / this.tyreT.slipNormalise);
     }
   }
 
@@ -954,24 +1047,24 @@ export class Vehicle implements System {
     const f = this.frame;
 
     const authority =
-      clamp01((f.speed - STEER.yawAssistMinSpeed) / STEER.yawAssistRampBand) *
+      clamp01((f.speed - this.steerT.yawAssistMinSpeed) / this.steerT.yawAssistRampBand) *
       (grounded / 4);
     if (authority <= 0) return;
 
     /* bicycle model: turning right (positive steer) is negative yaw about +Y */
-    const wheelbase = SUSPENSION.halfWheelbase * 2;
+    const wheelbase = this.suspT.halfWheelbase * 2;
     let target = (-Math.tan(this._steerAngle) * f.forwardSpeed) / wheelbase;
     target *= this.drift.yawGain;
-    target = clamp(target, -STEER.maxYawRate, STEER.maxYawRate);
+    target = clamp(target, -this.steerT.maxYawRate, this.steerT.maxYawRate);
 
     const err = target - f.yawRate;
     const accel = clamp(
-      err * STEER.yawAssistRate,
-      -STEER.yawAssistMaxAccel,
-      STEER.yawAssistMaxAccel,
+      err * this.steerT.yawAssistRate,
+      -this.steerT.yawAssistMaxAccel,
+      this.steerT.yawAssistMaxAccel,
     ) * authority;
 
-    this.tmpForce.copy(f.up).multiplyScalar(accel * CHASSIS.inertiaYaw * dt);
+    this.tmpForce.copy(f.up).multiplyScalar(accel * this.chassisT.inertiaYaw * dt);
     this.body.applyTorqueImpulse(this.tmpForce);
   }
 
@@ -981,7 +1074,7 @@ export class Vehicle implements System {
     const f = this.frame;
     const v2 = f.speed * f.speed;
     if (v2 > 1e-4) {
-      const c = grounded > 0 ? SPEED.dragCoeff : SPEED.dragCoeffAir;
+      const c = grounded > 0 ? this.speedT.dragCoeff : this.speedT.dragCoeffAir;
       this.tmpForce
         .copy(f.linVel)
         .multiplyScalar((-c * v2 * dt) / Math.max(1e-4, f.speed));
@@ -989,7 +1082,7 @@ export class Vehicle implements System {
     }
 
     if (grounded > 0 && f.upDot > 0.2) {
-      const df = Math.min(SPEED.downforceCoeff * v2, SPEED.downforceMax);
+      const df = Math.min(this.speedT.downforceCoeff * v2, this.speedT.downforceMax);
       if (df > 1) {
         this.tmpForce.copy(f.up).multiplyScalar(-df * dt);
         this.body.applyImpulse(this.tmpForce);
@@ -1013,10 +1106,10 @@ export class Vehicle implements System {
 
     const env = this.boost.thrustEnvelope;
     if (env <= 0) return;
-    const scale = grounded === 0 ? BOOST.thrustAirScale : 1;
+    const scale = grounded === 0 ? this.boostT.thrustAirScale : 1;
     this.tmpForce
       .copy(this.frame.forward)
-      .multiplyScalar(BOOST.thrust * env * scale * headroom * dt);
+      .multiplyScalar(this.boostT.thrust * env * scale * headroom * dt);
     this.body.applyImpulse(this.tmpForce);
   }
 
@@ -1027,17 +1120,17 @@ export class Vehicle implements System {
     const f = this.frame;
     const qualifies =
       side !== 0 &&
-      Math.abs(f.roll) > TWO_WHEELS.minRoll &&
-      f.speed > TWO_WHEELS.minSpeed &&
+      Math.abs(f.roll) > this.twoWheelsT.minRoll &&
+      f.speed > this.twoWheelsT.minSpeed &&
       f.upDot > 0.15;
 
     if (qualifies) {
       this.twoWheelTimer += dt;
-      this.twoWheelGrace = TWO_WHEELS.graceTime;
+      this.twoWheelGrace = this.twoWheelsT.graceTime;
     } else if (this.twoWheelTimer > 0) {
       this.twoWheelGrace -= dt;
       if (this.twoWheelGrace <= 0) {
-        if (this.twoWheelTimer >= TWO_WHEELS.minDuration) {
+        if (this.twoWheelTimer >= this.twoWheelsT.minDuration) {
           bus.emit('vehicle:twoWheels', { duration: this.twoWheelTimer });
         }
         this.twoWheelTimer = 0;
@@ -1057,10 +1150,10 @@ export class Vehicle implements System {
     }
 
     /* on its roof or wedged on its side and going nowhere */
-    const flipped = f.upDot < RECOVERY.flippedDot;
-    if (flipped && f.speed < RECOVERY.stuckSpeed) {
+    const flipped = f.upDot < this.recoveryT.flippedDot;
+    if (flipped && f.speed < this.recoveryT.stuckSpeed) {
       this.flipTimer += dt;
-      if (this.flipTimer >= RECOVERY.flippedTime) {
+      if (this.flipTimer >= this.recoveryT.flippedTime) {
         this.flipTimer = 0;
         this.autoRight(bus);
         return;
@@ -1071,11 +1164,11 @@ export class Vehicle implements System {
 
     /* remember somewhere sensible to come back to */
     this.safePointTimer += dt;
-    if (this.safePointTimer >= RECOVERY.safePointInterval) {
+    if (this.safePointTimer >= this.recoveryT.safePointInterval) {
       this.safePointTimer = 0;
       if (
-        this.suspension.groundedCount >= RECOVERY.safePointWheels &&
-        f.speed >= RECOVERY.safePointMinSpeed &&
+        this.suspension.groundedCount >= this.recoveryT.safePointWheels &&
+        f.speed >= this.recoveryT.safePointMinSpeed &&
         f.upDot > 0.75
       ) {
         this.safePos.copy(f.pos);
@@ -1092,7 +1185,7 @@ export class Vehicle implements System {
     const f = this.frame;
     const heading = Math.atan2(-f.forward.x, -f.forward.z);
     this.tmpPoint.copy(f.pos);
-    this.tmpPoint.y += RECOVERY.rightingLift;
+    this.tmpPoint.y += this.recoveryT.rightingLift;
     this.tmpQuat.setFromAxisAngle(WORLD_UP, heading);
 
     this.body.setPosition(this.tmpPoint);
@@ -1107,20 +1200,85 @@ export class Vehicle implements System {
     this.suspension.reset();
     this.drift.cancel();
     this.air.reset();
-    this.respawnFreeze = RECOVERY.respawnSettleTime;
+    this.respawnFreeze = this.recoveryT.respawnSettleTime;
 
     this.readFrame();
     bus.emit('vehicle:reset', {});
+  }
+
+  /* ========================================================= horn + air brakes */
+
+  /**
+   * The two noises a vehicle makes that are not the engine.
+   *
+   * The horn is a straight edge-triggered honk, pitched by the tuning record —
+   * the same dual-tone reeds dropped two octaves become a freight-train air
+   * horn on the bus.
+   *
+   * The air brakes model a reservoir: holding the pedal at speed charges it,
+   * and letting go — or finally coming to a stop at a chinchorro — bleeds it
+   * off with a hiss. `boostLoop` is the library's filtered-noise burst, which
+   * is the closest thing it has to a psshht; the pitch and volume come from
+   * the tuning record so a dedicated hiss can be swapped in later without
+   * touching this file.
+   */
+  private updateHornAndAir(ctx: GameContext, dt: number): void {
+    const bus = ctx.bus;
+
+    const hornDown = ctx.input?.horn === true;
+    if (
+      hornDown &&
+      !this.hornWasDown &&
+      this.elapsed - this.lastHornAt >= this.tuning.horn.cooldown
+    ) {
+      this.lastHornAt = this.elapsed;
+      bus.emit('audio:sfx', {
+        id: 'horn',
+        at: this.frame.pos,
+        volume: this.tuning.horn.volume,
+        pitch: this.tuning.horn.pitch,
+      });
+      this.model.pulseHorn?.();
+    }
+    this.hornWasDown = hornDown;
+
+    const ab = this.tuning.airBrake;
+    if (!ab.enabled) return;
+
+    const braking =
+      this.brakeInput >= ab.brakeThreshold || this.handbrakeInput >= ab.brakeThreshold;
+    if (braking && this.frame.speed > ab.stopSpeed) {
+      this.airBrakeCharge = Math.min(1.4, this.airBrakeCharge + dt);
+      return;
+    }
+
+    if (
+      this.airBrakeCharge >= ab.chargeToFire &&
+      this.elapsed - this.lastHissAt >= ab.cooldown
+    ) {
+      const strength = clamp01(this.airBrakeCharge / 1.2);
+      this.lastHissAt = this.elapsed;
+      this.airBrakeCharge = 0;
+      bus.emit('audio:sfx', {
+        id: 'boostLoop',
+        at: this.frame.pos,
+        volume: ab.volume * (0.6 + strength * 0.4),
+        pitch: ab.pitch,
+      });
+      this.model.pulseAirBrake?.(strength);
+    } else {
+      this.airBrakeCharge = Math.max(0, this.airBrakeCharge - dt * ab.decayRate);
+    }
   }
 
   /* ============================================================== near misses */
 
   private updateNearMiss(dt: number, bus: EventBus): void {
     this.nearMissTimer += dt;
-    if (this.nearMissTimer < NEAR_MISS.interval) return;
+    if (this.nearMissTimer < this.nearMissT.interval) return;
     this.nearMissTimer = 0;
 
-    if (this.frame.speed < NEAR_MISS.minSpeed) return;
+    if (this.frame.speed < this.nearMissT.minSpeed) return;
 
     /* keep the bookkeeping maps from growing without bound */
     if (this.nearMissSeen.size > 64) this.nearMissSeen.clear();
@@ -1128,7 +1286,7 @@ export class Vehicle implements System {
 
     const found = this.physics.overlapSphere(
       this.frame.pos,
-      NEAR_MISS.radius,
+      this.nearMissT.radius,
       NEAR_MISS_MASK,
     );
     if (found.length === 0) return;
@@ -1139,10 +1297,10 @@ export class Vehicle implements System {
       if (other.id === this.body.id) continue;
 
       const lastHit = this.collisionLock.get(other.id);
-      if (lastHit !== undefined && now - lastHit < NEAR_MISS.collisionLockout) continue;
+      if (lastHit !== undefined && now - lastHit < this.nearMissT.collisionLockout) continue;
 
       const lastSeen = this.nearMissSeen.get(other.id);
-      if (lastSeen !== undefined && now - lastSeen < NEAR_MISS.cooldown) continue;
+      if (lastSeen !== undefined && now - lastSeen < this.nearMissT.cooldown) continue;
 
       this.nearMissSeen.set(other.id, now);
 
@@ -1150,7 +1308,7 @@ export class Vehicle implements System {
       this.nearMissCursor = (this.nearMissCursor + 1) % this.nearMissPool.length;
       other.getPosition(at);
 
-      this.boost.add(BOOST.gainNearMiss);
+      this.boost.add(this.boostT.gainNearMiss);
       bus.emit('vehicle:nearMiss', { speed: this.frame.speed, at });
     }
   }
@@ -1166,12 +1324,12 @@ export class Vehicle implements System {
     const other = aMine ? e.b : e.a;
     this.collisionLock.set(other.id, this.elapsed);
 
-    if (this.elapsed - this.lastCollisionAt < COLLISION.cooldown) return;
+    if (this.elapsed - this.lastCollisionAt < this.collisionT.cooldown) return;
     this.lastCollisionAt = this.elapsed;
     this.lastImpulse = e.impulse;
     this.lastImpulseAt = this.elapsed;
 
-    if (e.impulse >= COLLISION.heavyImpulse) this.hardHitPending = true;
+    if (e.impulse >= this.collisionT.heavyImpulse) this.hardHitPending = true;
 
     this.busRef?.emit('vehicle:collision', {
       impulse: e.impulse,
@@ -1201,6 +1359,14 @@ export class Vehicle implements System {
   private updateModel(ctx: GameContext, dt: number): void {
     const s = this.suspension;
 
+    /* a vehicle with a strobing light show has to respect the accessibility
+     * setting; pushed only on change so it costs nothing per frame */
+    const showScale = ctx.settings?.photosensitiveSafe ? 0.22 : 1;
+    if (showScale !== this.lightShowScale) {
+      this.lightShowScale = showScale;
+      this.model.setLightShowIntensity?.(showScale);
+    }
+
     for (let i = 0; i < 4; i++) {
       const w = s.wheels[i];
       this.model.setSuspension(i, w.visualCompression);
@@ -1215,20 +1381,21 @@ export class Vehicle implements System {
     const rightC = s.sideCompression(false);
 
     const pitchTarget = clamp(
-      (rearC - frontC) * MODEL.bodyPitchGain,
-      -MODEL.bodyLeanMax,
-      MODEL.bodyLeanMax,
+      (rearC - frontC) * this.modelT.bodyPitchGain,
+      -this.modelT.bodyLeanMax,
+      this.modelT.bodyLeanMax,
     );
     const rollTarget = clamp(
-      (rightC - leftC) * MODEL.bodyRollGain,
-      -MODEL.bodyLeanMax,
-      MODEL.bodyLeanMax,
+      (rightC - leftC) * this.modelT.bodyRollGain,
+      -this.modelT.bodyLeanMax,
+      this.modelT.bodyLeanMax,
     );
-    const heaveTarget = -((frontC + rearC) * 0.5 - STATIC_COMPRESSION) * MODEL.bodyBounceGain;
+    const heaveTarget =
+      -((frontC + rearC) * 0.5 - this.restCompression) * this.modelT.bodyBounceGain;
 
-    this.visualPitch = damp(this.visualPitch, pitchTarget, MODEL.bodyLeanRate, dt);
-    this.visualRoll = damp(this.visualRoll, rollTarget, MODEL.bodyLeanRate, dt);
-    this.visualHeave = damp(this.visualHeave, heaveTarget, MODEL.bodyLeanRate, dt);
+    this.visualPitch = damp(this.visualPitch, pitchTarget, this.modelT.bodyLeanRate, dt);
+    this.visualRoll = damp(this.visualRoll, rollTarget, this.modelT.bodyLeanRate, dt);
+    this.visualHeave = damp(this.visualHeave, heaveTarget, this.modelT.bodyLeanRate, dt);
     this.model.setChassisLean(this.visualPitch, this.visualRoll, this.visualHeave);
 
     const braking =
@@ -1249,7 +1416,7 @@ export class Vehicle implements System {
   }
 
   private isNight(hours: number): boolean {
-    return hours < MODEL.headlightOnBefore || hours > MODEL.headlightOnAfter;
+    return hours < this.modelT.headlightOnBefore || hours > this.modelT.headlightOnAfter;
   }
 }
 
@@ -1260,11 +1427,11 @@ export class Vehicle implements System {
  * then a controlled fall to a plateau. The plateau is the whole point: past the
  * peak the rear stays predictable instead of snapping, so a drift can be held.
  */
-function slipCurve(slip: number): number {
-  if (slip <= TYRE.peakSlip) return slip / TYRE.peakSlip;
-  if (slip >= TYRE.tailSlip) return TYRE.tailGrip;
-  const t = (slip - TYRE.peakSlip) / (TYRE.tailSlip - TYRE.peakSlip);
-  return lerp(1, TYRE.tailGrip, smoothstep(t));
+function slipCurve(slip: number, tyre: TyreTuning): number {
+  if (slip <= tyre.peakSlip) return slip / tyre.peakSlip;
+  if (slip >= tyre.tailSlip) return tyre.tailGrip;
+  const t = (slip - tyre.peakSlip) / (tyre.tailSlip - tyre.peakSlip);
+  return lerp(1, tyre.tailGrip, smoothstep(t));
 }
 
 const KIND_SET: readonly CollisionKind[] = ['traffic', 'prop', 'wall', 'ped'];

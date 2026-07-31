@@ -15,7 +15,8 @@
  */
 import type { EventBus } from '../core/EventBus';
 import { clamp, clamp01, damp, lerp } from '../core/MathUtils';
-import { DRIFT, STEER } from './VehicleTuning';
+import { JEEP_TUNING } from './VehicleTuning';
+import type { DriftTuning, SteerTuning, VehicleTuningSet } from './VehicleTuning';
 import type { VehicleFrame } from './Suspension';
 
 /** Payout handed to BoostSystem when a drift ends with enough charge. */
@@ -31,6 +32,15 @@ export interface DriftReward {
 }
 
 export class DriftModel {
+  /** this vehicle's drift and steering constants */
+  private readonly T: DriftTuning;
+  private readonly S: SteerTuning;
+
+  constructor(tuning: VehicleTuningSet = JEEP_TUNING) {
+    this.T = tuning.drift;
+    this.S = tuning.steer;
+  }
+
   /** true while the drift state machine is armed */
   active = false;
   /** seconds the current drift has run */
@@ -107,7 +117,7 @@ export class DriftModel {
       this.duration += dt;
       this.angleIntegral += slip * dt;
       this.charge +=
-        dt * DRIFT.chargePerSecond * clamp(slip / DRIFT.chargeSlipReference, 0, 1.6);
+        dt * this.T.chargePerSecond * clamp(slip / this.T.chargeSlipReference, 0, 1.6);
       this.slipSign = Math.sign(frame.slipAngle);
 
       const newTier = this.tierForCharge(this.charge);
@@ -115,23 +125,23 @@ export class DriftModel {
 
       this.airtimeInDrift = airborne ? this.airtimeInDrift + dt : 0;
 
-      if (slip < DRIFT.exitSlip) this.belowExitFor += dt;
+      if (slip < this.T.exitSlip) this.belowExitFor += dt;
       else this.belowExitFor = 0;
 
-      const spunOut = slip > DRIFT.spinOutSlip;
-      const tooSlow = speed < DRIFT.minSpeed * 0.7;
-      const settled = this.belowExitFor >= DRIFT.exitHold && handbrake < DRIFT.handbrakeThreshold;
-      const flew = this.airtimeInDrift > DRIFT.exitAirtime;
+      const spunOut = slip > this.T.spinOutSlip;
+      const tooSlow = speed < this.T.minSpeed * 0.7;
+      const settled = this.belowExitFor >= this.T.exitHold && handbrake < this.T.handbrakeThreshold;
+      const flew = this.airtimeInDrift > this.T.exitAirtime;
 
       if (spunOut || tooSlow || settled || flew) {
         this.end(bus);
       }
     } else if (
       !airborne &&
-      speed >= DRIFT.minSpeed &&
+      speed >= this.T.minSpeed &&
       this.reentryLock <= 0 &&
-      (handbrake >= DRIFT.handbrakeThreshold ||
-        (slip >= DRIFT.entrySlip && Math.abs(steerInput) >= DRIFT.entrySteer))
+      (handbrake >= this.T.handbrakeThreshold ||
+        (slip >= this.T.entrySlip && Math.abs(steerInput) >= this.T.entrySteer))
     ) {
       this.active = true;
       this.duration = 0;
@@ -150,27 +160,27 @@ export class DriftModel {
     let targetYaw = 1;
     let targetSteerBonus = 0;
 
-    const handbraking = handbrake >= DRIFT.handbrakeThreshold && speed > 1.5;
+    const handbraking = handbrake >= this.T.handbrakeThreshold && speed > 1.5;
 
     if (handbraking) {
-      targetRear = DRIFT.handbrakeRearGrip;
-      targetFront = DRIFT.driftFrontGrip;
+      targetRear = this.T.handbrakeRearGrip;
+      targetFront = this.T.driftFrontGrip;
     } else if (this.active) {
-      targetRear = DRIFT.driftRearGrip;
-      targetFront = DRIFT.driftFrontGrip;
+      targetRear = this.T.driftRearGrip;
+      targetFront = this.T.driftFrontGrip;
     }
 
     if (this.active || handbraking) {
       /* lift off and the tail hooks back up; stay pinned and it keeps sliding */
-      targetRear *= lerp(DRIFT.liftOffGripRecovery, 1, clamp01(throttle));
-      targetYaw = STEER.yawAssistDriftGain;
-      targetSteerBonus = STEER.driftExtraAngle;
+      targetRear *= lerp(this.T.liftOffGripRecovery, 1, clamp01(throttle));
+      targetYaw = this.S.yawAssistDriftGain;
+      targetSteerBonus = this.S.driftExtraAngle;
     }
 
-    this.frontGripMul = damp(this.frontGripMul, targetFront, DRIFT.gripBlendRate, dt);
-    this.rearGripMul = damp(this.rearGripMul, targetRear, DRIFT.gripBlendRate, dt);
-    this.yawGain = damp(this.yawGain, targetYaw, DRIFT.gripBlendRate, dt);
-    this.steerBonus = damp(this.steerBonus, targetSteerBonus, DRIFT.gripBlendRate, dt);
+    this.frontGripMul = damp(this.frontGripMul, targetFront, this.T.gripBlendRate, dt);
+    this.rearGripMul = damp(this.rearGripMul, targetRear, this.T.gripBlendRate, dt);
+    this.yawGain = damp(this.yawGain, targetYaw, this.T.gripBlendRate, dt);
+    this.steerBonus = damp(this.steerBonus, targetSteerBonus, this.T.gripBlendRate, dt);
   }
 
   /** Force the drift closed (respawn, flip, mode change) without a payout. */
@@ -200,9 +210,9 @@ export class DriftModel {
     const tier = this.tier;
 
     let points = 0;
-    if (duration >= DRIFT.minScoringDuration) {
+    if (duration >= this.T.minScoringDuration) {
       points = Math.round(
-        duration * DRIFT.pointsPerSecond + angleIntegral * DRIFT.pointsPerAngleIntegral,
+        duration * this.T.pointsPerSecond + angleIntegral * this.T.pointsPerAngleIntegral,
       );
     }
 
@@ -218,9 +228,9 @@ export class DriftModel {
 
     if (tier >= 0) {
       this.reward.tier = tier;
-      this.reward.boostSeconds = DRIFT.tierBoostSeconds[tier];
-      this.reward.impulse = DRIFT.tierImpulse[tier];
-      this.reward.meter = DRIFT.tierMeterRefill[tier];
+      this.reward.boostSeconds = this.T.tierBoostSeconds[tier];
+      this.reward.impulse = this.T.tierImpulse[tier];
+      this.reward.meter = this.T.tierMeterRefill[tier];
       this.rewardPending = true;
     }
 
@@ -229,8 +239,8 @@ export class DriftModel {
 
   private tierForCharge(charge: number): number {
     let t = -1;
-    for (let i = 0; i < DRIFT.tierCharge.length; i++) {
-      if (charge >= DRIFT.tierCharge[i]) t = i;
+    for (let i = 0; i < this.T.tierCharge.length; i++) {
+      if (charge >= this.T.tierCharge[i]) t = i;
     }
     return t;
   }

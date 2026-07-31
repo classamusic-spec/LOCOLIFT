@@ -183,6 +183,66 @@ export const ARCHETYPES: readonly PassengerArchetype[] = [
     color: 0x577590,
     voicePitch: 0.85,
   },
+  {
+    id: 'fisherman',
+    name: 'Don Nino',
+    blurb: 'Nevera llena de chillo y una lancha que sale a las cinco. Huele a mar y no se disculpa.',
+    patience: 84,
+    fareMultiplier: 1.15,
+    thrillSeeking: -0.2,
+    color: 0x1d7a8c,
+    voicePitch: 0.82,
+  },
+  {
+    id: 'chinchorro-cook',
+    name: 'Doña Fela',
+    blurb: 'Bandeja de alcapurrias todavía chillando. Si llegan frías, no llegaron.',
+    patience: 76,
+    fareMultiplier: 1.5,
+    thrillSeeking: -0.15,
+    color: 0xe08b2f,
+    voicePitch: 1.04,
+  },
+  {
+    id: 'nurse',
+    name: 'Enfermera Solís',
+    blurb: 'Turno de noche en el centro de salud. Ya llegó tarde una vez este mes.',
+    patience: 62,
+    fareMultiplier: 1.4,
+    thrillSeeking: 0.3,
+    color: 0x63c7d6,
+    voicePitch: 1.05,
+  },
+  {
+    id: 'dj',
+    name: 'DJ Melaza',
+    blurb: 'Dos cajas de vinilo y una bocina que no cabe. La fiesta empieza cuando él llega.',
+    patience: 54,
+    fareMultiplier: 1.35,
+    thrillSeeking: 0.9,
+    color: 0x9b5de5,
+    voicePitch: 0.9,
+  },
+  {
+    id: 'party-host',
+    name: 'La Cuqui',
+    blurb: 'Organiza el chinchorreo entero desde el celular. Conoce a todo el mundo en Piñones.',
+    patience: 60,
+    fareMultiplier: 1.3,
+    thrillSeeking: 0.95,
+    color: 0xff5d8f,
+    voicePitch: 1.12,
+  },
+  {
+    id: 'abuelo-parrandero',
+    name: 'Don Chelo',
+    blurb: 'Setenta y cuatro años y el último en bajarse de la guagua. Trae güiro propio.',
+    patience: 96,
+    fareMultiplier: 1.2,
+    thrillSeeking: 0.8,
+    color: 0xf4a259,
+    voicePitch: 0.8,
+  },
 ];
 
 export const ARCHETYPE_IDS: readonly string[] = ARCHETYPES.map((a) => a.id);
@@ -337,6 +397,84 @@ export const ARCHETYPE_VISUALS: Readonly<Record<string, ArchetypeVisual>> = {
     energy: 0.75,
     apron: false,
   },
+  fisherman: {
+    shirt: [0xdfe9f2, 0x1d7a8c, 0xfaf6ee, 0xcfe3d8],
+    accent: [0x1d3557, 0xf2b134, 0x2fa8a0],
+    legwear: 'shorts',
+    legColor: [0x3d5a80, 0x46403a, 0xd6c7a6],
+    hair: ['crop', 'bald', 'coils', 'wavy'],
+    head: ['bucket', 'cap', 'none'],
+    prop: 'cooler',
+    height: 1.7,
+    build: 1.1,
+    energy: 0.3,
+    apron: false,
+  },
+  'chinchorro-cook': {
+    shirt: [0xfaf6ee, 0xfdf0c9, 0xf7d9c4],
+    accent: [0xe08b2f, 0xe4572e, 0xf2b134],
+    legwear: 'slacks',
+    legColor: [0x2a2a33, 0x46403a, 0x3d5a80],
+    hair: ['bun', 'bob', 'coils', 'braids'],
+    head: ['headwrap', 'none', 'visor'],
+    prop: 'tote',
+    height: 1.58,
+    build: 1.13,
+    energy: 0.42,
+    apron: true,
+  },
+  nurse: {
+    shirt: [0xcfe3d8, 0x63c7d6, 0xdfe9f2, 0xfaf6ee],
+    accent: [0x1d3557, 0x06a77d, 0x4c8bf5],
+    legwear: 'slacks',
+    legColor: [0x63c7d6, 0x2f4560, 0xcfe3d8],
+    hair: ['bun', 'ponytail', 'coils', 'braids'],
+    head: ['none', 'none', 'headwrap'],
+    prop: 'tote',
+    height: 1.66,
+    build: 1.0,
+    energy: 0.55,
+    apron: false,
+  },
+  dj: {
+    shirt: [0x1f2430, 0x9b5de5, 0x2a2a33, 0xef476f],
+    accent: [0x00e5ff, 0xffd166, 0xf05d8f],
+    legwear: 'shorts',
+    legColor: [0x1f2430, 0x2a2a33, 0x577590],
+    hair: ['locs', 'afro', 'braids', 'crop'],
+    head: ['cap', 'bucket', 'bandana', 'none'],
+    prop: 'cooler',
+    height: 1.77,
+    build: 1.06,
+    energy: 0.95,
+    apron: false,
+  },
+  'party-host': {
+    shirt: [0xff5d8f, 0xffd166, 0xfaf6ee, 0x00e5ff],
+    accent: [0x9b5de5, 0x2fa8a0, 0xffd166],
+    legwear: 'skirt',
+    legColor: [0xffd166, 0x1f2430, 0xff5d8f],
+    hair: ['ponytail', 'afro', 'braids', 'bun'],
+    head: ['none', 'visor', 'none', 'bandana'],
+    prop: 'tote',
+    height: 1.64,
+    build: 1.0,
+    energy: 1,
+    apron: false,
+  },
+  'abuelo-parrandero': {
+    shirt: [0xfaf6ee, 0xfdf0c9, 0xf4a259, 0xdfe9f2],
+    accent: [0xe4572e, 0xf2b134, 0x06a77d],
+    legwear: 'slacks',
+    legColor: [0xf5f0e6, 0xd6c7a6, 0x46403a],
+    hair: ['crop', 'bald', 'coils'],
+    head: ['sunHat', 'cap', 'none'],
+    prop: 'barril',
+    height: 1.63,
+    build: 1.05,
+    energy: 0.85,
+    apron: false,
+  },
 };
 
 const FALLBACK_VISUAL: ArchetypeVisual = {
@@ -420,6 +558,42 @@ export const ARCHETYPE_ROUTING: Readonly<Record<string, ArchetypeRouting>> = {
     maxRoute: 520,
     spawnWeight: 1.05,
   },
+  fisherman: {
+    destKinds: ['dock', 'beach', 'market'],
+    minRoute: 160,
+    maxRoute: 640,
+    spawnWeight: 0.9,
+  },
+  'chinchorro-cook': {
+    destKinds: ['beach', 'cafe', 'market', 'plaza'],
+    minRoute: 110,
+    maxRoute: 480,
+    spawnWeight: 0.85,
+  },
+  nurse: {
+    destKinds: ['plaza', 'chapel', 'market', 'cafe'],
+    minRoute: 130,
+    maxRoute: 500,
+    spawnWeight: 0.9,
+  },
+  dj: {
+    destKinds: ['venue', 'rooftop', 'beach', 'plaza'],
+    minRoute: 150,
+    maxRoute: 560,
+    spawnWeight: 0.7,
+  },
+  'party-host': {
+    destKinds: ['venue', 'beach', 'plaza', 'rooftop'],
+    minRoute: 140,
+    maxRoute: 560,
+    spawnWeight: 0.6,
+  },
+  'abuelo-parrandero': {
+    destKinds: ['plaza', 'venue', 'cafe', 'market'],
+    minRoute: 100,
+    maxRoute: 420,
+    spawnWeight: 0.6,
+  },
 };
 
 const FALLBACK_ROUTING: ArchetypeRouting = {
@@ -494,6 +668,44 @@ const WEIGHTS: readonly number[] = ARCHETYPES.map((a) => routingFor(a.id).spawnW
  * Weighted archetype pick that avoids repeating whatever is already out on the
  * street, so the player meets the whole cast rather than three of Doña Carmen.
  */
+/**
+ * Who gets on the Chinchorreo bus. Everybody in Old San Juan goes to a
+ * chinchorreo eventually — including Doña Carmen — but the crawl skews hard
+ * toward people who *came out to party*, so thrill-seekers are heavily
+ * favoured and the two or three nervous chaperones on board are the joke.
+ */
+const PARTY_WEIGHTS: readonly number[] = ARCHETYPES.map((a) => {
+  const thrill = Number.isFinite(a.thrillSeeking) ? a.thrillSeeking : 0;
+  /* 0.18 at thrill -1, 1.0 at 0, 3.0 at +1 — nervous folk are rare, not absent */
+  return thrill >= 0 ? 1 + thrill * 2 : 0.18 + (1 + thrill) * 0.82;
+});
+
+/**
+ * Draw one party-goer, never repeating anybody already aboard. Returns null
+ * only if the whole cast is already on the bus.
+ */
+export function pickPartyArchetype(
+  rng: RNG,
+  exclude?: ReadonlySet<string>,
+): PassengerArchetype | null {
+  let total = 0;
+  for (let i = 0; i < ARCHETYPES.length; i++) {
+    if (exclude && exclude.has(ARCHETYPES[i].id)) continue;
+    total += PARTY_WEIGHTS[i];
+  }
+  if (total <= 0) return null;
+  let r = rng.next() * total;
+  for (let i = 0; i < ARCHETYPES.length; i++) {
+    if (exclude && exclude.has(ARCHETYPES[i].id)) continue;
+    r -= PARTY_WEIGHTS[i];
+    if (r <= 0) return ARCHETYPES[i];
+  }
+  for (let i = ARCHETYPES.length - 1; i >= 0; i--) {
+    if (!exclude || !exclude.has(ARCHETYPES[i].id)) return ARCHETYPES[i];
+  }
+  return null;
+}
+
 export function pickArchetype(rng: RNG, exclude?: ReadonlySet<string>): PassengerArchetype {
   if (!exclude || exclude.size === 0) return rng.weighted(ARCHETYPES, WEIGHTS);
   let total = 0;

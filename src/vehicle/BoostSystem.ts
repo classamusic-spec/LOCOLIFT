@@ -11,9 +11,17 @@
  */
 import type { EventBus } from '../core/EventBus';
 import { clamp01, damp } from '../core/MathUtils';
-import { BOOST } from './VehicleTuning';
+import { JEEP_TUNING } from './VehicleTuning';
+import type { BoostTuning, VehicleTuningSet } from './VehicleTuning';
 
 export class BoostSystem {
+  /** this vehicle's boost constants */
+  private readonly T: BoostTuning;
+
+  constructor(tuning: VehicleTuningSet = JEEP_TUNING) {
+    this.T = tuning.boost;
+  }
+
   /** 0..1 meter fill */
   private meter = 0;
   /** true whenever thrust is being produced (meter boost or mini-turbo) */
@@ -131,16 +139,16 @@ export class BoostSystem {
     if (!on) {
       if (this.active) {
         /* keep going while held and there is anything left in the tank */
-        on = wants && this.meter > BOOST.minToHold;
+        on = wants && this.meter > this.T.minToHold;
         if (this.holdTimer > 0) on = true;
-      } else if (wants && this.meter >= BOOST.minToStart) {
+      } else if (wants && this.meter >= this.T.minToStart) {
         on = true;
-        this.holdTimer = BOOST.minDuration;
+        this.holdTimer = this.T.minDuration;
       }
     }
 
     if (on && this.autoTimer <= 0) {
-      this.meter = clamp01(this.meter - BOOST.drainPerSecond * dt);
+      this.meter = clamp01(this.meter - this.T.drainPerSecond * dt);
       if (this.meter <= 0 && this.holdTimer <= 0) {
         on = false;
         this.toggled = false;
@@ -152,16 +160,16 @@ export class BoostSystem {
     this.active = on;
 
     /* --- envelope --- */
-    const rate = on ? 1 / Math.max(1e-4, BOOST.rampInTime) : 1 / Math.max(1e-4, BOOST.rampOutTime);
+    const rate = on ? 1 / Math.max(1e-4, this.T.rampInTime) : 1 / Math.max(1e-4, this.T.rampOutTime);
     const target = on ? 1 : 0;
     this.ramp = clamp01(this.ramp + (target - this.ramp) * Math.min(1, rate * dt * 2.2));
     if (!on && this.ramp < 0.002) this.ramp = 0;
 
-    this.glow = damp(this.glow, on ? 1 : 0, BOOST.glowRate, dt);
+    this.glow = damp(this.glow, on ? 1 : 0, this.T.glowRate, dt);
 
     /* --- passive trickle so the player is never completely dry --- */
-    if (!on && speed > BOOST.trickleSpeed) {
-      this.meter = clamp01(this.meter + BOOST.trickleRegen * dt);
+    if (!on && speed > this.T.trickleSpeed) {
+      this.meter = clamp01(this.meter + this.T.trickleRegen * dt);
     }
 
     if (on && !wasActive) bus.emit('vehicle:boostStart', {});

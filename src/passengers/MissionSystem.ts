@@ -34,6 +34,18 @@ import type {
 import { pickArchetype, routingFor, VARIANTS_PER_ARCHETYPE, archetypeOrDefault } from './Archetypes';
 import { DialogueDirector } from './Dialogue';
 import {
+  ALL_MISSIONS,
+  bucketByRegion,
+  eligibleSideMissions,
+  nextStoryMission,
+  regionOfPOI,
+  SIDE_MISSIONS,
+  type MapRegion,
+  type MissionContext,
+  type SpecialMissionDef,
+  type WeatherKind,
+} from './MissionCatalog';
+import {
   blankRide,
   computeFare,
   estimateFare,
@@ -67,6 +79,8 @@ export interface MissionVehicle {
   readonly speed: number;
   readonly forwardSpeed: number;
   readonly isAirborne: boolean;
+  /** roster id — `'jeep'`, `'bus'`, … Absent means the Jeep. */
+  readonly vehicleId?: string;
   addBoost(amount: number): void;
   setSeatVisual(occupied: boolean, archetypeId?: string): void;
 }
@@ -128,6 +142,15 @@ export const MISSION_TUNING = {
   /** deliveries between runaway-cart events */
   cartEvery: 5,
 
+  /** a mission fare anchored to a POI may spawn this far from the player */
+  anchoredSpawnMax: 780,
+  /** …and no closer than this, so it is never already on top of you */
+  anchoredSpawnMin: 45,
+  /** metres from the anchor POI a mission fare may stand */
+  anchorRadius: 120,
+  /** style money for landing a mid-run leg of a multi-stop job */
+  legPoints: 60,
+
   /** style money awarded for taking an alley/stairs/rooftop shortcut */
   shortcutPoints: 26,
   /** style money for running down the piragua cart */
@@ -140,23 +163,8 @@ export const MISSION_TUNING = {
 
 /* ------------------------------------------------------ special missions */
 
-export interface SpecialMissionDef {
-  id: string;
-  title: string;
-  objective: string;
-  archetypeId: string;
-  destKinds: readonly POIKind[];
-  /** hard deadline from pickup, seconds */
-  timeLimit: number;
-  /** contact impulse that fails the run outright, or Infinity */
-  crashFail: number;
-  bonusCash: number;
-  bonusTime: number;
-  minRoute: number;
-  maxRoute: number;
-  failTimeout: string;
-  failCrash?: string;
-}
+export type { SpecialMissionDef, MapRegion, WeatherKind } from './MissionCatalog';
+export { ALL_MISSIONS, SIDE_MISSIONS, STORY_MISSIONS, missionById } from './MissionCatalog';
 
 /**
  * A stand-in "passenger" so the runaway cart can reuse the HUD's destination
@@ -174,65 +182,8 @@ export const CART_ARCHETYPE: PassengerArchetype = {
   voicePitch: 1,
 };
 
-export const SPECIAL_MISSIONS: readonly SpecialMissionDef[] = [
-  {
-    id: 'gig-bomba',
-    title: 'EL BOMBAZO NO ESPERA',
-    objective: 'Lleva a Kique al Salón de Bomba y Plena antes de que empiece el toque.',
-    archetypeId: 'bomba-drummer',
-    destKinds: ['venue', 'plaza'],
-    timeLimit: 64,
-    crashFail: Infinity,
-    bonusCash: 340,
-    bonusTime: 12,
-    minRoute: 140,
-    maxRoute: 520,
-    failTimeout: 'El bombazo empezó sin Kique.',
-  },
-  {
-    id: 'cruise-catch',
-    title: 'EL CRUCERO ZARPA',
-    objective: 'Marla tiene que estar en el muelle antes de que suelten amarras.',
-    archetypeId: 'cruise-guest',
-    destKinds: ['dock'],
-    timeLimit: 56,
-    crashFail: Infinity,
-    bonusCash: 400,
-    bonusTime: 14,
-    minRoute: 150,
-    maxRoute: 620,
-    failTimeout: 'El crucero zarpó sin Marla. Y sin su pasaporte.',
-  },
-  {
-    id: 'wedding-cake',
-    title: 'BIZCOCHO DE BODAS',
-    objective: 'Entrega el bizcocho de Doña Yolanda SIN un solo golpe.',
-    archetypeId: 'bakery-owner',
-    destKinds: ['chapel', 'venue', 'plaza'],
-    timeLimit: 96,
-    crashFail: 1500,
-    bonusCash: 480,
-    bonusTime: 15,
-    minRoute: 130,
-    maxRoute: 460,
-    failTimeout: 'La boda empezó y el bizcocho sigue en el carro.',
-    failCrash: '¡El bizcocho! Tres pisos en el piso.',
-  },
-  {
-    id: 'rooftop-party',
-    title: 'AZOTEA SECRETA',
-    objective: 'Sube a K-Bo a la azotea antes de que cierren la puerta.',
-    archetypeId: 'trap-artist',
-    destKinds: ['rooftop'],
-    timeLimit: 72,
-    crashFail: Infinity,
-    bonusCash: 420,
-    bonusTime: 13,
-    minRoute: 150,
-    maxRoute: 560,
-    failTimeout: 'Cerraron la azotea. La fiesta siguió sin ustedes.',
-  },
-];
+/** The arcade random pool, straight from the catalog. */
+export { SPECIAL_MISSIONS } from './MissionCatalog';
 
 /* --------------------------------------------------------- internal types */
 
@@ -258,6 +209,13 @@ interface ActiveFare {
   wrongWayTimer: number;
   lastX: number;
   lastZ: number;
+  /** 1-based leg of a multi-stop job */
+  leg: number;
+  legs: number;
+  /** POI ids already delivered to on this run */
+  visited: string[];
+  /** seconds spent under a job's speed floor */
+  slowTimer: number;
 }
 
 type CartPhase = 'chase' | 'return';
@@ -323,6 +281,30 @@ export class MissionSystem implements System {
   private lastShortcutEdge = -1;
   private comboAtLastDelivery = 0;
 
+  /* --- world/eligibility state the catalog filters on --------------------- */
+  private hour = 12;
+  private weather: WeatherKind = 'clear';
+  private rank = 0;
+  private readonly completed = new Set<string>();
+  private readonly regions = new Set<MapRegion>();
+  private regionOf = new Map<string, MapRegion>();
+  private buckets: Record<MapRegion, POI[]> = { oldTown: [], coast: [], pinones: [] };
+  /** when true, the next special is the next unplayed encargo, not a random job */
+  private storyMode = false;
+  /** the spine job currently queued or running, for the story controller */
+  private storyActiveId: string | null = null;
+  private storyResolved: 'complete' | 'fail' | null = null;
+  private readonly missionCtx: MissionContext = {
+    hour: 12,
+    weather: 'clear',
+    rank: 0,
+    completed: this.completed,
+    regions: this.regions,
+  };
+  /** scratch for weighted mission rolls — never reallocated per frame */
+  private readonly rollPool: SpecialMissionDef[] = [];
+  private readonly rollWeights: number[] = [];
+
   /** Reused marker objects — `rebuildMarkers` runs every frame. */
   private readonly markerPool: WaitingMarker[] = [];
   private readonly markers: WaitingMarker[] = [];
@@ -363,11 +345,74 @@ export class MissionSystem implements System {
 
   init(ctx: GameContext): void {
     this.buildCandidates();
+    this.buildRegions();
     this.subscribe(ctx.bus);
   }
 
   setCombo(c: MissionComboFeed | null): void {
     this.combo = c;
+  }
+
+  /* ------------------------------------------------- catalog eligibility */
+
+  /** Bucket the POI table by region once. Cheap, and only the world changes it. */
+  private buildRegions(): void {
+    this.buckets = bucketByRegion(this.world.pois, this.world.bounds);
+    this.regions.clear();
+    this.regionOf.clear();
+    for (const key of ['oldTown', 'coast', 'pinones'] as const) {
+      if (this.buckets[key].length > 0) this.regions.add(key);
+      for (const poi of this.buckets[key]) this.regionOf.set(poi.id, key);
+    }
+    if (this.regions.size === 0) this.regions.add('oldTown');
+  }
+
+  /** Re-bucket after the world has grown (a district streamed in). */
+  refreshRegions(): void {
+    this.buildRegions();
+  }
+
+  get availableRegions(): ReadonlySet<MapRegion> {
+    return this.regions;
+  }
+
+  regionForPOI(poi: POI): MapRegion {
+    return this.regionOf.get(poi.id) ?? regionOfPOI(poi, this.world.bounds);
+  }
+
+  /** Player reputation rank — gates the harder jobs. */
+  setRank(rank: number): void {
+    this.rank = Number.isFinite(rank) ? Math.max(0, rank) : 0;
+    this.missionCtx.rank = this.rank;
+  }
+
+  /** Story ids already finished, so the spine and `requires` gates resolve. */
+  setCompletedMissions(ids: Iterable<string>): void {
+    this.completed.clear();
+    for (const id of ids) this.completed.add(id);
+  }
+
+  /** Run the progression spine instead of rolling random side jobs. */
+  setStoryMode(on: boolean): void {
+    this.storyMode = on;
+  }
+
+  get storyMissionId(): string | null {
+    return this.storyActiveId;
+  }
+
+  /** `'complete'` / `'fail'` once the queued spine job resolves; self-clearing. */
+  consumeStoryResult(): 'complete' | 'fail' | null {
+    const r = this.storyResolved;
+    this.storyResolved = null;
+    return r;
+  }
+
+  private syncMissionCtx(): MissionContext {
+    this.missionCtx.hour = this.hour;
+    this.missionCtx.weather = this.weather;
+    this.missionCtx.rank = this.rank;
+    return this.missionCtx;
   }
 
   onQualityChange(tier: QualityTier): void {
@@ -399,6 +444,8 @@ export class MissionSystem implements System {
     this.comboAtLastDelivery = this.combo ? this.combo.pointsBanked : 0;
     this.elapsed = 0;
     this.spawnTimer = 0;
+    this.storyActiveId = null;
+    this.storyResolved = null;
     this.dialogue.reset(0);
   }
 
@@ -555,6 +602,95 @@ export class MissionSystem implements System {
     this.candidateCursor = 0;
   }
 
+  /**
+   * Where a job's fare should be standing. `spawnIds` beats `spawnKinds` beats
+   * the job's region; anything the live world does not have simply falls
+   * through, so a build without Piñones still offers Doña Fela's ruta — it just
+   * runs it out of whatever kioskos exist.
+   */
+  private spawnAnchorFor(def: SpecialMissionDef): POI | null {
+    const pois = this.world.pois;
+    if (pois.length === 0) return null;
+
+    if (def.spawnIds) {
+      let best: POI | null = null;
+      for (const id of def.spawnIds) {
+        const poi = this.world.poiById(id);
+        if (poi && (!best || this.rng.bool(0.5))) best = poi;
+      }
+      if (best) return best;
+    }
+
+    const regionPool = def.region ? this.buckets[def.region] : null;
+    const pool = regionPool && regionPool.length > 0 ? regionPool : pois;
+
+    if (def.spawnKinds && def.spawnKinds.length > 0) {
+      let chosen: POI | null = null;
+      let seen = 0;
+      for (const poi of pool) {
+        if (!def.spawnKinds.includes(poi.kind)) continue;
+        seen++;
+        /* reservoir sample so a long POI table does not always pick the first */
+        if (this.rng.next() < 1 / seen) chosen = poi;
+      }
+      if (chosen) return chosen;
+    }
+
+    if (regionPool && regionPool.length > 0) {
+      return regionPool[this.rng.int(0, regionPool.length - 1)];
+    }
+    return null;
+  }
+
+  /**
+   * Spawn the pending special near its anchor. Falls back to the normal ring
+   * spawn when nothing legal is near enough — never soft-locks the loop.
+   */
+  private trySpawnAnchored(def: SpecialMissionDef): boolean {
+    const anchor = this.spawnAnchorFor(def);
+    if (!anchor || this.candidates.length === 0) return false;
+
+    const vx = this.vehicle.position.x;
+    const vz = this.vehicle.position.z;
+    const minR2 = MISSION_TUNING.anchoredSpawnMin * MISSION_TUNING.anchoredSpawnMin;
+    const maxR2 = MISSION_TUNING.anchoredSpawnMax * MISSION_TUNING.anchoredSpawnMax;
+    const anchorR2 = MISSION_TUNING.anchorRadius * MISSION_TUNING.anchorRadius;
+    const sep2 = MISSION_TUNING.spawnSeparation * MISSION_TUNING.spawnSeparation;
+
+    let best: SpawnCandidate | null = null;
+    let bestD = Infinity;
+    for (let i = 0; i < this.candidates.length; i++) {
+      const c = this.candidates[i];
+      const ax = c.x - anchor.pos.x;
+      const az = c.z - anchor.pos.z;
+      const ad2 = ax * ax + az * az;
+      if (ad2 > anchorR2 || ad2 >= bestD) continue;
+
+      const dx = c.x - vx;
+      const dz = c.z - vz;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < minR2 || d2 > maxR2) continue;
+
+      let clear = true;
+      for (const other of this.waiting) {
+        const ox = other.position.x - c.x;
+        const oz = other.position.z - c.z;
+        if (ox * ox + oz * oz < sep2) {
+          clear = false;
+          break;
+        }
+      }
+      if (!clear) continue;
+
+      best = c;
+      bestD = ad2;
+    }
+
+    if (!best) return false;
+    this.spawnAt(best, true);
+    return true;
+  }
+
   private trySpawnWaiting(): void {
     if (this.candidates.length === 0) return;
     const vx = this.vehicle.position.x;
@@ -588,7 +724,7 @@ export class MissionSystem implements System {
     }
   }
 
-  private spawnAt(c: SpawnCandidate): void {
+  private spawnAt(c: SpawnCandidate, forceSpecial = false): void {
     const special = this.pendingSpecial;
     const archetype = special
       ? archetypeOrDefault(special.archetypeId)
@@ -609,7 +745,19 @@ export class MissionSystem implements System {
     p.spawn(this.group);
     this.waiting.push(p);
     this.onScreenArchetypes.add(archetype.id);
-    if (special) SPECIAL_BY_PASSENGER.set(p, special);
+    if (special) {
+      SPECIAL_BY_PASSENGER.set(p, special);
+      /*
+       * A job anchored across the map is out of hail range, so the player would
+       * never learn it exists. Announce it the moment it appears: the HUD toast
+       * plus the minimap marker are the whole discovery mechanic.
+       */
+      if (forceSpecial) {
+        p.noticed = true;
+        this.bus.emit('passenger:hail', { archetypeId: archetype.id, at: p.position });
+        this.bus.emit('ui:toast', { text: special.title, icon: 'star', ms: 3200 });
+      }
+    }
   }
 
   /* ------------------------------------------------------------- the frame */
@@ -617,6 +765,7 @@ export class MissionSystem implements System {
   update(ctx: GameContext, dt: number): void {
     if (!this.running || dt <= 0) return;
     this.elapsed += dt;
+    if (Number.isFinite(ctx.timeOfDay)) this.hour = ctx.timeOfDay;
 
     const vx = this.vehicle.position.x;
     const vz = this.vehicle.position.z;
@@ -631,7 +780,17 @@ export class MissionSystem implements System {
       this.spawnTimer -= dt;
       if (this.spawnTimer <= 0) {
         this.spawnTimer = MISSION_TUNING.spawnInterval;
-        if (this.waiting.length < this.maxWaiting) this.trySpawnWaiting();
+        if (this.waiting.length < this.maxWaiting) {
+          const pending = this.pendingSpecial;
+          const anchored =
+            pending !== null &&
+            (pending.region !== undefined ||
+              pending.spawnKinds !== undefined ||
+              pending.spawnIds !== undefined);
+          if (!anchored || !this.trySpawnAnchored(pending as SpecialMissionDef)) {
+            this.trySpawnWaiting();
+          }
+        }
       }
     }
 
@@ -695,7 +854,7 @@ export class MissionSystem implements System {
     SPECIAL_BY_PASSENGER.delete(p);
     if (special && this.pendingSpecial === special) this.pendingSpecial = null;
 
-    const destination = this.chooseDestination(p, special);
+    const destination = this.chooseDestination(p.position, special, EMPTY_VISITED);
     if (!destination) {
       /* no legal destination — let them go rather than soft-lock the loop */
       p.markBailed();
@@ -732,9 +891,14 @@ export class MissionSystem implements System {
       wrongWayTimer: 0,
       lastX: this.vehicle.position.x,
       lastZ: this.vehicle.position.z,
+      leg: 1,
+      legs: special && special.legs && special.legs > 1 ? Math.min(6, Math.floor(special.legs)) : 1,
+      visited: [],
+      slowTimer: 0,
     };
     this.lastDestinationId = destination.id;
     this.lastShortcutEdge = -1;
+    if (special?.story) this.storyActiveId = special.id;
 
     this.bus.emit('passenger:pickup', {
       archetypeId: p.archetype.id,
@@ -751,26 +915,50 @@ export class MissionSystem implements System {
         title: special.title,
         objective: special.objective,
       });
+      if (this.active.legs > 1) {
+        this.bus.emit('ui:toast', {
+          text: `Parada 1 / ${this.active.legs}`,
+          icon: 'pin',
+          ms: 2200,
+        });
+      }
     }
   }
 
-  private chooseDestination(p: Passenger, special: SpecialMissionDef | null): POI | null {
-    const routing = routingFor(p.archetype.id);
+  /**
+   * Pick where this run goes next. Shared by the first leg and every leg after
+   * it, so a multi-stop job never revisits a kiosko it has already served and
+   * never picks a stop it cannot reach in the leg's time limit.
+   */
+  private chooseDestination(
+    from: THREE.Vector3,
+    special: SpecialMissionDef | null,
+    visited: readonly string[],
+    archetypeId?: string,
+  ): POI | null {
+    const routing = routingFor(archetypeId ?? special?.archetypeId ?? '');
     const kinds = special ? special.destKinds : routing.destKinds;
     const minR = special ? special.minRoute : routing.minRoute;
     const maxR = special ? special.maxRoute : routing.maxRoute;
+    const region = special?.region;
 
     let best: POI | null = null;
     let bestScore = -Infinity;
 
     for (const poi of this.world.pois) {
       if (poi.id === this.lastDestinationId) continue;
-      const d = Math.hypot(poi.pos.x - p.position.x, poi.pos.z - p.position.z);
+      if (visited.length > 0 && visited.includes(poi.id)) continue;
+      const d = Math.hypot(poi.pos.x - from.x, poi.pos.z - from.z);
       if (d < 45) continue;
 
       const kindIndex = kinds.indexOf(poi.kind);
       let score = kindIndex >= 0 ? 100 - kindIndex * 12 : 0;
       if (special && kindIndex < 0) continue;
+
+      /* an explicitly-named venue is what the writer meant — take it */
+      if (special?.destIds && special.destIds.includes(poi.id)) score += 220;
+      /* keep a regional job inside its region when the world has one */
+      if (region && this.regionOf.get(poi.id) === region) score += 55;
 
       if (d < minR) score -= (minR - d) * 0.25;
       else if (d > maxR) score -= (d - maxR) * 0.2;
@@ -785,10 +973,14 @@ export class MissionSystem implements System {
 
     if (best) return best;
 
-    /* relaxed fallback: anything far enough away */
+    /* relaxed fallback: anything far enough away and not already served */
     for (const poi of this.world.pois) {
-      const d = Math.hypot(poi.pos.x - p.position.x, poi.pos.z - p.position.z);
+      if (visited.length > 0 && visited.includes(poi.id)) continue;
+      const d = Math.hypot(poi.pos.x - from.x, poi.pos.z - from.z);
       if (d >= 60) return poi;
+    }
+    for (const poi of this.world.pois) {
+      if (visited.length === 0 || !visited.includes(poi.id)) return poi;
     }
     return this.world.pois.length > 0 ? this.world.pois[0] : null;
   }
@@ -832,7 +1024,8 @@ export class MissionSystem implements System {
 
     const radius = clamp(a.destination.radius, MISSION_TUNING.dropMinRadius, MISSION_TUNING.dropMaxRadius);
     if (dist <= radius && speed <= MISSION_TUNING.dropSpeed && !this.vehicle.isAirborne) {
-      this.completeFare();
+      if (a.leg < a.legs) this.advanceLeg();
+      else this.completeFare();
       return;
     }
 
@@ -840,9 +1033,83 @@ export class MissionSystem implements System {
       this.failFare('terrified');
       return;
     }
+
+    /* a chase job dies if you stop chasing */
+    const floor = a.special?.minSpeedAbove;
+    if (floor !== undefined && floor > 0) {
+      if (speed < floor) {
+        a.slowTimer += dt;
+        const grace = a.special?.minSpeedGrace ?? 5;
+        if (a.slowTimer >= grace) {
+          this.failFare('timeout', a.special?.failSlow);
+          return;
+        }
+      } else if (a.slowTimer > 0) {
+        a.slowTimer = Math.max(0, a.slowTimer - dt * 2);
+      }
+    }
+
     if (a.left <= 0) {
       this.failFare('timeout');
     }
+  }
+
+  /**
+   * A mid-run stop landed. The passenger stays aboard, the clock is reset to
+   * the leg's limit, and the HUD is re-pointed at the next kiosko. This is the
+   * whole multi-stop verb — one delivery, several destinations.
+   */
+  private advanceLeg(): void {
+    const a = this.active;
+    if (!a || !a.special) return;
+    const def = a.special;
+
+    a.visited.push(a.destination.id);
+    a.leg++;
+
+    const next = this.chooseDestination(
+      a.destination.pos,
+      def,
+      a.visited,
+      a.passenger.archetype.id,
+    );
+    if (!next) {
+      /* nowhere left to go — pay out what has been earned rather than stall */
+      this.completeFare();
+      return;
+    }
+
+    const legCash = def.legBonus ?? 0;
+    const legSeconds = def.legTime ?? Math.max(8, def.timeLimit * 0.3);
+
+    const legDistance = Math.hypot(
+      next.pos.x - a.destination.pos.x,
+      next.pos.z - a.destination.pos.z,
+    );
+    a.destination = next;
+    a.left = def.timeLimit;
+    a.allowance = def.timeLimit;
+    a.saidAlmostThere = false;
+    a.wrongWayTimer = 0;
+    a.slowTimer = 0;
+    a.ride.missionBonus += legCash;
+    a.ride.routeDistance += legDistance;
+    a.parTime = parTimeFor(a.ride.routeDistance);
+    a.ride.parTime = a.parTime;
+    this.lastDestinationId = next.id;
+
+    this.combo?.add(`PARADA ${a.leg - 1} / ${a.legs}`, MISSION_TUNING.legPoints);
+    this.bus.emit('shift:timeAdded', { seconds: legSeconds, reason: `Parada ${a.leg - 1}` });
+    this.bus.emit('ui:notice', { text: `PARADA ${a.leg - 1} / ${a.legs}`, big: false });
+    this.bus.emit('audio:sfx', { id: 'dropoff', volume: 0.8 });
+    /* re-points the HUD card, the destination arrow and the minimap */
+    this.bus.emit('passenger:pickup', {
+      archetypeId: a.passenger.archetype.id,
+      destinationId: next.id,
+      fareEstimate:
+        estimateFare(a.passenger.archetype, a.ride.routeDistance) + def.bonusCash + a.ride.missionBonus,
+    });
+    this.dialogue.say(a.passenger.archetype.id, 'dropoff', a.passenger.mood, this.elapsed, true);
   }
 
   private completeFare(): void {
@@ -882,7 +1149,14 @@ export class MissionSystem implements System {
 
     this.dialogue.say(p.archetype.id, result.rating >= 4 ? 'perfect' : 'dropoff', p.mood, this.elapsed, true);
     this.bus.emit('passenger:dropoff', { archetypeId: p.archetype.id, result });
-    if (a.special) this.bus.emit('mission:complete', { id: a.special.id, result });
+    if (a.special) {
+      this.completed.add(a.special.id);
+      if (a.special.story) {
+        this.storyResolved = 'complete';
+        this.storyActiveId = null;
+      }
+      this.bus.emit('mission:complete', { id: a.special.id, result });
+    }
     this.bus.emit('shift:timeAdded', {
       seconds,
       reason: a.special ? a.special.title : `${result.grade}`,
@@ -891,7 +1165,7 @@ export class MissionSystem implements System {
     this.queueNextEvent();
   }
 
-  private failFare(reason: 'timeout' | 'terrified'): void {
+  private failFare(reason: 'timeout' | 'terrified', override?: string): void {
     const a = this.active;
     if (!a) return;
     const p = a.passenger;
@@ -905,7 +1179,14 @@ export class MissionSystem implements System {
 
     this.bus.emit('passenger:bail', { archetypeId: p.archetype.id, reason });
     if (a.special) {
-      this.bus.emit('mission:fail', { id: a.special.id, reason: a.special.failTimeout });
+      if (a.special.story) {
+        this.storyResolved = 'fail';
+        this.storyActiveId = null;
+      }
+      this.bus.emit('mission:fail', {
+        id: a.special.id,
+        reason: override ?? a.special.failTimeout,
+      });
     }
   }
 
@@ -924,6 +1205,10 @@ export class MissionSystem implements System {
     this.failures++;
 
     this.bus.emit('passenger:bail', { archetypeId: p.archetype.id, reason: 'terrified' });
+    if (special.story) {
+      this.storyResolved = 'fail';
+      this.storyActiveId = null;
+    }
     this.bus.emit('mission:fail', {
       id: special.id,
       reason: special.failCrash ?? special.failTimeout,
@@ -934,7 +1219,11 @@ export class MissionSystem implements System {
   private queueNextEvent(): void {
     if (!this.pendingSpecial && this.sinceSpecial >= MISSION_TUNING.specialEvery) {
       this.sinceSpecial = 0;
-      this.pendingSpecial = this.rng.pick(SPECIAL_MISSIONS);
+      const def = this.storyMode ? nextStoryMission(this.completed) : this.rollSideMission();
+      if (def) {
+        this.pendingSpecial = def;
+        if (def.story) this.storyActiveId = def.id;
+      }
     }
     if (!this.cart && this.sinceCart >= MISSION_TUNING.cartEvery) {
       this.sinceCart = 0;
@@ -942,12 +1231,40 @@ export class MissionSystem implements System {
     }
   }
 
-  /** Force a specific special mission to be the next fare. Returns false if busy. */
+  /**
+   * Roll one eligible side job. Filtering by clock, weather, rank and the
+   * regions the world actually built means a 2 a.m. shift in a downpour offers
+   * genuinely different work than a Tuesday morning — and never offers a job
+   * whose destination does not exist.
+   */
+  private rollSideMission(): SpecialMissionDef | null {
+    const pool = this.rollPool;
+    const weights = this.rollWeights;
+    pool.length = 0;
+    weights.length = 0;
+
+    const ctx = this.syncMissionCtx();
+    const eligible = eligibleSideMissions(ctx);
+    for (const def of eligible) {
+      /* stop re-offering the same job inside one shift while others are unseen */
+      const seen = this.completed.has(def.id) ? 0.35 : 1;
+      pool.push(def);
+      weights.push((def.weight ?? 1) * seen);
+    }
+    if (pool.length === 0) {
+      /* nothing gated in right now — fall back to the always-on core four */
+      return SIDE_MISSIONS.length > 0 ? this.rng.pick(SIDE_MISSIONS) : null;
+    }
+    return this.rng.weighted(pool, weights);
+  }
+
+  /** Force a specific mission to be the next fare. Returns false if busy. */
   forceSpecialMission(id?: string): boolean {
     if (this.pendingSpecial) return false;
-    const def = id ? SPECIAL_MISSIONS.find((m) => m.id === id) : this.rng.pick(SPECIAL_MISSIONS);
+    const def = id ? ALL_MISSIONS.find((m) => m.id === id) : this.rollSideMission();
     if (!def) return false;
     this.pendingSpecial = def;
+    if (def.story) this.storyActiveId = def.id;
     /* make room so the special fare appears promptly */
     if (this.waiting.length >= this.maxWaiting) {
       const victim = this.waiting[0];
@@ -955,6 +1272,19 @@ export class MissionSystem implements System {
     }
     this.spawnTimer = 0;
     return true;
+  }
+
+  /** Queue the next unplayed encargo. Returns its id, or null when done. */
+  queueStoryMission(): string | null {
+    const def = nextStoryMission(this.completed);
+    if (!def) return null;
+    if (this.pendingSpecial === def || this.storyActiveId === def.id) return def.id;
+    this.pendingSpecial = def;
+    this.storyActiveId = def.id;
+    this.storyResolved = null;
+    if (this.waiting.length >= this.maxWaiting) this.retire(0, this.waiting[0]);
+    this.spawnTimer = 0;
+    return def.id;
   }
 
   /* ------------------------------------------------------------ the cart */
@@ -1290,8 +1620,15 @@ export class MissionSystem implements System {
       /* a manual respawn costs a little goodwill but never fails the fare */
       a.passenger.react('crash', 0.5);
     });
+
+    on('weather:changed', (p) => {
+      this.weather = p.kind;
+    });
   }
 }
+
+/** Shared empty visited-list so the first leg allocates nothing. */
+const EMPTY_VISITED: readonly string[] = [];
 
 /**
  * Which waiting fare, if any, is carrying a special mission. Kept out of

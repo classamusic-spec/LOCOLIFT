@@ -1,9 +1,15 @@
 /**
- * Loco Lift — the Jeep's tuning bible.
+ * Loco Lift — the Jeep's tuning bible, and the shape every drivable vehicle
+ * must fill in.
  *
  * EVERY magic number that shapes how the Jeep drives, looks and sounds lives in
  * this file. Nothing else in `src/vehicle/**` is allowed to hard-code a feel
  * constant. If the Jeep feels wrong, it gets fixed here.
+ *
+ * The constant blocks below are the Jeep's values; `JEEP_TUNING` at the bottom
+ * bundles them into a `VehicleTuningSet`, which is what `Vehicle` actually
+ * reads. A second vehicle (see `BusTuning.ts`) supplies its own set and drives
+ * completely differently without a single branch in the simulation code.
  *
  * Units are SI: metres, seconds, kilograms, newtons, radians.
  * World gravity is CONFIG.gravity = -22 m/s² — deliberately ~2.2x real gravity
@@ -14,6 +20,8 @@
  *   forward = local -Z     right = local +X     up = local +Y
  * Wheel indices: 0 = front-left, 1 = front-right, 2 = rear-left, 3 = rear-right.
  */
+import type * as THREE from 'three';
+import type { QualityTier } from '../core/types';
 
 /* ------------------------------------------------------------------ chassis */
 
@@ -678,3 +686,226 @@ export const WHEEL_FL = 0;
 export const WHEEL_FR = 1;
 export const WHEEL_RL = 2;
 export const WHEEL_RR = 3;
+
+/* ========================================================================== */
+/*                        the per-vehicle tuning contract                     */
+/* ========================================================================== */
+
+/**
+ * Widen one `as const` block into a plain readonly record. The Jeep's blocks
+ * are frozen literals (`mass: 1400`); a second vehicle needs the same *shape*
+ * with different values, which is exactly `number` instead of `1400`.
+ */
+type Tunable<T> = { readonly [K in keyof T]: T[K] extends number ? number : T[K] };
+
+export type ChassisTuning = Tunable<typeof CHASSIS>;
+export type SuspensionTuning = Tunable<typeof SUSPENSION>;
+export type EngineTuning = Tunable<typeof ENGINE>;
+export type SpeedTuning = Tunable<typeof SPEED>;
+export type BrakeTuning = Tunable<typeof BRAKE>;
+export type SteerTuning = Tunable<typeof STEER>;
+export type TyreTuning = Tunable<typeof TYRE>;
+export type DriftTuning = Tunable<typeof DRIFT>;
+export type BoostTuning = Tunable<typeof BOOST>;
+export type AirTuning = Tunable<typeof AIR>;
+export type TwoWheelTuning = Tunable<typeof TWO_WHEELS>;
+export type NearMissTuning = Tunable<typeof NEAR_MISS>;
+export type CollisionTuning = Tunable<typeof COLLISION>;
+export type RecoveryTuning = Tunable<typeof RECOVERY>;
+
+/** One suspension corner's position in chassis local space. */
+export interface WheelPlacement {
+  readonly x: number;
+  readonly z: number;
+  readonly front: boolean;
+  readonly left: boolean;
+}
+
+/**
+ * The slice of a vehicle's MODEL block the simulation reads. Everything else in
+ * a MODEL block is that vehicle's own geometry and stays private to its mesh.
+ */
+export interface ModelFeel {
+  /** radians of cosmetic pitch per unit of front/rear compression difference */
+  readonly bodyPitchGain: number;
+  /** radians of cosmetic roll per unit of left/right compression difference */
+  readonly bodyRollGain: number;
+  /** metres the body sinks per unit of average compression above static */
+  readonly bodyBounceGain: number;
+  /** rate the cosmetic lean chases its target, 1/s */
+  readonly bodyLeanRate: number;
+  /** cosmetic lean clamp, radians */
+  readonly bodyLeanMax: number;
+  /** headlights come on before this hour ... */
+  readonly headlightOnBefore: number;
+  /** ... and after this one */
+  readonly headlightOnAfter: number;
+}
+
+/** The player's horn. Pitch is what turns a beep into an air horn. */
+export interface HornTuning {
+  /** playback rate multiplier on the shared horn sample */
+  readonly pitch: number;
+  readonly volume: number;
+  /** minimum seconds between two honks, so leaning on the key doesn't machine-gun */
+  readonly cooldown: number;
+}
+
+/**
+ * Air brakes. Heavy vehicles bleed their reservoir with a hiss when the pedal
+ * comes off or the vehicle finally stops; light vehicles leave this disabled.
+ */
+export interface AirBrakeTuning {
+  readonly enabled: boolean;
+  readonly pitch: number;
+  readonly volume: number;
+  /** brake input above this charges the reservoir */
+  readonly brakeThreshold: number;
+  /** seconds of hard braking before a release is worth a hiss */
+  readonly chargeToFire: number;
+  /** how fast an un-braked reservoir bleeds back down, 1/s */
+  readonly decayRate: number;
+  /** below this speed a still-braking vehicle hisses anyway (the bus stop) */
+  readonly stopSpeed: number;
+  readonly cooldown: number;
+}
+
+/**
+ * Everything `Vehicle` needs to simulate one specific vehicle. Swapping this
+ * record swaps the entire driving model — mass, gearbox, tyres, recovery and
+ * the cosmetic body lean — with no branching anywhere in the simulation.
+ */
+export interface VehicleTuningSet {
+  readonly chassis: ChassisTuning;
+  readonly suspension: SuspensionTuning;
+  /** exactly four corners, in the order FL, FR, RL, RR */
+  readonly wheels: readonly WheelPlacement[];
+  readonly engine: EngineTuning;
+  readonly speed: SpeedTuning;
+  readonly brake: BrakeTuning;
+  readonly steer: SteerTuning;
+  readonly tyre: TyreTuning;
+  readonly drift: DriftTuning;
+  readonly boost: BoostTuning;
+  readonly air: AirTuning;
+  readonly twoWheels: TwoWheelTuning;
+  readonly nearMiss: NearMissTuning;
+  readonly collision: CollisionTuning;
+  readonly recovery: RecoveryTuning;
+  readonly model: ModelFeel;
+  readonly horn: HornTuning;
+  readonly airBrake: AirBrakeTuning;
+  /** collider translation relative to the body origin — tall bodies need it */
+  readonly colliderOffsetY: number;
+}
+
+/** The Jeep, bundled. This is the record `Vehicle` uses unless told otherwise. */
+export const JEEP_TUNING: VehicleTuningSet = {
+  chassis: CHASSIS,
+  suspension: SUSPENSION,
+  wheels: WHEEL_LAYOUT,
+  engine: ENGINE,
+  speed: SPEED,
+  brake: BRAKE,
+  steer: STEER,
+  tyre: TYRE,
+  drift: DRIFT,
+  boost: BOOST,
+  air: AIR,
+  twoWheels: TWO_WHEELS,
+  nearMiss: NEAR_MISS,
+  collision: COLLISION,
+  recovery: RECOVERY,
+  model: MODEL,
+  horn: { pitch: 1.0, volume: 0.85, cooldown: 0.32 },
+  airBrake: {
+    enabled: false,
+    pitch: 1,
+    volume: 0,
+    brakeThreshold: 0.5,
+    chargeToFire: 0.3,
+    decayRate: 1.5,
+    stopSpeed: 1.5,
+    cooldown: 1,
+  },
+  /* the Jeep's collider is symmetric about its origin, as it always was */
+  colliderOffsetY: 0,
+};
+
+/* ------------------------------------------------------- derived geometry */
+
+/**
+ * Static ride height of the body origin above the road, metres — where the
+ * chassis settles under its own weight with the springs at rest.
+ */
+export function staticRideHeight(t: VehicleTuningSet, gravity: number): number {
+  return (
+    t.suspension.wheelRadius +
+    t.suspension.restLength -
+    staticSag(t, gravity) -
+    t.suspension.anchorY
+  );
+}
+
+/** Spring travel consumed by the vehicle's own weight, metres. */
+export function staticSag(t: VehicleTuningSet, gravity: number): number {
+  const perCorner = (t.chassis.mass * Math.abs(gravity)) / 4;
+  const rate = (t.suspension.springRateFront + t.suspension.springRateRear) * 0.5;
+  return perCorner / rate;
+}
+
+/** Static spring compression under the vehicle's own weight, 0..1. */
+export function staticCompression(t: VehicleTuningSet, gravity: number): number {
+  return staticSag(t, gravity) / t.suspension.restLength;
+}
+
+/* ========================================================================== */
+/*                            the mesh contract                               */
+/* ========================================================================== */
+
+/**
+ * A musical clock. `AudioSystem` satisfies this structurally, so a vehicle can
+ * strobe its lights in time with the music without the vehicle module ever
+ * importing — or depending on — the audio module.
+ */
+export interface BeatSource {
+  /** 0..1 phase within the current beat */
+  readonly beatPhase: number;
+}
+
+/**
+ * Everything `Vehicle` asks of a mesh. `JeepModel` and `BusModel` both satisfy
+ * it; anything else that does can be dropped straight into the roster.
+ */
+export interface VehicleModel {
+  /** root node — `Vehicle` copies the rigid body transform onto this */
+  readonly object3d: THREE.Object3D;
+
+  /** front wheel angle in radians, positive = steering right */
+  setSteer(rad: number): void;
+  /** absolute roll angle of one wheel, radians */
+  setWheelSpin(index: number, radians: number): void;
+  /** 0 = fully drooped, 1 = bottomed out */
+  setSuspension(index: number, compression: number): void;
+  setBrakeLights(on: boolean): void;
+  setHeadlights(on: boolean): void;
+  /** 0..1 boost visual */
+  setBoostGlow(v: number): void;
+  /** show/hide the fare, tinted by archetype */
+  setSeatOccupied(occupied: boolean, archetypeId?: string): void;
+  /** cosmetic attitude layered over the rigid body's real motion */
+  setChassisLean(pitch: number, roll: number, heave: number): void;
+  /** per-frame idle life; `speed` is m/s */
+  tick(dt: number, speed: number): void;
+  setQuality(tier: QualityTier): void;
+  dispose(): void;
+
+  /** optional: vehicles with a light show take a musical clock */
+  setBeatSource?(src: BeatSource | null): void;
+  /** optional: 0..1 scale on any strobing light show (accessibility, quality) */
+  setLightShowIntensity?(scale: number): void;
+  /** optional: vehicles with an air system flash a hiss/puff, 0..1 strength */
+  pulseAirBrake?(strength: number): void;
+  /** optional: vehicles with a horn animate something when it sounds */
+  pulseHorn?(): void;
+}

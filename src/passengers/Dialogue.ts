@@ -519,6 +519,252 @@ const TRAP_ARTIST: readonly DialogueLine[] = [
   L('shortcut', 'Por ese callejón grabamos el video. Se ve brutal de noche.', 18),
 ];
 
+/* --- Don Nino — pescador, la lancha sale a las cinco ---------------------- */
+
+const FISHERMAN: readonly DialogueLine[] = [
+  L('hail', '¡Ey! ¿Me llevas al muelle? La nevera pesa más que yo.', 30),
+  L('hail', 'Mijo, si no salgo ahora pierdo la marea.', 30),
+  L('hail', 'Aquí, aquí. Traigo chillo fresco, no te va a manchar nada. Casi.', 30),
+
+  L('pickup', 'Con cuidado que la nevera va abierta. Es broma. Medio broma.', 40),
+  L('pickup', 'Cuarenta y un años saliendo del mismo muelle. No he faltado.', 42),
+  L('pickup', 'Dale suave. El pescado ya se murió una vez, no lo mates otra.', 40),
+
+  L('idle', 'Antes esa bahía tenía el doble de peces. El doble, te digo.', 50),
+  L('idle', 'Mi papá me llevó a los siete. Vomité. Al otro día volví.', 52),
+  L('idle', 'El mar te dice cuándo. Uno solo tiene que estar callado.', 50),
+  L('idle', 'Esta noche hay luna llena. Buen chillo, mal dormir.', 48),
+
+  L('drift', 'Muchacho, ¿tú sabes lo que es un ancla?', 12),
+  L('drift', 'Se me viró la nevera. Ahí va el almuerzo.', 12),
+
+  L('jump', '¡Coño! Eso fue como un golpe de ola.', 12),
+
+  L('nearMiss', 'Ese casi nos abre por la mitad, mijo.', 10),
+
+  L('crash', '¡Ay, el hielo! El hielo se me riega.', 8),
+  L('crash', 'Tranquilo, tranquilo. El pescado no se queja. Yo sí.', 9),
+
+  L('boost', 'Bueno, tú tienes prisa. Yo también, pero no tanta.', 14),
+
+  L('wrongWay', 'El muelle está donde huele a diésel. No es por ahí.', 15),
+
+  L('almostThere', 'Ya oigo los motores. Bien ahí.', 18),
+
+  L('dropoff', 'Llegaste. Toma, y pasa por el muelle el jueves que te guardo un chillo.', 30),
+
+  L('perfect', 'Manejas como quien respeta la carga. Eso se aprecia.', 30),
+
+  L('timeout', 'Nada, ya la lancha salió. Mañana será otro día.', 28),
+
+  L('shortcut', 'Por ahí bajaba yo con la bicicleta cargando carnada.', 18),
+];
+
+/* --- Doña Fela — chinchorro de Piñones, alcapurrias que no esperan -------- */
+
+const CHINCHORRO_COOK: readonly DialogueLine[] = [
+  L('hail', '¡Mi amor! Tengo bandeja caliente y quince minutos. ¿Me llevas?', 30),
+  L('hail', 'Ey, ey. Alcapurrias frías no se venden. ¡Arranca!', 30),
+  L('hail', '¿Está libre? Es aquí mismito, pero rapidito.', 30),
+
+  L('pickup', 'La bandeja va derecha. De-re-cha. ¿Estamos?', 42),
+  L('pickup', 'Freí sesenta esta mañana. Sesenta. Ni una se enfría.', 42),
+  L('pickup', 'Métele, pero sin virarme el aceite encima.', 40),
+
+  L('idle', 'El secreto es la yautía. Pero eso no te lo dije yo.', 50),
+  L('idle', 'Mi chinchorro lleva veintidós años en esa misma curva.', 52),
+  L('idle', 'Los domingos hay fila hasta la carretera. Fila, mi amor.', 50),
+  L('idle', 'Ay, huele riquísimo aquí atrás, ¿verdad? De nada.', 46),
+
+  L('drift', '¡Nene! ¡La bandeja! ¡LA BANDEJA!', 10),
+  L('drift', 'Ay, Dios mío, se me fue una al piso.', 10),
+
+  L('jump', '¡Volando con la freidora, lo que me faltaba!', 10),
+
+  L('nearMiss', '¡Ese guagüero está loco! ¡Loco!', 9),
+
+  L('crash', '¡Ay bendito! Dime que la bandeja aguantó.', 8),
+  L('crash', 'Eso me lo descuentas de la propina, ¿oíste?', 9),
+
+  L('boost', '¡Corre, corre, que se enfrían! Bueno, no tanto.', 14),
+
+  L('wrongWay', 'Mi amor, el chinchorro queda hacia la playa. Hacia la playa.', 15),
+
+  L('almostThere', 'Ya veo el toldo. Bájale, bájale.', 18),
+
+  L('dropoff', 'Calienticas y enteras. Toma, y llévate dos para el camino.', 30),
+
+  L('perfect', 'Ni una gota de aceite fuera. Tú sirves para esto, nene.', 30),
+
+  L('timeout', 'Se enfriaron. Ahora las tengo que regalar. Gracias, ¿eh?', 28),
+
+  L('shortcut', 'Por ese callejón se sale a la carretera. Bien pensado.', 18),
+];
+
+/* --- Enfermera Solís — turno de noche, ya llegó tarde una vez ------------- */
+
+const NURSE: readonly DialogueLine[] = [
+  L('hail', '¡Taxi! Entro a las once y son las once menos ocho.', 28),
+  L('hail', 'Por favor, por favor. Turno de noche y no hay relevo.', 28),
+  L('hail', '¿Me puede llevar? Es urgente pero no de esas urgencias.', 28),
+
+  L('pickup', 'Métale. Yo he visto cosas peores que su manera de manejar. Creo.', 38),
+  L('pickup', 'Doce horas por delante. Regáleme los diez minutos.', 38),
+  L('pickup', 'Vaya rápido, pero llégueme entera. Necesito las dos manos hoy.', 38),
+
+  L('idle', 'Anoche entraron cuatro de una guagua que se viró. Cuatro.', 48),
+  L('idle', 'Uno se acostumbra al café malo. A lo demás no.', 50),
+  L('idle', 'Si le digo lo que he cosido esta semana, usted maneja más despacio.', 52),
+  L('idle', 'Mi mamá quería que fuera maestra. Casi.', 48),
+
+  L('drift', '¡Uy! Bueno, eso me despertó.', 12),
+  L('drift', 'Eso es exactamente cómo llegan mis pacientes, ¿sabe?', 12),
+
+  L('jump', '¡Ay! Vale, vale, respiro.', 12),
+
+  L('nearMiss', 'Ese carro casi me da trabajo extra.', 10),
+
+  L('crash', 'Bueno. Al menos ya estoy camino al hospital.', 8),
+  L('crash', 'Muévame los dedos. Los dedos. Bien, estamos bien.', 9),
+
+  L('boost', 'Eso sí, no me haga llegar en camilla.', 14),
+
+  L('wrongWay', 'El centro de salud es hacia allá. Créame, voy todos los días.', 15),
+
+  L('almostThere', 'Ya veo las luces. Gracias, en serio.', 18),
+
+  L('dropoff', 'Llegué. Tenga, y cuídese esa espalda de tanto manejar.', 30),
+
+  L('perfect', 'Rápido y sin un rasguño. Ojalá todos fueran así.', 30),
+
+  L('timeout', 'Ya llamé a una compañera. Le debo una a ella, no a usted.', 28),
+
+  L('shortcut', 'Por ahí corta la ambulancia también. Buen ojo.', 18),
+];
+
+/* --- DJ Melaza — dos cajas de vinilo y una bocina que no cabe ------------- */
+
+const DJ_MELAZA: readonly DialogueLine[] = [
+  L('hail', '¡Mi pana! ¿Cabe una bocina de cuarenta pulgadas? Es retórico.', 28),
+  L('hail', '¡Ey! Sin mí no hay fiesta. Literalmente, yo traigo el sonido.', 28),
+  L('hail', 'Aquí, aquí. Dos cajas de vinilo y muchas ganas.', 28),
+
+  L('pickup', 'Los vinilos van planos. Planos, mano, no de canto.', 40),
+  L('pickup', 'Dale. Yo pongo la música, tú pones el ritmo del carro.', 40),
+  L('pickup', 'Esa curva de allá suena en Fa. Tú me dirás.', 42),
+
+  L('idle', 'Mi papá tenía este mismo disco. Se lo robé en el noventa y ocho.', 50),
+  L('idle', 'La salsa dura no se pincha, se sirve.', 48),
+  L('idle', 'Cuando entra el mambo la gente se olvida de que trabajó hoy.', 50),
+  L('idle', 'Tú tienes cara de que te gusta la plena. No lo niegues.', 46),
+
+  L('drift', '¡Ese derrape iba en clave de son!', 12),
+  L('drift', '¡Wepa! Guárdame ese sonido que lo sampleo.', 12),
+
+  L('jump', '¡Eso fue un break, mano! ¡Un break!', 12),
+
+  L('nearMiss', '¡Uf! Casi mezclamos con ese carro.', 10),
+
+  L('crash', '¡LOS VINILOS! Mano, los vinilos.', 8),
+  L('crash', 'Ese golpe fue en tiempo, pero no me gustó.', 9),
+
+  L('boost', '¡Súbele! ¡Súbele que llegó el drop!', 12),
+
+  L('wrongWay', 'Nah, la tarima está pa\'l otro lado, confía en mí.', 15),
+
+  L('almostThere', 'Ya oigo el bajo desde aquí. Métele.', 18),
+
+  L('dropoff', 'Llegamos. Pásate esta noche, tú entras por la puerta de atrás.', 30),
+
+  L('perfect', 'Eso fue un set completo sin un salto. Respeto.', 30),
+
+  L('timeout', 'Nada, pongo la música por teléfono. Qué tristeza.', 28),
+
+  L('shortcut', 'Ese callejón tiene eco. Ahí grabé un intro una vez.', 18),
+];
+
+/* --- La Cuqui — organiza el chinchorreo entero desde el celular ----------- */
+
+const PARTY_HOST: readonly DialogueLine[] = [
+  L('hail', '¡Ey, ey! Somos doce y el primero soy yo. ¿Vamos?', 28),
+  L('hail', '¡Aquí! Tengo el corillo esperando en cuatro sitios distintos.', 28),
+  L('hail', 'Nene, si no arrancamos ahora el chinchorreo se cae.', 28),
+
+  L('pickup', 'Ok. Primera parada, después te digo. Yo llevo la ruta en la cabeza.', 38),
+  L('pickup', 'Métele, que Doña Fela cierra a las nueve y sin ella no hay nada.', 38),
+  L('pickup', 'Yo organizo, tú manejas. Así funciona esto.', 40),
+
+  L('idle', 'Tengo cuarenta y un mensajes sin leer. Todos del mismo grupo.', 46),
+  L('idle', 'El truco es empezar en el casco y terminar en Piñones. Nunca al revés.', 50),
+  L('idle', 'Si alguien dice "una y nos vamos", nos vamos a las tres.', 48),
+  L('idle', 'Yo conozco a todo el mundo en esa carretera. Todo el mundo.', 48),
+
+  L('drift', '¡AY! ¡Eso lo estoy grabando!', 10),
+  L('drift', '¡Wepa! Dale otra vuelta que se me cayó el celular.', 10),
+
+  L('jump', '¡Volamos! ¡Esto va pa\'l estado, seguro!', 10),
+
+  L('nearMiss', '¡Ese casi nos lleva y ni frenaste! Me encanta.', 10),
+
+  L('crash', '¡Ay, nene! Eso no lo grabé, menos mal.', 8),
+  L('crash', 'Ok. Ok. Nadie diga nada en el grupo.', 9),
+
+  L('boost', '¡Métele! ¡Que ya vamos tarde y la culpa es tuya!', 12),
+
+  L('wrongWay', 'Nene, es por la costa. Por la costa. Te lo dije dos veces.', 15),
+
+  L('almostThere', 'Ya los veo afuera. Bájale que están cruzando.', 18),
+
+  L('dropoff', 'Llegamos. Toma, y quédate. En serio, quédate.', 30),
+
+  L('perfect', 'Tú vienes con nosotros el próximo. No es pregunta.', 30),
+
+  L('timeout', 'Se fueron sin mí. En mi propio chinchorreo. Gracias.', 28),
+
+  L('shortcut', 'Ese atajo lo usa mi primo el que reparte. Bien ahí.', 18),
+];
+
+/* --- Don Chelo — 74 años y el último en bajarse -------------------------- */
+
+const ABUELO_PARRANDERO: readonly DialogueLine[] = [
+  L('hail', '¡Muchacho! ¿Tú vas para donde hay música? Yo también.', 30),
+  L('hail', 'Aquí, aquí. Traigo güiro propio, no ocupo espacio.', 30),
+  L('hail', 'Setenta y cuatro años y todavía llego antes que los nietos.', 30),
+
+  L('pickup', 'Arranca tranquilo. Yo tengo toda la noche, tú no sé.', 42),
+  L('pickup', 'El güiro va conmigo. Siempre. Pregúntale a mi esposa.', 42),
+  L('pickup', 'Dale, mijo. La parranda no se planifica, se cae encima.', 40),
+
+  L('idle', 'Yo bailé en esa plaza cuando todavía era de tierra.', 52),
+  L('idle', 'A mi Nena la conocí en un baile igualito a este que vamos.', 54),
+  L('idle', 'El truco de llegar a los setenta es no sentarse. Nunca.', 50),
+  L('idle', 'Toma, ráspame este güiro un chin. Con la mano no, con la púa.', 48),
+
+  L('drift', '¡Wepa! ¡Ese fue un giro de los buenos!', 12),
+  L('drift', '¡Ja! Mi Nena le tenía miedo a eso. Yo no.', 12),
+
+  L('jump', '¡Ahí voy! ¡Y no me duele nada!', 12),
+
+  L('nearMiss', 'Tranquilo, mijo. Yo he visto cosas peores en este mismo cruce.', 10),
+
+  L('crash', '¡Ay! El güiro está bien, que es lo importante.', 8),
+  L('crash', 'Golpe fuerte. Bueno, uno más.', 9),
+
+  L('boost', '¡Métele! ¡Que esto sí es velocidad y no lo de antes!', 12),
+
+  L('wrongWay', 'Mijo, la fiesta se oye por allá. Sigue el ruido.', 15),
+
+  L('almostThere', 'Ya se oye el bajo. Suéltame ahí mismo.', 18),
+
+  L('dropoff', 'Llegamos. Toma, y no te vayas sin bailar una, aunque sea mala.', 30),
+
+  L('perfect', 'Tú manejas como se bailaba antes. Con respeto y con gusto.', 30),
+
+  L('timeout', 'Me voy caminando. Camino más rápido que tú, de todas formas.', 28),
+
+  L('shortcut', 'Por ahí me escapaba yo del colegio. Nada ha cambiado.', 18),
+];
+
 /** Used for any archetype without its own bank — should never be needed. */
 export const GENERIC_DIALOGUE: readonly DialogueLine[] = [
   L('hail', '¡Taxi! ¡Aquí!', 25),
@@ -549,6 +795,12 @@ export const DIALOGUE: Readonly<Record<string, readonly DialogueLine[]>> = {
   'first-timer': FIRST_TIMER,
   'salsa-dancer': SALSA_DANCER,
   'trap-artist': TRAP_ARTIST,
+  fisherman: FISHERMAN,
+  'chinchorro-cook': CHINCHORRO_COOK,
+  nurse: NURSE,
+  dj: DJ_MELAZA,
+  'party-host': PARTY_HOST,
+  'abuelo-parrandero': ABUELO_PARRANDERO,
 };
 
 /** Total authored lines — used by the harness to assert the bank stayed big. */

@@ -16,6 +16,7 @@ import type { EventBus } from '../core/EventBus';
 import { clamp, clamp01 } from '../core/MathUtils';
 import { RNG } from '../core/RNG';
 import type { FareResult, GameMode, PassengerArchetype, POI } from '../core/types';
+import { regionOfPOI } from '../passengers/MissionCatalog';
 import type { SaveSystem } from '../save/SaveSystem';
 import type { ShiftController } from './ArcadeShift';
 
@@ -30,6 +31,8 @@ export interface ChallengeVehicle {
 
 export interface ChallengeWorld {
   pois: ReadonlyArray<POI>;
+  /** used by the coastal sprint to keep its route out of the old town */
+  bounds?: { minX: number; maxX: number; minZ: number; maxZ: number };
 }
 
 /**
@@ -45,7 +48,16 @@ export interface ChallengeFareSource {
 
 /* ------------------------------------------------------------ definitions */
 
-export type ChallengeId = 'drift-marathon' | 'air-time' | 'delivery-streak' | 'checkpoint-sprint';
+export type ChallengeId =
+  | 'drift-marathon'
+  | 'air-time'
+  | 'delivery-streak'
+  | 'checkpoint-sprint'
+  | 'near-miss-run'
+  | 'combo-chain'
+  | 'prop-smash'
+  | 'clean-streak'
+  | 'coast-sprint';
 
 export interface ChallengeDef {
   id: ChallengeId;
@@ -98,6 +110,51 @@ export const CHALLENGES: readonly ChallengeDef[] = [
     unit: 'puntos',
     reward: 2000,
   },
+  {
+    id: 'near-miss-run',
+    title: 'ROZANDO EL TRÁFICO',
+    objective: 'Pasa rozando 16 carros sin tocarlos. Un golpe fuerte y pierdes cuatro.',
+    duration: 75,
+    goal: 16,
+    unit: 'casi',
+    reward: 1800,
+  },
+  {
+    id: 'combo-chain',
+    title: 'LA CADENA',
+    objective: 'Llega a multiplicador ×9 sin romper la cadena. Derrapa, salta, roza.',
+    duration: 80,
+    goal: 9,
+    unit: '×',
+    reward: 2100,
+  },
+  {
+    id: 'prop-smash',
+    title: 'REVOLÚ EN LA CALLE',
+    objective: 'Destroza 24 cosas. Conos, cajones, sillas — todo cuenta.',
+    duration: 70,
+    goal: 24,
+    unit: 'cosas',
+    reward: 1600,
+  },
+  {
+    id: 'clean-streak',
+    title: 'SIN UN RASGUÑO',
+    objective: 'Entrega 4 pasajeros sin un solo golpe fuerte. Uno solo y vuelves a cero.',
+    duration: 165,
+    goal: 4,
+    unit: 'carreras',
+    reward: 2600,
+  },
+  {
+    id: 'coast-sprint',
+    title: 'LA COSTA COMPLETA',
+    objective: 'Siete puntos por la costa y Piñones. Aquí sí se puede correr.',
+    duration: 70,
+    goal: 7,
+    unit: 'puntos',
+    reward: 2400,
+  },
 ];
 
 /**
@@ -128,6 +185,8 @@ export interface ChallengesOptions {
   checkpointTime?: number;
   /** metres of arrival radius for a checkpoint */
   checkpointRadius?: number;
+  /** contact impulse that counts as a real hit, not a scrape */
+  heavyImpulse?: number;
 }
 
 /* ------------------------------------------------------------------ class */
@@ -161,6 +220,8 @@ export class Challenges implements ShiftController {
   /** last-seen mission counters, for the delivery-streak challenge */
   private seenDone = 0;
   private seenLost = 0;
+  /** impulse a `clean-streak` / `near-miss-run` run counts as a real hit */
+  private readonly heavyImpulse: number;
 
   private readonly unsubs: Array<() => void> = [];
 
@@ -173,6 +234,7 @@ export class Challenges implements ShiftController {
     this.rng = opts.rng ?? new RNG(0x10c0_c4a1);
     this.checkpointTime = opts.checkpointTime ?? 9;
     this.checkpointRadius = opts.checkpointRadius ?? 16;
+    this.heavyImpulse = opts.heavyImpulse ?? 2600;
   }
 
   setWorld(w: ChallengeWorld | null): void {
@@ -263,7 +325,8 @@ export class Challenges implements ShiftController {
       );
     }
 
-    if (this.def.id === 'checkpoint-sprint') this.buildRoute();
+    this.subscribeMetric();
+    if (this.def.id === 'checkpoint-sprint' || this.def.id === 'coast-sprint') this.buildRoute();
 
     this.bus.emit('shift:start', { mode: this.mode, duration: this.def.duration });
     this.bus.emit('mission:start', {
@@ -271,7 +334,73 @@ export class Challenges implements ShiftController {
       title: this.def.title,
       objective: this.def.objective,
     });
-    if (this.def.id === 'checkpoint-sprint') this.pointAtCheckpoint();
+    if (this.def.id === 'checkpoint-sprint' || this.def.id === 'coast-sprint') {
+      this.pointAtCheckpoint();
+    }
+  }
+
+  /**
+   * The event-driven challenges. These metrics cannot be sampled per frame —
+   * a near miss, a smashed crate and a multiplier step are all instants — so
+   * they are counted off the bus and torn down with the run.
+   */
+  private subscribeMetric(): void {
+    switch (this.def.id) {
+      case 'near-miss-run':
+        this.unsubs.push(
+          this.bus.on('vehicle:nearMiss', () => {
+            if (!this.running) return;
+            this.metric++;
+            this.announceProgress();
+          }),
+        );
+        this.unsubs.push(
+          this.bus.on('vehicle:collision', (p) => {
+            if (!this.running || p.impulse < this.heavyImpulse) return;
+            /* a real hit is not a near miss — it costs you four of them */
+            if (this.metric <= 0) return;
+            this.metric = Math.max(0, this.metric - 4);
+            this.announced = 0;
+            this.bus.emit('ui:toast', { text: '¡Eso fue un golpe! −4', icon: 'warn', ms: 1800 });
+          }),
+        );
+        break;
+      case 'combo-chain':
+        this.unsubs.push(
+          this.bus.on('combo:multiplier', (p) => {
+            if (!this.running) return;
+            if (p.multiplier > this.metric) {
+              this.metric = p.multiplier;
+              this.announceProgress();
+            }
+          }),
+        );
+        break;
+      case 'prop-smash':
+        this.unsubs.push(
+          this.bus.on('prop:destroyed', () => {
+            if (!this.running) return;
+            this.metric++;
+            this.announceProgress();
+          }),
+        );
+        break;
+      case 'clean-streak':
+        this.unsubs.push(
+          this.bus.on('vehicle:collision', (p) => {
+            if (!this.running || p.impulse < this.heavyImpulse) return;
+            if (this.streak > 0) {
+              this.bus.emit('ui:toast', { text: 'Golpe fuerte. Racha a cero.', icon: 'warn', ms: 2200 });
+            }
+            this.streak = 0;
+            this.metric = 0;
+            this.announced = 0;
+          }),
+        );
+        break;
+      default:
+        break;
+    }
   }
 
   setRunning(on: boolean): void {
@@ -303,10 +432,17 @@ export class Challenges implements ShiftController {
         }
         break;
       case 'checkpoint-sprint':
+      case 'coast-sprint':
         this.tickCheckpoints();
         break;
       case 'delivery-streak':
+      case 'clean-streak':
         this.tickStreak();
+        break;
+      case 'near-miss-run':
+      case 'combo-chain':
+      case 'prop-smash':
+        /* counted on the bus by `subscribeMetric` */
         break;
       default:
         break;
@@ -363,8 +499,21 @@ export class Challenges implements ShiftController {
   /* ---------------------------------------------------------- checkpoints */
 
   private buildRoute(): void {
-    const pois = this.world ? this.world.pois.slice() : [];
+    let pois = this.world ? this.world.pois.slice() : [];
     if (pois.length === 0) return;
+
+    /* the coastal sprint is a different road problem — keep it off the cobbles */
+    if (this.def.id === 'coast-sprint') {
+      const bounds = this.world?.bounds;
+      if (bounds) {
+        const coastal = pois.filter((p) => {
+          const r = regionOfPOI(p, bounds);
+          return r === 'coast' || r === 'pinones';
+        });
+        if (coastal.length >= this.def.goal) pois = coastal;
+      }
+    }
+
     this.rng.shuffle(pois);
 
     const v = this.vehicle.position;

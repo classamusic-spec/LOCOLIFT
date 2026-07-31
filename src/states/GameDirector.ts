@@ -26,10 +26,13 @@ import type {
 import { ARCHETYPES } from '../passengers/Archetypes';
 import { CART_ARCHETYPE, type MissionSystem } from '../passengers/MissionSystem';
 import type { ComboSystem } from '../scoring/ComboSystem';
+import type { Progression } from '../scoring/Progression';
 import type { ScoreSystem } from '../scoring/ScoreSystem';
 import { ArcadeShift, type ShiftController } from './ArcadeShift';
 import { Challenges, CHECKPOINT_ARCHETYPE, type ChallengeId } from './Challenges';
 import { FreeRide } from './FreeRide';
+import { PARTY_ARCHETYPES, type PartyBusMode } from './PartyBusMode';
+import { StoryRun } from './StoryRun';
 
 /* ------------------------------------------------------ structural inputs */
 
@@ -51,6 +54,8 @@ export interface DirectorVehicle {
 export interface DirectorWorld {
   pois: ReadonlyArray<POI>;
   spawnPoint: { pos: THREE.Vector3; heading: number };
+  /** lets the coastal challenge and the chinchorreo route pick their region */
+  bounds?: { minX: number; maxX: number; minZ: number; maxZ: number };
 }
 
 /** The shape `UISystem.onAction` delivers. Kept loose so it stays assignable. */
@@ -73,6 +78,10 @@ export interface GameDirectorOptions {
   countdownSeconds?: number;
   /** move the Jeep back to the world spawn when a run begins */
   respawnOnStart?: boolean;
+  /** rank, unlocks and the daily rotation */
+  progression?: Progression | null;
+  /** the Chinchorreo controller; built by `main` once the bus exists */
+  partyBus?: PartyBusMode | null;
 }
 
 /* ------------------------------------------------------------------ class */
@@ -98,12 +107,18 @@ export class GameDirector implements System {
   readonly arcade: ArcadeShift;
   readonly freeRide: FreeRide;
   readonly challenges: Challenges;
+  readonly story: StoryRun;
+
+  private progression: Progression | null;
+  private party: PartyBusMode | null;
 
   private controller: ShiftController | null = null;
   private state: GameStateId = 'boot';
   private previousState: GameStateId = 'title';
   private mode: GameMode = 'arcade';
   private pendingChallenge: ChallengeId = 'drift-marathon';
+  /** true while the active controller is the Chinchorreo */
+  private inParty = false;
 
   private countdown = 0;
   private live = false;
@@ -118,6 +133,8 @@ export class GameDirector implements System {
     this.world = opts.world ?? null;
     this.respawnOnStart = opts.respawnOnStart ?? true;
     this.countdownSeconds = opts.countdownSeconds ?? 3.05;
+    this.progression = opts.progression ?? null;
+    this.party = opts.partyBus ?? null;
 
     const rng = opts.rng ?? new RNG(0x10c0_d17e);
     this.arcade = new ArcadeShift({ bus: this.bus });
@@ -130,6 +147,29 @@ export class GameDirector implements System {
       fares: opts.missions,
       rng: rng.fork(0xc4a1),
     });
+    this.story = new StoryRun({
+      bus: this.bus,
+      missions: opts.missions,
+      progress: opts.progression ?? null,
+    });
+  }
+
+  /** Hand over the Chinchorreo controller once the bus model exists. */
+  setPartyBus(mode: PartyBusMode | null): void {
+    this.party = mode;
+  }
+
+  setProgression(p: Progression | null): void {
+    this.progression = p;
+    this.story.setProgress(p);
+  }
+
+  get partyBus(): PartyBusMode | null {
+    return this.party;
+  }
+
+  get progress(): Progression | null {
+    return this.progression;
   }
 
   /* ------------------------------------------------------------ lifecycle */
@@ -147,18 +187,20 @@ export class GameDirector implements System {
   private publishArchetypes(): void {
     if (!this.ui) return;
     const list: PassengerArchetype[] = ARCHETYPES.slice();
-    list.push(CHECKPOINT_ARCHETYPE, CART_ARCHETYPE);
+    list.push(CHECKPOINT_ARCHETYPE, CART_ARCHETYPE, ...PARTY_ARCHETYPES);
     this.ui.setArchetypes(list);
   }
 
   onQualityChange(tier: QualityTier): void {
     this.missions.onQualityChange(tier);
+    this.party?.onQualityChange(tier);
   }
 
   dispose(): void {
     this.arcade.dispose();
     this.freeRide.dispose();
     this.challenges.dispose();
+    this.story.dispose();
     this.controller = null;
   }
 
@@ -214,22 +256,45 @@ export class GameDirector implements System {
   }
 
   startMode(mode: GameMode, challenge?: ChallengeId): void {
+    this.beginRun(mode, this.controllerFor(mode, challenge), false);
+  }
+
+  /**
+   * Start the Chinchorreo. Returns false when there is no bus wired up yet, so
+   * `main` can fall back to the arcade shift rather than dropping the input.
+   */
+  startPartyBus(): boolean {
+    const party = this.party;
+    if (!party) return false;
+    this.beginRun(party.mode, party, true);
+    return true;
+  }
+
+  /** Start the next encargo of the twelve. */
+  startStory(): void {
+    this.beginRun('story', this.story, false);
+  }
+
+  private beginRun(mode: GameMode, controller: ShiftController, party: boolean): void {
     this.abandonRun(false);
 
-    this.mode = mode === 'story' ? 'arcade' : mode;
-    if (this.mode === 'challenge') {
-      const id = challenge ?? this.pendingChallenge;
-      this.challenges.select(id);
-      this.pendingChallenge = id;
-      this.challenges.setWorld(this.world);
-    }
+    this.mode = mode;
+    this.inParty = party;
 
     if (this.respawnOnStart && this.vehicle && this.world) {
       const spawn = this.world.spawnPoint;
       this.vehicle.respawn(spawn.pos, spawn.heading);
     }
 
-    this.controller = this.controllerFor(this.mode);
+    /* the catalog needs to know who the player is before anything is rolled */
+    const prog = this.progression;
+    if (prog) {
+      this.missions.setRank(prog.rank);
+      this.missions.setCompletedMissions(prog.completedStory);
+      prog.beginShift();
+    }
+
+    this.controller = controller;
     this.score.beginShift(this.mode);
     this.missions.reset();
     this.combo.reset();
@@ -248,14 +313,20 @@ export class GameDirector implements System {
     this.onPauseChanged?.(false);
   }
 
-  private controllerFor(mode: GameMode): ShiftController {
+  private controllerFor(mode: GameMode, challenge?: ChallengeId): ShiftController {
     switch (mode) {
       case 'freeRide':
         return this.freeRide;
-      case 'challenge':
+      case 'challenge': {
+        const id = challenge ?? this.pendingChallenge;
+        this.challenges.select(id);
+        this.pendingChallenge = id;
+        this.challenges.setWorld(this.world);
         return this.challenges;
-      case 'arcade':
+      }
       case 'story':
+        return this.story;
+      case 'arcade':
       default:
         return this.arcade;
     }
@@ -274,6 +345,10 @@ export class GameDirector implements System {
   }
 
   restart(): void {
+    if (this.inParty && this.party) {
+      this.startPartyBus();
+      return;
+    }
     this.startMode(this.mode, this.pendingChallenge);
   }
 
@@ -302,6 +377,13 @@ export class GameDirector implements System {
     switch (action.kind) {
       case 'startMode':
         this.startMode(action.mode ?? 'arcade');
+        break;
+      case 'startParty':
+        /* no bus yet (not unlocked, not built) — do not drop the input */
+        if (!this.startPartyBus()) this.startMode('arcade');
+        break;
+      case 'startStory':
+        this.startStory();
         break;
       case 'resume':
         this.resume();
@@ -338,12 +420,21 @@ export class GameDirector implements System {
     this.controller.stop();
 
     const summary = this.score.endShift();
+    const prog = this.progression;
+    if (prog) {
+      prog.endShift(summary.cash, {
+        longestChain: this.combo.longestChain,
+        bestFare: summary.cash,
+      });
+      if (this.inParty && this.party) prog.recordPartyRun(summary.score);
+    }
     this.bus.emit('shift:end', {
       score: summary.score,
       fares: summary.fares,
       rating: summary.rating,
     });
     this.controller = null;
+    this.inParty = false;
     this.go('results');
     this.onPauseChanged?.(false);
   }
@@ -359,8 +450,12 @@ export class GameDirector implements System {
     this.combo.break();
     this.combo.setActive(false);
     this.controller.stop();
-    if (bank) this.score.endShift();
+    if (bank) {
+      const summary = this.score.endShift();
+      this.progression?.endShift(summary.cash, { longestChain: this.combo.longestChain });
+    }
     this.controller = null;
+    this.inParty = false;
   }
 
   /* ---------------------------------------------------------------- frame */
@@ -375,7 +470,8 @@ export class GameDirector implements System {
         this.live = true;
         this.controller.setRunning(true);
         this.combo.setActive(true);
-        this.missions.setActive(true);
+        /* the chinchorreo owns the whole street — no competing street fares */
+        this.missions.setActive(!this.inParty);
       }
       return;
     }
@@ -396,8 +492,15 @@ export class GameDirector implements System {
     const ui = this.ui;
     if (!ui) return;
     if (this.state === 'playing' || this.state === 'paused') {
-      ui.setWaitingFares(this.missions.waitingMarkers);
-      ui.setPassengerPatience(this.missions.patienceFraction);
+      const party = this.inParty ? this.party : null;
+      if (party) {
+        /* chinchorro stops on the minimap; the patience bar becomes crowd hype */
+        ui.setWaitingFares(party.stopMarkers);
+        ui.setPassengerPatience(party.patienceFraction);
+      } else {
+        ui.setWaitingFares(this.missions.waitingMarkers);
+        ui.setPassengerPatience(this.missions.patienceFraction);
+      }
     }
   }
 }
