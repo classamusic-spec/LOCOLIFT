@@ -327,6 +327,7 @@ export class JeepModel {
     const matRubber = this.mat(PAINT.rubber, 0.05, 0.95);
     const matSeat = this.mat(PAINT.seat, 0.1, 0.8);
     const matSeatTrim = this.mat(PAINT.seatTrim, 0.15, 0.6);
+    const seatTrimShell = new Shell();
 
     const matGlass = new THREE.MeshStandardMaterial({
       color: PAINT.glass,
@@ -405,7 +406,7 @@ export class JeepModel {
     this.buildNose(paint, accent, chrome, matte);
     this.buildRear(paint, accent, chrome, matte);
     this.buildCage(chrome);
-    this.buildInterior(matte, seatShell, matSeatTrim, seatShell);
+    this.buildInterior(matte, seatShell, seatTrimShell);
     this.buildDetails(chrome, matte, accent);
 
     this.emit(paint.build(), matPaint, 'body');
@@ -414,6 +415,7 @@ export class JeepModel {
     this.emit(chrome.build(), matChrome, 'chrome');
     this.emit(matte.build(), matMatte, 'trim');
     this.emit(seatShell.build(), matSeat, 'seats');
+    this.emit(seatTrimShell.build(), matSeatTrim, 'seatTrim');
 
     this.buildGlass(matGlass);
     this.buildLights();
@@ -421,7 +423,7 @@ export class JeepModel {
     this.buildDecals();
     this.buildSteeringWheel(matMatte, matChrome);
     this.buildPassenger();
-    this.buildWheels(matRubber, matChrome, matMatte);
+    this.buildWheels(matRubber, matChrome);
 
     this.chassis.add(this.beams);
     this.setQuality(quality);
@@ -733,15 +735,13 @@ export class JeepModel {
     /* cage feet */
     chrome.addMirrored(box(0.11, 0.05, 0.12, W, 0.49, 0.55));
     chrome.addMirrored(box(0.11, 0.05, 0.12, W, 0.49, 1.9));
+
+    /* taxi-sign mounting posts on the main hoop */
+    chrome.addMirrored(box(0.04, 0.14, 0.04, 0.2, 1.24, 0.55));
   }
 
-  /** Dash, seats, bench and the passenger grab handle. */
-  private buildInterior(
-    matte: Shell,
-    seats: Shell,
-    _trim: THREE.Material,
-    _unused: Shell,
-  ): void {
+  /** Dash, seats, bench and the transmission tunnel. */
+  private buildInterior(matte: Shell, seats: Shell, trim: Shell): void {
     /* dashboard + instrument binnacle */
     matte.add(box(1.44, 0.2, 0.28, 0, 0.55, -0.56));
     matte.add(box(0.42, 0.16, 0.16, -0.38, 0.68, -0.5, -0.25));
@@ -749,18 +749,22 @@ export class JeepModel {
     matte.add(box(0.3, 0.2, 1.0, 0, 0.12, -0.1));
     /* gear lever */
     matte.add(tube(0.06, 0.22, -0.02, 0.09, 0.44, 0.06, 0.022, 6));
+    /* steering column, from the bulkhead up to the wheel */
+    matte.add(tube(-0.37, 0.5, -0.34, -0.37, 0.7, -0.46, 0.03, 8));
 
-    /* front buckets */
+    /* front buckets, with a colonial-blue trim panel and headrest */
     for (const side of [-1, 1]) {
       const x = side * 0.37;
       seats.add(box(0.46, 0.13, 0.48, x, 0.29, 0.02));
       seats.add(box(0.46, 0.55, 0.12, x, 0.57, 0.26, -0.16));
-      seats.add(box(0.2, 0.14, 0.1, x, 0.86, 0.32, -0.16));
+      trim.add(box(0.22, 0.15, 0.11, x, 0.86, 0.32, -0.16));
+      trim.add(box(0.48, 0.05, 0.14, x, 0.36, 0.02));
     }
 
     /* rear bench across the bed */
     seats.add(box(1.4, 0.14, 0.44, 0, 0.31, 1.42));
     seats.add(box(1.4, 0.46, 0.12, 0, 0.56, 1.68, -0.14));
+    trim.add(box(1.42, 0.05, 0.46, 0, 0.39, 1.42));
     matte.add(box(1.42, 0.06, 0.46, 0, 0.23, 1.42));
   }
 
@@ -837,14 +841,16 @@ export class JeepModel {
       this.chassis.add(m);
     }
 
-    /* cheap fake headlight beams, high/ultra only */
-    const beamGeo = new THREE.ConeGeometry(0.55, 5.5, 10, 1, true);
-    beamGeo.rotateX(-Math.PI / 2);
-    beamGeo.translate(0, 0, -2.8);
-    this.geometries.push(beamGeo);
-    for (const side of [-1, 1]) {
+    /* cheap fake headlight beams, high/ultra only — both cones in one mesh */
+    const beamShell = new Shell();
+    const cone = new THREE.ConeGeometry(0.55, 5.5, 10, 1, true);
+    cone.rotateX(-Math.PI / 2);
+    cone.translate(0.5, 0.31, -4.85);
+    beamShell.addMirrored(cone);
+    const beamGeo = beamShell.build();
+    if (beamGeo) {
+      this.geometries.push(beamGeo);
       const beam = new THREE.Mesh(beamGeo, this.matBeam);
-      beam.position.set(side * 0.5, 0.31, -2.05);
       beam.castShadow = false;
       beam.receiveShadow = false;
       this.beams.add(beam);
@@ -853,17 +859,6 @@ export class JeepModel {
   }
 
   private buildSign(): void {
-    const shell = new Shell();
-    /* mounting posts up from the main hoop */
-    shell.addMirrored(box(0.04, 0.14, 0.04, 0.2, 1.24, 0.55));
-    const post = shell.build();
-    if (post) {
-      this.geometries.push(post);
-      const m = new THREE.Mesh(post, this.materials[0]);
-      m.name = 'jeep_signPost';
-      this.chassis.add(m);
-    }
-
     const geo = new THREE.BoxGeometry(0.68, 0.2, 0.16);
     this.geometries.push(geo);
     const sign = new THREE.Mesh(geo, this.matSign);
@@ -886,12 +881,20 @@ export class JeepModel {
         polygonOffsetFactor: -2,
       });
       this.materials.push(mat);
-      const geo = new THREE.PlaneGeometry(1.5, 0.375);
-      this.geometries.push(geo);
+      /* both flanks in one geometry. Built as two explicitly-rotated planes
+       * rather than a mirror, so the wordmark reads forwards on both sides. */
+      const shell = new Shell();
       for (const side of [-1, 1]) {
+        const plane = new THREE.PlaneGeometry(1.5, 0.375);
+        plane.rotateY((side * Math.PI) / 2);
+        plane.translate(side * (MODEL.halfWidth + 0.055), 0.34, 0.55);
+        shell.add(plane);
+      }
+      const geo = shell.build();
+      if (geo) {
+        this.geometries.push(geo);
         const m = new THREE.Mesh(geo, mat);
-        m.position.set(side * (MODEL.halfWidth + 0.055), 0.34, 0.55);
-        m.rotation.y = side > 0 ? Math.PI / 2 : -Math.PI / 2;
+        m.name = 'jeep_livery';
         m.castShadow = false;
         this.chassis.add(m);
       }
@@ -938,11 +941,6 @@ export class JeepModel {
       this.steeringWheel.add(new THREE.Mesh(spokeGeo, matChrome));
     }
 
-    const column = cyl(0.03, 0.03, 0.3, 8, -0.37, 0.63, -0.28, 'z');
-    column.rotateX(0.4);
-    this.geometries.push(column);
-    this.chassis.add(new THREE.Mesh(column, matMatte));
-
     this.chassis.add(this.steeringWheel);
   }
 
@@ -965,11 +963,6 @@ export class JeepModel {
     this.geometries.push(torso);
     this.passenger.add(new THREE.Mesh(torso, this.matPassenger));
 
-    const head = new THREE.SphereGeometry(0.125, 12, 10);
-    head.translate(0, 1.09, 1.48);
-    this.geometries.push(head);
-    this.passenger.add(new THREE.Mesh(head, skin));
-
     const hat = new Shell();
     hat.add(cyl(0.185, 0.195, 0.025, 12, 0, 1.17, 1.48, 'y'));
     hat.add(cyl(0.115, 0.125, 0.09, 12, 0, 1.22, 1.48, 'y'));
@@ -980,6 +973,9 @@ export class JeepModel {
     }
 
     const limbs = new Shell();
+    const head = new THREE.SphereGeometry(0.125, 12, 10);
+    head.translate(0, 1.09, 1.48);
+    limbs.add(head);
     /* arms reaching for the grab rails */
     limbs.addMirrored(tube(0.16, 0.9, 1.5, 0.42, 0.72, 1.36, 0.05, 6));
     /* legs into the footwell */
@@ -1002,11 +998,7 @@ export class JeepModel {
    * Big knobbly off-road tyres with real tread blocks and a six-spoke beadlock
    * rim. Two merged geometries shared by all four corners plus the spare.
    */
-  private buildWheels(
-    matRubber: THREE.Material,
-    matChrome: THREE.Material,
-    matMatte: THREE.Material,
-  ): void {
+  private buildWheels(matRubber: THREE.Material, matChrome: THREE.Material): void {
     const R = SUSPENSION.wheelRadius;
     const W = SUSPENSION.wheelWidth;
 
@@ -1060,14 +1052,13 @@ export class JeepModel {
       lug.translate(W * 0.36, Math.sin(a + 0.5) * 0.27, Math.cos(a + 0.5) * 0.27);
       rim.add(lug);
     }
+    /* hub cap, both faces, merged in so a wheel is only two draw calls */
+    rim.add(cyl(0.075, 0.06, 0.05, 10, W * 0.36, 0, 0, 'x'));
+    rim.add(cyl(0.06, 0.075, 0.05, 10, -W * 0.36, 0, 0, 'x'));
     const rimGeo = rim.build();
-
-    /* --- hub cap --- */
-    const capGeo = cyl(0.075, 0.06, 0.05, 10, W * 0.36, 0, 0, 'x');
 
     if (tyreGeo) this.geometries.push(tyreGeo);
     if (rimGeo) this.geometries.push(rimGeo);
-    this.geometries.push(capGeo);
 
     for (let i = 0; i < 4; i++) {
       const l = WHEEL_LAYOUT[i];
@@ -1087,11 +1078,6 @@ export class JeepModel {
         m.castShadow = true;
         spin.add(m);
       }
-      const cap = new THREE.Mesh(capGeo, matMatte);
-      cap.castShadow = false;
-      /* mirror the cap to the outboard face on the left-hand wheels */
-      cap.scale.x = l.left ? -1 : 1;
-      spin.add(cap);
 
       steer.add(spin);
       root.add(steer);

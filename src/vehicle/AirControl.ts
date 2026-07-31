@@ -30,6 +30,11 @@ export class AirControl {
   /** true when the chassis is within the clean-landing cone right now */
   levelEnough = true;
 
+  /** airtime of the landing that just happened — `airtime` is already zeroed */
+  lastLandingAirtime = 0;
+  /** whether that landing was inside the clean cone */
+  lastLandingClean = false;
+
   private takeoffY = 0;
   private peakY = 0;
   private jumpAnnounced = false;
@@ -58,6 +63,8 @@ export class AirControl {
     this.peakY = 0;
     this.jumpAnnounced = false;
     this.wasGrounded = true;
+    this.lastLandingAirtime = 0;
+    this.lastLandingClean = false;
     this.clearTricks();
   }
 
@@ -162,18 +169,26 @@ export class AirControl {
     if (!rollActive) dampAxis(ang, frame.forward, AIR.idleAxisDamping, dt);
     dampAxis(ang, frame.up, AIR.idleAxisDamping * 0.5, dt);
 
-    /* --- auto-level assist --- */
+    /* --- auto-level assist ---
+     * A PD controller that drives the chassis up-axis back to vertical. It
+     * ramps in over the first fraction of a second (so kerb hops are untouched)
+     * and gets more urgent the faster the Jeep is falling, which is what turns
+     * a wild showboat into a clean landing. Yaw is deliberately untouched — the
+     * player keeps whatever heading they chose. */
     if (!pitchActive && !rollActive) {
-      const ramp = clamp01(this.airtime / Math.max(1e-3, AIR.autoLevelRampTime));
+      const ramp =
+        clamp01(this.airtime / Math.max(1e-3, AIR.autoLevelRampTime)) *
+        (1 +
+          AIR.autoLevelDescentBoost *
+            clamp01(-frame.linVel.y / AIR.autoLevelDescentSpeed));
       const axis = this.axis.copy(frame.up).cross(WORLD_UP);
       const sinA = axis.length();
       if (sinA > 1e-5) {
         axis.multiplyScalar(1 / sinA);
         const angle = Math.atan2(sinA, clamp(frame.upDot, -1, 1));
         const rateAlong = ang.dot(axis);
-        /* PD controller: pull the up axis toward vertical, damp the approach */
         const accel = clamp(
-          AIR.autoLevelStrength * angle * ramp - 2.2 * rateAlong,
+          AIR.autoLevelStrength * angle * ramp - AIR.autoLevelDamping * rateAlong,
           -AIR.autoLevelMaxAccel,
           AIR.autoLevelMaxAccel,
         );
@@ -231,6 +246,8 @@ export class AirControl {
     const airtime = this.airtime;
     const height = Math.max(0, this.height);
     const clean = this.levelEnough;
+    this.lastLandingAirtime = airtime;
+    this.lastLandingClean = clean;
 
     let points = 0;
     if (airtime >= AIR.minScoringAirtime) {

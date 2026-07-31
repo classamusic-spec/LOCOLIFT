@@ -143,7 +143,7 @@ export const ENGINE = {
    * low-slung: a big ugly off-road motor with all its shove down low. Peaks at
    * ~44 % of redline and still pulls hard at the limiter.
    */
-  torqueCurve: [270, 410, 478, 512, 522, 515, 494, 456, 398, 312] as readonly number[],
+  torqueCurve: [292, 443, 516, 553, 564, 556, 534, 492, 430, 337] as readonly number[],
 
   /**
    * Gearbox: 5 forward speeds plus a reverse. Geared so 5th sits near the
@@ -197,8 +197,11 @@ export const SPEED = {
   dragCoeff: 0.45,
   /** extra drag while airborne so the Jeep doesn't sail forever */
   dragCoeffAir: 0.62,
-  /** rolling resistance, N per wheel on the ground */
-  rollingResistance: 190,
+  /**
+   * Rolling resistance, N per wheel on the ground. Kept low: at arcade speeds
+   * a realistic value just eats the first three seconds of every launch.
+   */
+  rollingResistance: 120,
 
   /** downforce: F = downforceCoeff · v², N. Plants the car at speed. */
   downforceCoeff: 1.9,
@@ -473,13 +476,23 @@ export const AIR = {
    * quietly rights itself so landings are clean. Strength ramps up the longer
    * you're airborne, so a small kerb hop is untouched but a big jump lands flat.
    */
-  autoLevelStrength: 3.6,
+  autoLevelStrength: 6.5,
   /** seconds of airtime before auto-level reaches full strength */
-  autoLevelRampTime: 0.55,
+  autoLevelRampTime: 0.3,
   /** auto-level is suppressed while the player is inputting more than this */
   autoLevelInputDeadzone: 0.15,
   /** auto-level never generates more than this angular accel, rad/s² */
-  autoLevelMaxAccel: 6.0,
+  autoLevelMaxAccel: 12,
+  /** derivative gain — damps the approach so it settles instead of wobbling */
+  autoLevelDamping: 2.6,
+  /**
+   * Urgency multiplier applied as the Jeep falls: the assist gets stronger the
+   * faster you are coming down, so a long drop off a fort wall still lands flat
+   * even if you were showboating right up to the last moment.
+   */
+  autoLevelDescentBoost: 1.3,
+  /** descent speed at which that boost is fully applied, m/s */
+  autoLevelDescentSpeed: 14,
   /** auto-level ignores yaw entirely — the player keeps their heading */
 
   /** landing counts as clean within this many radians of level (35°) */

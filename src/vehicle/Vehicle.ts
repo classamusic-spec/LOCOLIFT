@@ -142,6 +142,9 @@ export class Vehicle implements System {
   /* ---------------------------------------------------------------- steering */
   private _steerAngle = 0;
 
+  /** 0..1 soft-limiter factor from the last drivetrain update; boost reads it */
+  private speedHeadroom = 1;
+
   /* ---------------------------------------------------------------- controls */
   private throttleInput = 0;
   private brakeInput = 0;
@@ -341,23 +344,26 @@ export class Vehicle implements System {
       this.boost.grantMiniTurbo(reward.boostSeconds, reward.impulse, reward.meter);
     }
 
-    /* 4. engine, gearbox, drive + brake demand per wheel -------------------- */
+    /* 4. boost meter — resolved before the drivetrain so the speed ceiling,
+     *    the limiter and the thrust all agree on the same step ------------- */
+    this.boost.step(dt, this.boostInput, this.holdToBoost, this.frame.speed, ctx.bus);
+
+    /* 5. engine, gearbox, drive + brake demand per wheel -------------------- */
     this.updateDrivetrain(dt, grounded);
 
-    /* 5. tyres: the actual grip ------------------------------------------- */
+    /* 6. tyres: the actual grip ------------------------------------------- */
     this.applyTyreForces(dt, grounded);
 
-    /* 6. arcade yaw assist -------------------------------------------------- */
+    /* 7. arcade yaw assist -------------------------------------------------- */
     this.applyYawAssist(dt, grounded);
 
-    /* 7. aero ---------------------------------------------------------------*/
+    /* 8. aero ---------------------------------------------------------------*/
     this.applyAero(dt, grounded);
 
-    /* 8. boost --------------------------------------------------------------*/
-    this.boost.step(dt, this.boostInput, this.holdToBoost, this.frame.speed, ctx.bus);
+    /* 9. boost thrust -------------------------------------------------------*/
     this.applyBoostThrust(dt, grounded);
 
-    /* 9. air control, tricks, landings --------------------------------------*/
+    /* 10. air control, tricks, landings -------------------------------------*/
     const landPoints = this.air.step(
       dt,
       this.frame,
@@ -367,20 +373,23 @@ export class Vehicle implements System {
       grounded,
       ctx.bus,
     );
-    if (landPoints > 0 && this.air.levelEnough) {
-      this.boost.add(BOOST.gainCleanLandingPerSecond * Math.min(3, this.air.airtime));
+    if (landPoints > 0 && this.air.lastLandingClean) {
+      /* `air.airtime` is already zeroed by the landing — use the recorded value */
+      this.boost.add(
+        BOOST.gainCleanLandingPerSecond * Math.min(3, this.air.lastLandingAirtime),
+      );
     }
     if (grounded === 0) {
       this.boost.add(BOOST.gainAirtimePerSecond * dt);
     }
 
-    /* 10. two-wheel stunt ---------------------------------------------------*/
+    /* 11. two-wheel stunt ---------------------------------------------------*/
     this.updateTwoWheels(dt, ctx.bus);
 
-    /* 11. never let the player get stuck ------------------------------------*/
+    /* 12. never let the player get stuck ------------------------------------*/
     this.updateRecovery(dt, ctx.bus);
 
-    /* 12. publish -----------------------------------------------------------*/
+    /* 13. publish -----------------------------------------------------------*/
     this.publishWheelData(dt, grounded);
   }
 
@@ -630,7 +639,7 @@ export class Vehicle implements System {
 
     f.upDot = f.up.y;
     f.pitch = Math.asin(clamp(f.forward.y, -1, 1));
-    f.roll = Math.atan2(-f.right.y, Math.max(1e-6, Math.abs(f.up.y)) * Math.sign(f.up.y || 1));
+    f.roll = Math.atan2(-f.right.y, f.up.y);
 
     this._tilt.pitch = f.pitch;
     this._tilt.roll = f.roll;
@@ -776,6 +785,7 @@ export class Vehicle implements System {
       : lerp(SPEED.topSpeed, SPEED.topSpeedBoost, this.boost.thrustEnvelope);
     const signedSpeed = this.reverseMode ? -fwd : fwd;
     const headroom = smoothstep((cap - signedSpeed) / SPEED.limiterBand);
+    this.speedHeadroom = headroom;
     tractive *= headroom;
 
     /* --- engine braking when coasting --- */
@@ -795,8 +805,8 @@ export class Vehicle implements System {
     this.wheelDrive[3] = total * rearShare;
 
     const braking = this.reverseMode ? this.throttleInput : this.brakeInput;
-    const brakeFront = braking * BRAKE.forcePerWheel * BRAKE.frontBias;
-    const brakeRear = braking * BRAKE.forcePerWheel * (1 - BRAKE.frontBias);
+    const brakeFront = braking * BRAKE.maxForce * BRAKE.frontBias * 0.5;
+    const brakeRear = braking * BRAKE.maxForce * (1 - BRAKE.frontBias) * 0.5;
     const hb = this.handbrakeInput * BRAKE.handbrakeForce;
     this.wheelBrake[0] = brakeFront;
     this.wheelBrake[1] = brakeFront;
@@ -990,9 +1000,14 @@ export class Vehicle implements System {
   /* ==================================================================== boost */
 
   private applyBoostThrust(dt: number, grounded: number): void {
+    /* Boost obeys the same soft limiter as the engine. Without that, a constant
+     * 21 kN of thrust simply integrates against quadratic drag and the Jeep ends
+     * up at four hundred miles an hour. */
+    const headroom = this.speedHeadroom;
+
     const impulse = this.boost.consumeImpulse();
     if (impulse > 0) {
-      this.tmpForce.copy(this.frame.forward).multiplyScalar(impulse);
+      this.tmpForce.copy(this.frame.forward).multiplyScalar(impulse * headroom);
       this.body.applyImpulse(this.tmpForce);
     }
 
@@ -1001,7 +1016,7 @@ export class Vehicle implements System {
     const scale = grounded === 0 ? BOOST.thrustAirScale : 1;
     this.tmpForce
       .copy(this.frame.forward)
-      .multiplyScalar(BOOST.thrust * env * scale * dt);
+      .multiplyScalar(BOOST.thrust * env * scale * headroom * dt);
     this.body.applyImpulse(this.tmpForce);
   }
 
