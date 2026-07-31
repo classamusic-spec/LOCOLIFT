@@ -9,7 +9,10 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview --port 4173",
-    "smoke": "node tools/smoke.mjs"
+    "smoke": "node tools/smoke.mjs",
+    "standalone": "node tools/bundle-standalone.mjs",
+    "test:mobile": "node tools/mobile-test.mjs",
+    "test:mobile:standalone": "node tools/mobile-test.mjs --file dist-standalone/loco-lift.html --out .captures-mobile-standalone"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "0.19.3",

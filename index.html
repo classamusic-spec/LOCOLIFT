@@ -2,16 +2,170 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
     <meta name="theme-color" content="#0b1d2a" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Loco Lift" />
+    <meta
+      name="description"
+      content="Loco Lift — a crazy arcade taxi game set in a stylized Old San Juan."
+    />
     <title>Loco Lift — Old San Juan</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🚕</text></svg>" />
+    <style>
+      /* ---------------------------------------------------------------------
+         Page scaffolding. It lives here rather than in the UI stylesheet so it
+         is correct before a single module has parsed — and so a phone browser
+         never gets to scroll, bounce, zoom or select the game surface.
+
+         `Engine.resize()` calls `renderer.setSize(w, h, false)`, which sets the
+         canvas *attributes* and deliberately leaves style alone. Without the
+         100%/100% rule below the canvas lays out at its backing-store size: at
+         renderScale 0.7 — the `low` preset every phone auto-detects into — that
+         is 70 % of the window, leaving a third of the screen empty. This rule
+         is what makes the low tier actually fill a display.
+         ------------------------------------------------------------------ */
+      :root {
+        color-scheme: dark;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #0b1d2a;
+        overscroll-behavior: none; /* no pull-to-refresh, no scroll chaining */
+        overflow: hidden;
+      }
+
+      body {
+        /* a fixed body is the only reliable cure for iOS rubber-banding */
+        position: fixed;
+        inset: 0;
+        touch-action: manipulation; /* kills double-tap-to-zoom */
+        -webkit-text-size-adjust: 100%;
+        text-size-adjust: 100%;
+        -webkit-tap-highlight-color: transparent;
+        -webkit-touch-callout: none;
+        user-select: none;
+        -webkit-user-select: none;
+        font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        color: #fff6e8;
+      }
+
+      #app {
+        position: fixed;
+        inset: 0;
+        overflow: hidden;
+      }
+
+      #gl {
+        position: absolute;
+        inset: 0;
+        display: block;
+        width: 100%;
+        height: 100%;
+        /* the canvas is never a scroll, zoom or selection surface */
+        touch-action: none;
+      }
+
+      /* Visible until the UI system mounts; boot takes seconds on a phone. */
+      #boot {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        padding: max(16px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px))
+          max(16px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+        text-align: center;
+        font-size: 13px;
+        font-weight: 800;
+        letter-spacing: 0.24em;
+        text-transform: uppercase;
+        color: #ffc21a;
+        background: #0b1d2a;
+        z-index: 1;
+        animation: boot-pulse 1.6s ease-in-out infinite;
+      }
+
+      #boot[hidden] {
+        display: none;
+      }
+
+      @keyframes boot-pulse {
+        0%,
+        100% {
+          opacity: 0.55;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #boot {
+          animation: none;
+        }
+      }
+    </style>
   </head>
   <body>
     <div id="app">
       <canvas id="gl"></canvas>
+      <div id="boot" role="status">Cargando Viejo San Juan…</div>
       <div id="ui-root"></div>
     </div>
+    <script>
+      /* Some browsers refuse Web Storage to a `file://` document — which is
+         exactly how the single-file build gets opened. Boot reads localStorage
+         before anything is wrapped in a try/catch, so hand it an in-memory
+         stand-in rather than failing to start. Settings simply do not persist
+         in that mode. */
+      (function () {
+        try {
+          window.localStorage.getItem('locolift.probe');
+          return;
+        } catch (err) {
+          /* fall through to the shim */
+        }
+        var mem = Object.create(null);
+        var shim = {
+          getItem: function (k) {
+            return k in mem ? mem[k] : null;
+          },
+          setItem: function (k, v) {
+            mem[k] = String(v);
+          },
+          removeItem: function (k) {
+            delete mem[k];
+          },
+          clear: function () {
+            mem = Object.create(null);
+          },
+          key: function (i) {
+            var keys = Object.keys(mem);
+            return i < keys.length ? keys[i] : null;
+          },
+        };
+        Object.defineProperty(shim, 'length', {
+          get: function () {
+            return Object.keys(mem).length;
+          },
+        });
+        try {
+          Object.defineProperty(window, 'localStorage', { configurable: true, value: shim });
+        } catch (err) {
+          /* nothing more we can do; the game will surface its own error */
+        }
+      })();
+    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

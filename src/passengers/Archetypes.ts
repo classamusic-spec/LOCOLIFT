@@ -243,6 +243,31 @@ export const ARCHETYPES: readonly PassengerArchetype[] = [
     color: 0xf4a259,
     voicePitch: 0.8,
   },
+  /*
+   * The two people the campaign is actually about. Neither is a street fare —
+   * their `spawnWeight` is 0, so the random hail pool never draws them and they
+   * only ever appear because a story beat put them there.
+   */
+  {
+    id: 'tio-wiso',
+    name: 'Tío Wiso',
+    blurb: 'Treinta y un años manejando esta misma ruta. Ahora va de pasajero y no le hace ninguna gracia.',
+    patience: 130,
+    fareMultiplier: 1.6,
+    thrillSeeking: -0.25,
+    color: 0xd98e2b,
+    voicePitch: 0.78,
+  },
+  {
+    id: 'mecanico',
+    name: 'Nelo',
+    blurb: 'Taller Los Hermanos. Manos de grasa y una libreta de favores que nunca cobra.',
+    patience: 90,
+    fareMultiplier: 1.1,
+    thrillSeeking: 0.35,
+    color: 0x7ba05b,
+    voicePitch: 0.86,
+  },
 ];
 
 export const ARCHETYPE_IDS: readonly string[] = ARCHETYPES.map((a) => a.id);
@@ -475,6 +500,34 @@ export const ARCHETYPE_VISUALS: Readonly<Record<string, ArchetypeVisual>> = {
     energy: 0.85,
     apron: false,
   },
+  /* linen guayabera, pressed slacks, a hat he takes off indoors */
+  'tio-wiso': {
+    shirt: [0xfaf6ee, 0xf5f0e6, 0xdfe9f2, 0xf3e7d3],
+    accent: [0xd98e2b, 0x1d3557, 0x2fa8a0],
+    legwear: 'slacks',
+    legColor: [0xd6c7a6, 0xf5f0e6, 0x46403a],
+    hair: ['bald', 'crop', 'coils'],
+    head: ['sunHat', 'cap', 'none'],
+    prop: 'none',
+    height: 1.68,
+    build: 1.08,
+    energy: 0.22,
+    apron: false,
+  },
+  /* work shirt with the shop name on it, and a rag that lives in his pocket */
+  mecanico: {
+    shirt: [0x2f4560, 0x3d5a80, 0x7ba05b, 0x46403a],
+    accent: [0xf2b134, 0xe4572e, 0xfaf6ee],
+    legwear: 'jeans',
+    legColor: [...DENIM],
+    hair: ['crop', 'coils', 'bald', 'locs'],
+    head: ['cap', 'cap', 'bandana', 'none'],
+    prop: 'tote',
+    height: 1.73,
+    build: 1.1,
+    energy: 0.45,
+    apron: true,
+  },
 };
 
 const FALLBACK_VISUAL: ArchetypeVisual = {
@@ -594,6 +647,19 @@ export const ARCHETYPE_ROUTING: Readonly<Record<string, ArchetypeRouting>> = {
     maxRoute: 420,
     spawnWeight: 0.6,
   },
+  /* story-only: weight 0 keeps him out of the random hail pool entirely */
+  'tio-wiso': {
+    destKinds: ['lookout', 'plaza', 'fort', 'cafe', 'venue'],
+    minRoute: 120,
+    maxRoute: 700,
+    spawnWeight: 0,
+  },
+  mecanico: {
+    destKinds: ['venue', 'market', 'dock', 'plaza'],
+    minRoute: 100,
+    maxRoute: 440,
+    spawnWeight: 0.45,
+  },
 };
 
 const FALLBACK_ROUTING: ArchetypeRouting = {
@@ -674,7 +740,16 @@ const WEIGHTS: readonly number[] = ARCHETYPES.map((a) => routingFor(a.id).spawnW
  * toward people who *came out to party*, so thrill-seekers are heavily
  * favoured and the two or three nervous chaperones on board are the joke.
  */
+/**
+ * The two people the campaign is about. They are cast, not traffic: neither is
+ * ever drawn for the Chinchorreo, so adding them left every existing party roll
+ * bit-for-bit identical.
+ */
+export const STORY_CAST: ReadonlySet<string> = new Set(['tio-wiso', 'mecanico']);
+
 const PARTY_WEIGHTS: readonly number[] = ARCHETYPES.map((a) => {
+  /* story-only cast never rides the crawl — they show up because a beat says so */
+  if (STORY_CAST.has(a.id) || routingFor(a.id).spawnWeight <= 0) return 0;
   const thrill = Number.isFinite(a.thrillSeeking) ? a.thrillSeeking : 0;
   /* 0.18 at thrill -1, 1.0 at 0, 3.0 at +1 — nervous folk are rare, not absent */
   return thrill >= 0 ? 1 + thrill * 2 : 0.18 + (1 + thrill) * 0.82;
@@ -701,10 +776,17 @@ export function pickPartyArchetype(
     if (r <= 0) return ARCHETYPES[i];
   }
   for (let i = ARCHETYPES.length - 1; i >= 0; i--) {
+    if (PARTY_WEIGHTS[i] <= 0) continue;
     if (!exclude || !exclude.has(ARCHETYPES[i].id)) return ARCHETYPES[i];
   }
   return null;
 }
+
+/** The last archetype that can legitimately be hailed off the street. */
+const LAST_STREET_INDEX = (() => {
+  for (let i = ARCHETYPES.length - 1; i >= 0; i--) if (WEIGHTS[i] > 0) return i;
+  return 0;
+})();
 
 export function pickArchetype(rng: RNG, exclude?: ReadonlySet<string>): PassengerArchetype {
   if (!exclude || exclude.size === 0) return rng.weighted(ARCHETYPES, WEIGHTS);
@@ -719,5 +801,5 @@ export function pickArchetype(rng: RNG, exclude?: ReadonlySet<string>): Passenge
     r -= WEIGHTS[i];
     if (r <= 0) return ARCHETYPES[i];
   }
-  return ARCHETYPES[ARCHETYPES.length - 1];
+  return ARCHETYPES[LAST_STREET_INDEX];
 }

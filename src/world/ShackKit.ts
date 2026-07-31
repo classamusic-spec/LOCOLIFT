@@ -1010,6 +1010,15 @@ export function buildChinchorro(kb: KitBuilders, spec: ShackSpec): void {
   {
     const c = p.to(0, sill, hd + 0.16);
     wood.box(c.x, c.y + 0.03, c.z, hw + 0.07, 0.045, 0.27, KIT.woodPale, spec.yaw);
+    // strip light under the eave, throwing onto the counter and the customers
+    glow.quad(
+      p.at(-hw * 0.9, head + 0.02, hd + 0.5),
+      p.at(hw * 0.9, head + 0.02, hd + 0.5),
+      p.at(hw * 0.9, head + 0.02, hd + 0.02),
+      p.at(-hw * 0.9, head + 0.02, hd + 0.02),
+      0xffcf8a,
+      0.55,
+    );
     for (const sx of [-hw * 0.62, hw * 0.62]) {
       const br = p.to(sx, sill - 0.22, hd + 0.06);
       wood.box(br.x, br.y, br.z, 0.04, 0.2, 0.05, KIT.woodDark, spec.yaw);
@@ -1452,12 +1461,16 @@ export function buildThicket(rng: RNG): THREE.BufferGeometry {
   return finish(g, true);
 }
 
-/** Festoon bulb — a warm emissive teardrop, hung along a catenary. */
+/**
+ * Festoon bulb — a warm emissive teardrop hung along a catenary. Deliberately
+ * over-scale: a true 4 cm bulb is sub-pixel at 30 m, and these have to read as
+ * a strung light at speed, at night, through bloom.
+ */
 export function buildFestoonBulb(): THREE.BufferGeometry {
   const g = new GeoBuilder();
-  g.cylinder(0, -0.06, 0, 0.018, 0.024, 0.06, 5, KIT.steelDark);
-  g.cylinder(0, -0.15, 0, 0.04, 0.032, 0.09, 6, 0xffd9a0);
-  g.cylinder(0, -0.2, 0, 0.032, 0.006, 0.05, 6, 0xffd9a0);
+  g.cylinder(0, -0.05, 0, 0.02, 0.026, 0.05, 5, KIT.steelDark);
+  g.cylinder(0, -0.14, 0, 0.055, 0.045, 0.1, 6, 0xffd9a0);
+  g.cylinder(0, -0.2, 0, 0.045, 0.008, 0.06, 6, 0xffd9a0);
   return finish(g);
 }
 

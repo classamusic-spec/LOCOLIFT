@@ -1,7 +1,7 @@
 /**
  * Loco Lift — street dressing.
  *
- * What the reference photographs of a Old San Juan side street actually
+ * What the reference photographs of an Old San Juan side street actually
  * contain, once the architecture is right: **plants everywhere on the pavement
  * and hanging off the ironwork**, and **bunting and festoon lights strung
  * across the street from balcony to balcony**. Those two do most of the work,
@@ -31,8 +31,9 @@
  *
  * ## Cost
  *
- * Thirteen draw calls for the whole city. Everything repeated is instanced;
- * the wires, boards and painted faces merge into one mesh per material. The
+ * Fourteen draw calls for the whole city. Anything repeated hundreds of times
+ * is instanced; the wires, bunting, market stalls and painted boards merge into
+ * one mesh per material. The
  * vertex-shader distance cull in {@link ./PropKit} means nothing here
  * rasterises past `propDetailDistance`, so the dressing is free at range.
  */
@@ -43,10 +44,8 @@ import { clamp01 } from '../core/MathUtils';
 import { RNG } from '../core/RNG';
 import {
   buildBloomBush,
-  buildFestoonBulb,
   buildPlasticChair,
   buildPlasticTable,
-  buildPottedPlant,
   buildUmbrella,
 } from './ShackKit';
 import {
@@ -57,6 +56,8 @@ import {
   appendGeometry,
   buildAboardFaces,
   buildAboardFrame,
+  buildBulb,
+  buildDoorwayPot,
   buildHangingPlanter,
   buildPlanterBox,
   buildPottedPalm,
@@ -83,31 +84,31 @@ const TIER: Record<
   QualityTier,
   { density: number; spans: number; hanging: number; bulbs: boolean }
 > = {
-  low: { density: 0.3, spans: 0.25, hanging: 0.2, bulbs: false },
-  medium: { density: 0.62, spans: 0.6, hanging: 0.55, bulbs: true },
+  low: { density: 0.3, spans: 0.22, hanging: 0.2, bulbs: false },
+  medium: { density: 0.66, spans: 0.62, hanging: 0.6, bulbs: true },
   high: { density: 1, spans: 1, hanging: 1, bulbs: true },
-  ultra: { density: 1.2, spans: 1.25, hanging: 1.2, bulbs: true },
+  ultra: { density: 1.08, spans: 1.12, hanging: 1.1, bulbs: true },
 };
 
 /** How often a lot in each district gets planting against its wall. */
 const PLANT_CHANCE: Record<DistrictZone, number> = {
-  oldTown: 0.56,
-  artQuarter: 0.62,
-  plazaMayor: 0.5,
-  marketRow: 0.45,
-  waterfront: 0.24,
-  hillside: 0.34,
-  fortress: 0.1,
+  oldTown: 0.78,
+  artQuarter: 0.84,
+  plazaMayor: 0.72,
+  marketRow: 0.6,
+  waterfront: 0.3,
+  hillside: 0.46,
+  fortress: 0.12,
 };
 
 /** How often a lot gets a hanging planter under its balcony. */
 const HANG_CHANCE: Record<DistrictZone, number> = {
-  oldTown: 0.34,
-  artQuarter: 0.4,
-  plazaMayor: 0.3,
-  marketRow: 0.2,
+  oldTown: 0.4,
+  artQuarter: 0.46,
+  plazaMayor: 0.36,
+  marketRow: 0.24,
   waterfront: 0.1,
-  hillside: 0.18,
+  hillside: 0.22,
   fortress: 0.02,
 };
 
@@ -126,8 +127,8 @@ const STALL_SIGNS: DressSign[] = ['frutas', 'artesanias', 'flores', 'piraguas', 
 const BUNTING_PALETTE = [0xf2c230, 0xd52b1e, 0x2e5e86, 0xf7f4ec, 0x4fbfb1, 0xe8563f, 0xb43fa8];
 
 /** Height a string is tied off at, above the pavement. */
-const SPAN_Y = 6.25;
-const FESTOON_Y = 5.45;
+const SPAN_Y = 5.95;
+const FESTOON_Y = 5.35;
 
 export interface StreetDressingOptions {
   density?: number;
@@ -190,7 +191,6 @@ export class StreetDressing implements WorldLayer {
   private wires = new ClusterBuilder();
   private cloth = new ClusterBuilder(true);
   private signs = new ClusterBuilder();
-  private stallCloth = new ClusterBuilder(true);
 
   constructor(quality: QualityTier, options: StreetDressingOptions = {}) {
     this.quality = quality;
@@ -274,7 +274,7 @@ export class StreetDressing implements WorldLayer {
         const t = rng.range(0.16, 0.84);
         const bx = e.x0 + (e.x1 - e.x0) * t;
         const bz = e.z0 + (e.z1 - e.z0) * t;
-        const n = rng.int(1, e.len > 9 ? 3 : 2);
+        const n = rng.int(2, e.len > 9 ? 4 : 3);
         for (let i = 0; i < n; i++) {
           const along = (i - (n - 1) * 0.5) * rng.range(0.52, 0.78);
           const outward = Math.min(f.apron - 0.42, rng.range(0.46, 0.78));
@@ -398,7 +398,7 @@ export class StreetDressing implements WorldLayer {
     const order = fronts.map((_, i) => i);
     rng.shuffle(order);
 
-    const budget = Math.round(78 * scale);
+    const budget = Math.round(210 * scale);
     let made = 0;
 
     for (const fi of order) {
@@ -439,9 +439,9 @@ export class StreetDressing implements WorldLayer {
 
       // bunting on most, a festoon string on the rest, both on a few
       if (roll < 0.66) {
-        const pts = catenaryPoints(a, b, span * 0.085 + 0.35, 9);
+        const pts = catenaryPoints(a, b, span * 0.11 + 0.45, 11);
         this.cloth.open(mid.x, mid.y, mid.z, 1.35);
-        buntingFlags(this.cloth.g, pts, 0.36, BUNTING_PALETTE, rng.next());
+        buntingFlags(this.cloth.g, pts, 0.6, BUNTING_PALETTE, rng.next());
         this.cloth.close();
         this.wires.open(mid.x, mid.y, mid.z, 1.35);
         wireRibbon(this.wires.g, pts, 0x2b2b2b, 0.016);
@@ -452,7 +452,7 @@ export class StreetDressing implements WorldLayer {
         const by = yB - (SPAN_Y - FESTOON_Y);
         const fa = new THREE.Vector3(ax2, ay, az2);
         const fb = new THREE.Vector3(bx, by, bz);
-        const pts = catenaryPoints(fa, fb, span * 0.1 + 0.5, 9);
+        const pts = catenaryPoints(fa, fb, span * 0.13 + 0.55, 7);
         this.wires.open(mid.x, mid.y, mid.z, 1.35);
         wireRibbon(this.wires.g, pts, 0x23282b, 0.014);
         this.wires.close();
@@ -508,7 +508,7 @@ export class StreetDressing implements WorldLayer {
           if (!guard.ok(x, z, 2.4, 1.2)) continue;
           const y = layout.groundHeight(x, z) + 0.014;
           const yaw = (along ? 0 : Math.PI / 2) + (r === 0 ? 0 : Math.PI) + rng.range(-0.05, 0.05);
-          this.stalls.push({ x, y, z, yaw, scale: rng.range(0.94, 1.08) });
+          this.stalls.push({ x, y, z, yaw, scale: rng.range(0.94, 1.08), tint: rng.pick(DRESS.awning) });
           this._stats.stalls++;
 
           // the painted banner over the counter
@@ -552,11 +552,24 @@ export class StreetDressing implements WorldLayer {
       faces.dispose();
     }
 
+    // Only a couple of dozen stalls, and every one wants its own awning
+    // colour, so they merge into the shared cloth mesh instead of sharing one
+    // instanced geometry — a draw call cheaper and far less repetitive. This
+    // has to happen before the cloth builder is closed out below.
+    for (let i = 0; i < this.stalls.length; i++) {
+      const st = this.stalls[i];
+      const geo = buildStall(rng.fork(0x26 + i), st.tint);
+      this.cloth.open(st.x, st.y + 1.4, st.z, 1.5);
+      appendGeometry(this.cloth, geo, st.x, st.y, st.z, st.yaw, st.scale ?? 1, st.scale ?? 1);
+      this.cloth.close();
+      geo.dispose();
+    }
+
     this.addMerged(this.wires.build('aDress'), kit.solid, 'street/wires', false);
-    this.addMerged(this.cloth.build('aWave'), kit.cloth, 'street/bunting', false);
+    this.addMerged(this.cloth.build('aWave'), kit.cloth, 'street/cloth', false);
     this.addMerged(this.signs.build('aDress'), kit.sign, 'street/signs', false);
 
-    this.addInstanced(buildPottedPlant(rng.fork(0x21), false), kit.foliage, this.pots, 'street/pot');
+    this.addInstanced(buildDoorwayPot(rng.fork(0x21), false), kit.foliage, this.pots, 'street/pot');
     this.addInstanced(buildPottedPalm(rng.fork(0x22)), kit.foliage, this.palms, 'street/palm');
     this.addInstanced(
       buildBloomBush(rng.fork(0x23), rng.pick(DRESS.bloom)),
@@ -575,9 +588,8 @@ export class StreetDressing implements WorldLayer {
     this.addInstanced(buildPlasticChair(), kit.solid, this.chairs, 'street/chair');
     this.addInstanced(buildUmbrella(1.5, 2.35), kit.cloth, this.umbrellas, 'street/umbrella');
     this.addInstanced(buildAboardFrame(), kit.solid, this.boards, 'street/board');
-    this.addInstanced(buildStall(rng.fork(0x26)), kit.cloth, this.stalls, 'street/stall');
     this.addInstanced(buildProduceCrate(rng.fork(0x27)), kit.solid, this.crates, 'street/crate');
-    this.addInstanced(buildFestoonBulb(), kit.glow, this.bulbs, 'street/bulb');
+    this.addInstanced(buildBulb(), kit.glow, this.bulbs, 'street/bulb');
 
     this.pots = [];
     this.palms = [];

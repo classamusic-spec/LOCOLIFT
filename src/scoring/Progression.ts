@@ -12,7 +12,8 @@
  *  2. **The garage.** Cash buys liveries, rims, accessories, horns, mechanical
  *     upgrades and — the big one — the Chinchorreo bus. Everything is priced so
  *     the first purchase lands inside the second or third shift and the bus is
- *     an evening's work (or one completed story spine, which grants it free).
+ *     an evening's work (or reaching chapter 6 of the campaign, which hands it
+ *     over free).
  *
  *  3. **La ruta del día.** Three jobs rotate on a real calendar day, seeded off
  *     the date so every player on a given day gets the same three, each paying
@@ -27,7 +28,7 @@ import { clamp, clamp01 } from '../core/MathUtils';
 import { RNG } from '../core/RNG';
 import type { EventKey, EventMap, FareResult, System } from '../core/types';
 import type { SaveSystem } from '../save/SaveSystem';
-import { ALL_MISSIONS, type SpecialMissionDef } from '../passengers/MissionCatalog';
+import { ALL_MISSIONS, STORY_ORDER, type SpecialMissionDef } from '../passengers/MissionCatalog';
 
 /* --------------------------------------------------------------- storage */
 
@@ -553,7 +554,7 @@ export class Progression implements System {
       if (def.grants) for (const g of def.grants) this.grant(g);
       if (this.announce) {
         this.bus.emit('ui:toast', {
-          text: `Encargo ${def.order ?? '?'} / 12 completado`,
+          text: `Encargo ${def.order ?? '?'} / ${STORY_ORDER.length} completado`,
           icon: 'star',
           ms: 3200,
         });

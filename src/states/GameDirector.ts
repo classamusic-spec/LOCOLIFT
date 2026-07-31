@@ -21,6 +21,7 @@ import type {
   PassengerArchetype,
   POI,
   QualityTier,
+  RoadGraph,
   System,
 } from '../core/types';
 import { ARCHETYPES } from '../passengers/Archetypes';
@@ -30,8 +31,10 @@ import type { Progression } from '../scoring/Progression';
 import type { ScoreSystem } from '../scoring/ScoreSystem';
 import { ArcadeShift, type ShiftController } from './ArcadeShift';
 import { Challenges, CHECKPOINT_ARCHETYPE, type ChallengeId } from './Challenges';
+import { buildElTorroRoute, type ElTorroRoute } from './ElTorroRoute';
 import { FreeRide } from './FreeRide';
 import { PARTY_ARCHETYPES, type PartyBusMode } from './PartyBusMode';
+import { campaignStore, StoryCampaign, type CampaignStore } from './Story';
 import { StoryRun } from './StoryRun';
 
 /* ------------------------------------------------------ structural inputs */
@@ -56,6 +59,20 @@ export interface DirectorWorld {
   spawnPoint: { pos: THREE.Vector3; heading: number };
   /** lets the coastal challenge and the chinchorreo route pick their region */
   bounds?: { minX: number; maxX: number; minZ: number; maxZ: number };
+  /** El Torro is derived from the road graph, when the world exposes one */
+  roads?: RoadGraph;
+  groundHeight?(x: number, z: number): number;
+  poiById?(id: string): POI | undefined;
+}
+
+/**
+ * The relationship ledger, as the director needs it. `Relationships` satisfies
+ * this; without one the arcs simply stay at their base stage.
+ */
+export interface DirectorRelationships {
+  beginShift(): void;
+  endShift(): void;
+  stageEntries(): Array<[string, number]>;
 }
 
 /** The shape `UISystem.onAction` delivers. Kept loose so it stays assignable. */
@@ -82,6 +99,10 @@ export interface GameDirectorOptions {
   progression?: Progression | null;
   /** the Chinchorreo controller; built by `main` once the bus exists */
   partyBus?: PartyBusMode | null;
+  /** the per-person arc ledger */
+  relationships?: DirectorRelationships | null;
+  /** where chapter cards record that they have been seen */
+  campaignStore?: CampaignStore | null;
 }
 
 /* ------------------------------------------------------------------ class */
@@ -108,9 +129,14 @@ export class GameDirector implements System {
   readonly freeRide: FreeRide;
   readonly challenges: Challenges;
   readonly story: StoryRun;
+  readonly campaign: StoryCampaign;
 
   private progression: Progression | null;
   private party: PartyBusMode | null;
+  private relationships: DirectorRelationships | null;
+  /** built once from the road graph, then handed to the mission system */
+  private wallRoute: ElTorroRoute | null = null;
+  private wallRouteTried = false;
 
   private controller: ShiftController | null = null;
   private state: GameStateId = 'boot';
@@ -135,6 +161,7 @@ export class GameDirector implements System {
     this.countdownSeconds = opts.countdownSeconds ?? 3.05;
     this.progression = opts.progression ?? null;
     this.party = opts.partyBus ?? null;
+    this.relationships = opts.relationships ?? null;
 
     const rng = opts.rng ?? new RNG(0x10c0_d17e);
     this.arcade = new ArcadeShift({ bus: this.bus });
@@ -147,11 +174,48 @@ export class GameDirector implements System {
       fares: opts.missions,
       rng: rng.fork(0xc4a1),
     });
+    this.campaign = new StoryCampaign({
+      bus: this.bus,
+      progress: opts.progression ?? null,
+      store: opts.campaignStore ?? (opts.save ? campaignStore(opts.save) : null),
+    });
     this.story = new StoryRun({
       bus: this.bus,
       missions: opts.missions,
       progress: opts.progression ?? null,
+      campaign: this.campaign,
     });
+  }
+
+  /** Hand over the arc ledger once `main` has built it. */
+  setRelationships(r: DirectorRelationships | null): void {
+    this.relationships = r;
+  }
+
+  /**
+   * Derive El Torro from the road graph and register it with the mission
+   * system. Built once, on the first run, because the world may still have
+   * been streaming districts in when the director was constructed.
+   */
+  private ensureWallRoute(): void {
+    if (this.wallRouteTried) return;
+    this.wallRouteTried = true;
+    const world = this.world;
+    if (!world || !world.roads || !world.bounds) return;
+    this.wallRoute = buildElTorroRoute({
+      roads: world.roads,
+      pois: world.pois,
+      bounds: world.bounds,
+      groundHeight: world.groundHeight?.bind(world),
+      poiById: world.poiById?.bind(world),
+    });
+    this.missions.setRoute('el-torro', this.wallRoute);
+  }
+
+  /** The derived wall road, or null when this world has no rim to run. */
+  get elTorro(): ElTorroRoute | null {
+    this.ensureWallRoute();
+    return this.wallRoute;
   }
 
   /** Hand over the Chinchorreo controller once the bus model exists. */
@@ -162,6 +226,7 @@ export class GameDirector implements System {
   setProgression(p: Progression | null): void {
     this.progression = p;
     this.story.setProgress(p);
+    this.campaign.setProgress(p);
   }
 
   get partyBus(): PartyBusMode | null {
@@ -280,6 +345,7 @@ export class GameDirector implements System {
 
     this.mode = mode;
     this.inParty = party;
+    this.ensureWallRoute();
 
     if (this.respawnOnStart && this.vehicle && this.world) {
       const spawn = this.world.spawnPoint;
@@ -292,6 +358,13 @@ export class GameDirector implements System {
       this.missions.setRank(prog.rank);
       this.missions.setCompletedMissions(prog.completedStory);
       prog.beginShift();
+    }
+
+    /* everyone aboard picks up where their own story left off */
+    const rel = this.relationships;
+    if (rel) {
+      rel.beginShift();
+      this.missions.setArcStages(rel.stageEntries());
     }
 
     this.controller = controller;
@@ -428,6 +501,7 @@ export class GameDirector implements System {
       });
       if (this.inParty && this.party) prog.recordPartyRun(summary.score);
     }
+    this.relationships?.endShift();
     this.bus.emit('shift:end', {
       score: summary.score,
       fares: summary.fares,
@@ -454,6 +528,8 @@ export class GameDirector implements System {
       const summary = this.score.endShift();
       this.progression?.endShift(summary.cash, { longestChain: this.combo.longestChain });
     }
+    this.relationships?.endShift();
+    this.campaign.clearBeats();
     this.controller = null;
     this.inParty = false;
   }

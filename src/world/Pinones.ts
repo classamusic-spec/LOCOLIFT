@@ -55,6 +55,7 @@ import { Vegetation } from './Vegetation';
 import {
   KIT,
   PropKit,
+  puertoRicanFlag,
   buildBannerFlag,
   buildBarrelTable,
   buildBollard,
@@ -186,12 +187,15 @@ interface RampSpec {
   halfW: number;
 }
 const RAMPS: readonly RampSpec[] = [
-  { s: 88, len: 26, height: 3.1, drift: 9.5, halfW: 3.1 },
-  { s: 226, len: 23, height: 2.6, drift: 7.5, halfW: 3.3 },
-  { s: 390, len: 28, height: 3.5, drift: 11.0, halfW: 3.0 },
-  { s: 530, len: 24, height: 2.9, drift: 8.5, halfW: 3.2 },
-  { s: 640, len: 30, height: 3.8, drift: 12.0, halfW: 3.0 },
+  { s: 88, len: 15, height: 3.0, drift: 4.0, halfW: 2.7 },
+  { s: 226, len: 13, height: 2.5, drift: 3.2, halfW: 2.8 },
+  { s: 390, len: 16, height: 3.3, drift: 4.6, halfW: 2.6 },
+  { s: 530, len: 14, height: 2.8, drift: 3.6, halfW: 2.7 },
+  { s: 640, len: 17, height: 3.6, drift: 5.0, halfW: 2.6 },
 ];
+
+/** Station of each chinchorro cluster — also where the gravel apron widens. */
+const CLUSTERS: readonly number[] = [92, 208, 322, 436, 560, 660];
 
 /** Sand kickers at the tideline. `[station, lateral fraction of the beach]`. */
 const KICKERS: ReadonlyArray<readonly [number, number]> = [
@@ -200,8 +204,24 @@ const KICKERS: ReadonlyArray<readonly [number, number]> = [
   [604, 0.6],
 ];
 
-/** sand | asphalt | gravel | dune scrub | forest floor */
-type SurfaceCode = 0 | 1 | 2 | 3 | 4;
+/**
+ * Surface families, **ordered across the cross-section**: asphalt at the
+ * centreline, then gravel, sand, dune scrub, and forest floor as you walk
+ * inland (and back down again as you walk seaward). The order is load-bearing.
+ * The channel is interpolated across every quad, so a strip whose two ends are
+ * two families apart renders as the family in between — put sand next to
+ * asphalt and the verge grows a phantom lane of tarmac. Adjacent columns must
+ * never be more than one step apart. 5 is off the axis: the launch ramps.
+ */
+const enum Surface {
+  Asphalt = 0,
+  Gravel = 1,
+  Sand = 2,
+  Scrub = 3,
+  Forest = 4,
+  Ramp = 5,
+}
+type SurfaceCode = 0 | 1 | 2 | 3 | 4 | 5;
 
 interface Column {
   /** 'abs' = fixed lateral offset; 'beach' / 'surf' = fraction of the run */
@@ -224,42 +244,42 @@ interface Column {
  * looks at. Seaward it is all new sand.
  */
 const COLUMNS: readonly Column[] = [
-  { mode: 'abs', v: BLUFF_V, kind: 4, solid: false },
-  { mode: 'abs', v: -130, kind: 4, solid: false },
-  { mode: 'abs', v: -111, kind: 4, solid: false },
-  { mode: 'abs', v: -94, kind: 4, solid: false },
-  { mode: 'abs', v: -79, kind: 4, solid: false },
-  { mode: 'abs', v: -66, kind: 4, solid: false },
-  { mode: 'abs', v: -55, kind: 4, solid: false },
-  { mode: 'abs', v: -46, kind: 4, solid: false },
-  { mode: 'abs', v: -38, kind: 4, solid: false },
-  { mode: 'abs', v: -31, kind: 4, solid: true, grip: 'sand' },
-  { mode: 'abs', v: -25, kind: 4, solid: true, grip: 'sand' },
-  { mode: 'abs', v: -20, kind: 3, solid: true, grip: 'sand' },
-  { mode: 'abs', v: -16, kind: 3, solid: true, grip: 'sand' },
-  { mode: 'abs', v: -13, kind: 3, solid: true, grip: 'sand' },
-  { mode: 'abs', v: -10.8, kind: 0, solid: true, grip: 'sand' },
-  { mode: 'abs', v: -9.4, kind: 2, solid: true, grip: 'gravel' },
-  { mode: 'abs', v: -8, kind: 2, solid: true, grip: 'gravel' },
-  { mode: 'abs', v: -6.7, kind: 2, solid: true, grip: 'gravel' },
-  { mode: 'abs', v: -5.6, kind: 1, solid: true, grip: 'asphalt' },
-  { mode: 'abs', v: -2.8, kind: 1, solid: true, grip: 'asphalt' },
-  { mode: 'abs', v: 0, kind: 1, solid: true, grip: 'asphalt' },
-  { mode: 'abs', v: 2.8, kind: 1, solid: true, grip: 'asphalt' },
-  { mode: 'abs', v: 5.6, kind: 1, solid: true, grip: 'asphalt' },
-  { mode: 'abs', v: 6.7, kind: 2, solid: true, grip: 'gravel' },
-  { mode: 'abs', v: 8.6, kind: 2, solid: true, grip: 'gravel' },
-  { mode: 'beach', v: 0.0, kind: 2, solid: true, grip: 'sand' },
-  { mode: 'beach', v: 0.18, kind: 2, solid: true, grip: 'sand' },
-  { mode: 'beach', v: 0.34, kind: 2, solid: true, grip: 'sand' },
-  { mode: 'beach', v: 0.46, kind: 0, solid: true, grip: 'sand' },
-  { mode: 'beach', v: 0.58, kind: 0, solid: true, grip: 'sand' },
-  { mode: 'beach', v: 0.72, kind: 0, solid: true, grip: 'sand' },
-  { mode: 'beach', v: 0.86, kind: 0, solid: true, grip: 'sand' },
-  { mode: 'beach', v: 1.0, kind: 0, solid: true, grip: 'sand' },
-  { mode: 'surf', v: 0.3, kind: 0, solid: false },
-  { mode: 'surf', v: 0.65, kind: 0, solid: false },
-  { mode: 'surf', v: 1.0, kind: 0, solid: false },
+  { mode: 'abs', v: BLUFF_V, kind: Surface.Forest, solid: false },
+  { mode: 'abs', v: -130, kind: Surface.Forest, solid: false },
+  { mode: 'abs', v: -111, kind: Surface.Forest, solid: false },
+  { mode: 'abs', v: -94, kind: Surface.Forest, solid: false },
+  { mode: 'abs', v: -79, kind: Surface.Forest, solid: false },
+  { mode: 'abs', v: -66, kind: Surface.Forest, solid: false },
+  { mode: 'abs', v: -55, kind: Surface.Forest, solid: false },
+  { mode: 'abs', v: -46, kind: Surface.Forest, solid: false },
+  { mode: 'abs', v: -38, kind: Surface.Forest, solid: false },
+  { mode: 'abs', v: -31, kind: Surface.Forest, solid: true, grip: 'sand' },
+  { mode: 'abs', v: -25, kind: Surface.Scrub, solid: true, grip: 'sand' },
+  { mode: 'abs', v: -20, kind: Surface.Scrub, solid: true, grip: 'sand' },
+  { mode: 'abs', v: -16, kind: Surface.Scrub, solid: true, grip: 'sand' },
+  { mode: 'abs', v: -13, kind: Surface.Scrub, solid: true, grip: 'sand' },
+  { mode: 'abs', v: -10.8, kind: Surface.Sand, solid: true, grip: 'sand' },
+  { mode: 'abs', v: -9.4, kind: Surface.Gravel, solid: true, grip: 'gravel' },
+  { mode: 'abs', v: -8, kind: Surface.Gravel, solid: true, grip: 'gravel' },
+  { mode: 'abs', v: -6.7, kind: Surface.Gravel, solid: true, grip: 'gravel' },
+  { mode: 'abs', v: -5.6, kind: Surface.Asphalt, solid: true, grip: 'asphalt' },
+  { mode: 'abs', v: -2.8, kind: Surface.Asphalt, solid: true, grip: 'asphalt' },
+  { mode: 'abs', v: 0, kind: Surface.Asphalt, solid: true, grip: 'asphalt' },
+  { mode: 'abs', v: 2.8, kind: Surface.Asphalt, solid: true, grip: 'asphalt' },
+  { mode: 'abs', v: 5.6, kind: Surface.Asphalt, solid: true, grip: 'asphalt' },
+  { mode: 'abs', v: 6.7, kind: Surface.Gravel, solid: true, grip: 'gravel' },
+  { mode: 'abs', v: 8.6, kind: Surface.Gravel, solid: true, grip: 'gravel' },
+  { mode: 'beach', v: 0.0, kind: Surface.Gravel, solid: true, grip: 'sand' },
+  { mode: 'beach', v: 0.18, kind: Surface.Gravel, solid: true, grip: 'sand' },
+  { mode: 'beach', v: 0.34, kind: Surface.Sand, solid: true, grip: 'sand' },
+  { mode: 'beach', v: 0.46, kind: Surface.Sand, solid: true, grip: 'sand' },
+  { mode: 'beach', v: 0.58, kind: Surface.Sand, solid: true, grip: 'sand' },
+  { mode: 'beach', v: 0.72, kind: Surface.Sand, solid: true, grip: 'sand' },
+  { mode: 'beach', v: 0.86, kind: Surface.Sand, solid: true, grip: 'sand' },
+  { mode: 'beach', v: 1.0, kind: Surface.Sand, solid: true, grip: 'sand' },
+  { mode: 'surf', v: 0.3, kind: Surface.Sand, solid: false },
+  { mode: 'surf', v: 0.65, kind: Surface.Sand, solid: false },
+  { mode: 'surf', v: 1.0, kind: Surface.Sand, solid: false },
 ];
 
 /* ========================================================================== *
@@ -456,10 +476,10 @@ export class Pinones implements WorldLayer {
     uTime: { value: 0 },
     uSeaLevel: { value: SEA_LEVEL },
     uWetness: { value: 0 },
-    uSand: { value: new THREE.Color().setHex(0xe0cb9c, THREE.SRGBColorSpace) },
-    uSandWet: { value: new THREE.Color().setHex(0x8a7757, THREE.SRGBColorSpace) },
+    uSand: { value: new THREE.Color().setHex(0xd2b483, THREE.SRGBColorSpace) },
+    uSandWet: { value: new THREE.Color().setHex(0x7a6443, THREE.SRGBColorSpace) },
     uFoam: { value: new THREE.Color().setHex(0xf6fbfa, THREE.SRGBColorSpace) },
-    uAsphalt: { value: new THREE.Color().setHex(0x4b4a48, THREE.SRGBColorSpace) },
+    uAsphalt: { value: new THREE.Color().setHex(0x45443f, THREE.SRGBColorSpace) },
     uLineY: { value: new THREE.Color().setHex(0xe8b83c, THREE.SRGBColorSpace) },
     uLineW: { value: new THREE.Color().setHex(0xe4e0d4, THREE.SRGBColorSpace) },
   };
@@ -501,7 +521,6 @@ export class Pinones implements WorldLayer {
 
     this.buildStations(layout);
     this.buildDeck(opts);
-    pinonesDebugDump(this.deckGroup, this.stations, layout);
 
     const rng = opts.rng.fork(0x9151);
     this.buildProps(rng);
@@ -709,8 +728,8 @@ export class Pinones implements WorldLayer {
 
         y = lerp(bluff, lag, st.lagoon);
         clampW = 1 - st.lagoon;
-        // a dry-season crust of ripples on the bench so it is not a billiard table
-        y += Math.sin(st.s * 0.37 + v * 0.79) * 0.03 * smoothstep((d - 2.5) / 3);
+        // a dry-season crust on the bench, fine enough not to draw contour lines
+        y += Math.sin(st.s * 1.9 + v * 2.7) * 0.012 * smoothstep((d - 2.5) / 3);
         /* the far edge dives under the district's own terrain, so the boundary
            between this layer's ground and the world's is a ragged intersection
            line lost in the canopy rather than a straight 60 cm lip */
@@ -786,35 +805,47 @@ export class Pinones implements WorldLayer {
      */
     const c1 = new THREE.Color();
     const c2 = new THREE.Color();
-    const kindColour = (kind: SurfaceCode, v: number, st: Station): number => {
-      switch (kind) {
-        case 1:
-          return 0xffffff;
-        case 2:
-          return v < 0 ? 0xd0c4a6 : 0xd9cdb2;
-        case 3:
-          // the shader owns the sand → sea-grape blend, driven by lateral offset
-          return 0xffffff;
-        case 4: {
-          // the bluff forest: saturated tropical green, deepening as it climbs
-          // out of the sun, cross-fading to lagoon silt out on the spit
-          const climb = clamp01((this.profileHeightCache - st.y) / 22);
-          c1.setHex(0x6d9a34, THREE.SRGBColorSpace);
-          c2.setHex(0x255a24, THREE.SRGBColorSpace);
-          c1.lerp(c2, smoothstep(climb));
-          if (st.lagoon > 0.01) {
-            const wet = clamp01((SEA_LEVEL + 1.6 - this.profileHeightCache) / 3.2);
-            c2.setHex(0x8a8560, THREE.SRGBColorSpace);
-            c1.lerp(c2, st.lagoon * wet);
-          }
-          // hand off to the district's own terrain tone at the far edge
-          c2.setHex(0x93a878, THREE.SRGBColorSpace);
-          c1.lerp(c2, smoothstep((-v - 96) / 44) * (1 - st.lagoon));
-          return c1.getHex(THREE.SRGBColorSpace);
-        }
-        default:
-          return 0xffffff;
+    const kindColour = (kind: number, v: number, st: Station): number => {
+      // Only the bluff forest needs a vertex tint; sand, asphalt, gravel and
+      // dune scrub are absolute colours in the shader, so they ride on white
+      // and no half-step between families can band.
+      if (kind < 3.5) return 0xffffff;
+      // saturated tropical green deepening as it climbs out of the light,
+      // cross-fading to lagoon silt out on the spit
+      const climb = clamp01((this.profileHeightCache - st.y) / 22);
+      c1.setHex(0x6d9a34, THREE.SRGBColorSpace);
+      c2.setHex(0x255a24, THREE.SRGBColorSpace);
+      c1.lerp(c2, smoothstep(climb));
+      if (st.lagoon > 0.01) {
+        const wet = clamp01((SEA_LEVEL + 1.6 - this.profileHeightCache) / 3.2);
+        c2.setHex(0x8a8560, THREE.SRGBColorSpace);
+        c1.lerp(c2, st.lagoon * wet);
       }
+      // hand off to the district's own terrain tone at the far edge, so the
+      // boundary between this layer's ground and the world's never reads
+      c2.setHex(0x93a878, THREE.SRGBColorSpace);
+      c1.lerp(c2, smoothstep((-v - 96) / 44) * (1 - st.lagoon));
+      return c1.getHex(THREE.SRGBColorSpace);
+    };
+
+    /**
+     * The gravel apron is not a kerb-to-kerb ribbon of dust for 700 m — it is a
+     * parking bay in front of each cluster and nothing in between, where the
+     * dune scrub comes right up to the white line. That intermittency is what
+     * stops the inland verge reading as a desert hard shoulder.
+     */
+    const apron = (s: number): number => {
+      let a = 0;
+      for (const cs of CLUSTERS) a = Math.max(a, Math.exp(-(((s - cs) / 30) ** 2)));
+      for (const r of RAMPS) a = Math.max(a, Math.exp(-(((s - r.s + 6) / 20) ** 2)) * 0.85);
+      return a;
+    };
+    // fractional kinds are legal — the shader blends the surface families, and
+    // only kind 4 carries a vertex tint, so nothing bands at the half-step
+    const kindOf = (col: Column, st: Station): number => {
+      if (col.v >= 0 || col.mode !== 'abs') return col.kind;
+      if (col.kind !== Surface.Gravel && col.kind !== Surface.Sand) return col.kind;
+      return lerp(Surface.Scrub, col.kind, apron(st.s));
     };
 
     /** collider strips, one array pair per friction class */
@@ -853,9 +884,9 @@ export class Pinones implements WorldLayer {
               nrm.z,
               st.s / 6,
               v / 6,
-              kindColour(col.kind, v, st),
+              kindColour(kindOf(col, st), v, st),
               v,
-              col.kind,
+              kindOf(col, st),
               st.s,
             ),
           );
@@ -962,8 +993,8 @@ export class Pinones implements WorldLayer {
     if (this.stations.length < 4) return;
     const db = new DeckBuilder();
     const SEG = 12;
-    const PACKED = 0xc7b189;
-    const LOOSE = 0xe9decc;
+    const PACKED = 0xb59d70;
+    const LOOSE = 0xe4d7bf;
     const a = new THREE.Vector3();
     const b = new THREE.Vector3();
     const c = new THREE.Vector3();
@@ -989,9 +1020,9 @@ export class Pinones implements WorldLayer {
       const uz = dirZ / dl;
       const px = -uz;
       const pz = ux;
-      /** centreline height: flat at the mouth, steepest at the lip */
-      const riseAt = (t: number): number => r.height * smootherstep(t) * (0.3 + 0.7 * t);
-      const halfAt = (t: number): number => lerp(4.6, r.halfW, t);
+      /** centreline height: low at the mouth, ~16° at the lip */
+      const riseAt = (t: number): number => r.height * Math.pow(t, 1.35);
+      const halfAt = (t: number): number => lerp(3.9, r.halfW, t);
       /** running surface point, `side` = -1 | +1 across the ramp */
       const face = (t: number, side: number, out: THREE.Vector3): THREE.Vector3 => {
         const hw = halfAt(t);
@@ -1008,26 +1039,29 @@ export class Pinones implements WorldLayer {
         const t = i / SEG;
         const hw = halfAt(t);
         const along = (t * dl) / 6;
-        const aux = SHOULDER + 1 + t * r.drift;
+        const aux = 0;
         const ring: number[] = [];
         for (const [side, out, packed] of [
-          [-1, 1.6, false],
+          [-1, 0.9, false],
           [-1, 0, true],
           [1, 0, true],
-          [1, 1.6, false],
+          [1, 0.9, false],
         ] as Array<[number, number, boolean]>) {
           const wx = ox + ux * dl * t + px * (hw + out) * side;
           const wz = oz + uz * dl * t + pz * (hw + out) * side;
-          const y = packed ? entryY + riseAt(t) - 0.11 : Math.min(this.surfaceHeight(wx, wz), entryY + riseAt(t)) - 0.07;
+          const y = packed
+            ? entryY + riseAt(t) - 0.11
+            : Math.min(this.surfaceHeight(wx, wz), entryY + riseAt(t) - 0.35) - 0.05;
           ring.push(
             db.vertex(
               wx, y, wz,
               0, 1, 0,
               along, ((hw + out) * side) / 6,
               packed ? PACKED : LOOSE,
-              aux, 0, st0.s + t * r.len,
+              (hw + out) * side, packed ? Surface.Ramp : Surface.Sand, t * 10,
             ),
           );
+          void aux;
         }
         rows.push([ring[0], ring[1], ring[2], ring[3]]);
       }
@@ -1056,16 +1090,17 @@ export class Pinones implements WorldLayer {
       for (const side of [-1, 1]) {
         const wx = ox + ux * dl + px * hw * side;
         const wz = oz + uz * dl + pz * hw * side;
-        const aux = SHOULDER + 1 + r.drift;
-        lip.push(db.vertex(wx, lipY, wz, ux, 0, uz, dl / 6, (hw * side) / 6, PACKED, aux, 0, st0.s + r.len));
+        const aux = 0;
+        lip.push(db.vertex(wx, lipY, wz, ux, 0, uz, dl / 6, (hw * side) / 6, PACKED, hw * side, Surface.Ramp, 10));
         foot.push(
           db.vertex(
-            wx, Math.min(this.surfaceHeight(wx, wz), lipY) - 0.2, wz,
+            wx, Math.min(this.surfaceHeight(wx, wz), lipY) - 0.35, wz,
             ux, 0, uz,
             dl / 6 + 0.4, (hw * side) / 6,
-            0x8d7a58, aux, 0, st0.s + r.len,
+            0x8d7a58, hw * side, Surface.Ramp, 10.6,
           ),
         );
+        void aux;
       }
       db.quad(lip[0], foot[0], foot[1], lip[1]);
     }
@@ -1165,7 +1200,7 @@ export class Pinones implements WorldLayer {
             /* ---------------- sand ---------------- */
             'float pnGrain = pnFbm( pnW * 3.2 ) * 0.16 + pnNoise( pnW * 11.0 ) * 0.07;',
             'float pnDrift = pnFbm( pnW * 0.055 );',
-            'vec3 pnSandC = uSand * mix( vec3( 0.86, 0.89, 1.0 ), vec3( 1.11, 1.05, 0.9 ), pnDrift );',
+            'vec3 pnSandC = uSand * mix( vec3( 0.76, 0.82, 0.97 ), vec3( 1.16, 1.07, 0.86 ), pnDrift );',
             'float pnRip = sin( ( pnV - vBeach.z * 0.02 ) * 1.5 + pnFbm( pnW * 0.3 ) * 7.0 ) * 0.5 + 0.5;',
             'pnSandC *= 1.0 + ( pnGrain - 0.11 ) * 1.15 + pnRip * 0.07;',
             // wind-combed ridges running up the beach, the coarse scale that stops
@@ -1207,16 +1242,19 @@ export class Pinones implements WorldLayer {
 
             /* ---------------- gravel apron ---------------- */
             'float pnSpeck = pnNoise( pnW * 14.0 );',
-            'vec3 pnGravC = mix( vec3( 0.62, 0.58, 0.5 ), vec3( 0.84, 0.8, 0.7 ), pnSpeck );',
+            'vec3 pnGravC = mix( vec3( 0.44, 0.4, 0.33 ), vec3( 0.68, 0.62, 0.51 ), pnSpeck );',
             'pnGravC = mix( pnGravC, pnSandC * 0.95, 0.35 );',
             // tyre-polished ruts where every car swings off the road onto the apron
             'pnGravC *= 1.0 - 0.14 * smoothstep( 0.58, 0.86, pnFbm( pnW * vec2( 0.5, 0.09 ) ) );',
 
             /* ---------------- dune scrub ---------------- */
             // clumped sea-oat / bay-bean cover: bare sand between tussocks, not a lawn
-            'float pnInl = smoothstep( 8.5, 20.0, -pnV );',
-            'float pnTuft = pnFbm( pnW * 0.62 + 3.0 ) + pnInl * 0.34;',
-            'float pnCover = smoothstep( 0.36, 0.62, pnTuft ) * pnInl;',
+            // cover is gated by how far from the carriageway the scrub sits, not
+            // by an absolute offset: between the clusters the apron narrows to
+            // nothing and the sea grape comes right up to the white line
+            'float pnInl = smoothstep( 3.5, 11.0, -pnV );',
+            'float pnTuft = pnFbm( pnW * 0.62 + 3.0 ) + 0.15;',
+            'float pnCover = smoothstep( 0.34, 0.6, pnTuft ) * mix( 0.5, 1.0, pnInl );',
             'vec3 pnGrassC = mix( vec3( 0.3, 0.47, 0.13 ), vec3( 0.62, 0.72, 0.24 ), pnNoise( pnW * 2.6 ) );',
             'pnGrassC *= 0.86 + 0.3 * pnFbm( pnW * 1.4 + 7.0 );',
             'vec3 pnScrubC = mix( pnSandC * 0.93, pnGrassC, pnCover );',
@@ -1242,13 +1280,27 @@ export class Pinones implements WorldLayer {
             'vec3 pnMudC = mix( vec3( 0.62, 0.58, 0.42 ), vec3( 0.12, 0.3, 0.26 ), pnSub );',
             'pnForestC = mix( pnForestC, pnMudC, smoothstep( 0.02, 0.3, pnSub ) );',
 
+            /* ---------------- launch ramps ---------------- */
+            // packed marl, polished into two tyre lines, with a painted hazard
+            // lip so the kicker is legible from 55 m out at 45 m/s (§6.2 R4)
+            'vec3 pnRampC = pnSandC * vec3( 0.66, 0.61, 0.53 );',
+            'pnRampC *= 0.86 + 0.32 * pnFbm( pnW * 2.4 + 61.0 );',
+            'pnRampC *= 1.0 - 0.2 * smoothstep( 1.05, 0.2, abs( abs( pnV ) - 1.1 ) );',
+            'float pnLipT = smoothstep( 8.7, 9.7, pnS );',
+            'float pnStripe = step( 0.5, fract( pnV * 0.62 + 0.25 ) );',
+            'pnRampC = mix( pnRampC, mix( vec3( 0.72, 0.05, 0.04 ), vec3( 0.86, 0.84, 0.76 ), pnStripe ), pnLipT * 0.85 );',
+            'pnRampC = mix( pnRampC, pnRampC * 0.42, smoothstep( 9.9, 10.2, pnS ) );',
+
             /* ---------------- blend by kind ---------------- */
             'vec3 pnCol = pnSandC;',
             'pnRough = pnSandRough;',
-            'float wRoad = 1.0 - clamp( abs( pnKind - 1.0 ), 0.0, 1.0 );',
-            'float wGrav = 1.0 - clamp( abs( pnKind - 2.0 ), 0.0, 1.0 );',
+            // sand is family 2 and stays as the base; every other family fades
+            // in over one step of the ordered channel, so nothing bands
+            'float wRoad = 1.0 - clamp( abs( pnKind - 0.0 ), 0.0, 1.0 );',
+            'float wGrav = 1.0 - clamp( abs( pnKind - 1.0 ), 0.0, 1.0 );',
             'float wScrub = 1.0 - clamp( abs( pnKind - 3.0 ), 0.0, 1.0 );',
             'float wWood = 1.0 - clamp( abs( pnKind - 4.0 ), 0.0, 1.0 );',
+            'float wRamp = 1.0 - clamp( abs( pnKind - 5.0 ), 0.0, 1.0 );',
             'pnCol = mix( pnCol, pnRoadC, wRoad );',
             'pnRough = mix( pnRough, pnRoadRough, wRoad );',
             'pnCol = mix( pnCol, pnGravC, wGrav );',
@@ -1257,6 +1309,8 @@ export class Pinones implements WorldLayer {
             'pnRough = mix( pnRough, 0.88, wScrub );',
             'pnCol = mix( pnCol, pnForestC, wWood );',
             'pnRough = mix( pnRough, mix( 0.78, 0.25, pnSub ), wWood );',
+            'pnCol = mix( pnCol, pnRampC, wRamp );',
+            'pnRough = mix( pnRough, 0.8, wRamp );',
             // sand blown across the tarmac on the seaward edge — the single most
             // characteristic thing about a road that runs on a dune
             'float pnBlow = wRoad * smoothstep( 3.0, 5.6, pnV ) * smoothstep( 0.44, 0.78, pnFbm( pnW * vec2( 0.09, 0.55 ) ) );',
@@ -1268,6 +1322,9 @@ export class Pinones implements WorldLayer {
             'pnRough = mix( pnRough, 0.12, uWetness * 0.8 * ( 1.0 - pnWet * 0.5 ) );',
             // absolute: every kind above already folded in whatever part of the
             // vertex tint it wanted, so a second multiply would square it
+            // §6.4: lift chroma and roll the top off, measured on the capture
+            'pnCol = mix( vec3( dot( pnCol, vec3( 0.2126, 0.7152, 0.0722 ) ) ), pnCol, 1.22 );',
+            'pnCol = max( pnCol, vec3( 0.0 ) ) * 0.94;',
             'diffuseColor.rgb = pnCol;',
           ].join('\n'),
         )
@@ -1276,7 +1333,7 @@ export class Pinones implements WorldLayer {
           ['#include <roughnessmap_fragment>', 'roughnessFactor = pnRough;'].join('\n'),
         );
     };
-    mat.customProgramCacheKey = () => 'loco/pinones-deck-v4';
+    mat.customProgramCacheKey = () => 'loco/pinones-deck-v7';
     this.deckMat = mat;
     return mat;
   }
@@ -1361,17 +1418,17 @@ export class Pinones implements WorldLayer {
     const BOARDS: SignKey[] = ['cerveza', 'malta', 'refresco', 'mabi', 'empanadillas', 'piraguas', 'abierto', 'musica'];
 
     /* ---------------------------------------------------- 1. the clusters */
-    const clusterAt = [92, 208, 322, 436, 560, 660];
+    const clusterAt = CLUSTERS;
     for (let ci = 0; ci < clusterAt.length; ci++) {
       const cs = clusterAt[ci];
       if (cs > total - 40) continue;
-      const shackCount = Math.max(2, Math.round(rng.int(3, 5) * density));
+      const shackCount = Math.max(3, Math.round(rng.int(4, 6) * density));
       const inland = ci % 3 === 2; // one cluster in three sits across the road
       const side = inland ? -1 : 1;
       const anchors: THREE.Vector3[] = [];
 
       for (let k = 0; k < shackCount; k++) {
-        const s = cs + (k - (shackCount - 1) * 0.5) * rng.range(6.2, 7.6);
+        const s = cs + (k - (shackCount - 1) * 0.5) * rng.range(5.6, 6.9);
         const st = this.stationAtS(s);
         if (!st) continue;
         const v = inland ? -rng.range(10.5, 13.5) : lerp(st.bermV, st.waterV, rng.range(0.02, 0.2));
@@ -1444,7 +1501,19 @@ export class Pinones implements WorldLayer {
         else benches.push({ x: p.x, y: p.y, z: p.z, yaw: Math.atan2(st.tx, st.tz) + rng.range(-0.3, 0.3) });
       }
 
-      /* --- festoon lights strung shack to shack --- */
+      /* --- a flagpole at the head of the cluster (§7.4) --- */
+      {
+        const st = this.stationAtS(cs - 14);
+        if (st) {
+          const v = inland ? -rng.range(9, 11) : SHOULDER + rng.range(1.6, 3.2);
+          put(st, v, p);
+          kb.wood.cylinder(p.x, p.y, p.z, 0.075, 0.055, 6.2, 7, KIT.woodPale);
+          puertoRicanFlag(kb.cloth, p.x, p.y + 5.9, p.z, 1.5, Math.atan2(st.tx, st.tz), rng.next());
+        }
+      }
+
+      /* --- festoon lights: shack to shack, and a second run out over the
+             terrace on two poles, which is what actually lights the tables --- */
       if (anchors.length >= 2) {
         for (let k = 0; k < anchors.length - 1; k++) {
           const a = anchors[k];
@@ -1456,10 +1525,34 @@ export class Pinones implements WorldLayer {
           }
           if (rng.bool(0.5)) bunting(kb.cloth, pts, 0.3, [KIT.flagRed, KIT.flagWhite, KIT.flagBlue, 0xf2c230], rng.next());
         }
+        const first = anchors[0];
+        const last = anchors[anchors.length - 1];
+        const outV = inland ? -rng.range(5.5, 7) : lerp(SHOULDER + 2, this.nearestStation(first.x, first.z).bermV, 0.4);
+        const polls: THREE.Vector3[] = [];
+        for (const src of [first, last]) {
+          const st = this.nearestStation(src.x, src.z);
+          put(st, outV, p);
+          kb.wood.cylinder(p.x, p.y, p.z, 0.07, 0.05, 3.9, 6, KIT.woodPale);
+          polls.push(new THREE.Vector3(p.x, p.y + 3.7, p.z));
+        }
+        const pts: THREE.Vector3[] = [];
+        catenary(kb.wood, polls[0], polls[1], 0.9, KIT.steelDark, 0.02, 9, pts);
+        for (let q = 1; q < pts.length - 1; q++) {
+          bulbs.push({ x: pts[q].x, y: pts[q].y, z: pts[q].z, yaw: 0 });
+        }
+        for (let q = 0; q < 2; q++) {
+          const a = polls[q];
+          const b = anchors[q === 0 ? 0 : anchors.length - 1];
+          const link: THREE.Vector3[] = [];
+          catenary(kb.wood, a, b, 0.35, KIT.steelDark, 0.02, 4, link);
+          for (let r2 = 1; r2 < link.length - 1; r2++) {
+            bulbs.push({ x: link[r2].x, y: link[r2].y, z: link[r2].z, yaw: 0 });
+          }
+        }
       }
 
       /* --- cars parked at an angle on the gravel --- */
-      const parked = Math.round(rng.int(2, 4) * density);
+      const parked = Math.round(rng.int(3, 5) * density);
       for (let k = 0; k < parked; k++) {
         const st = this.stationAtS(cs + rng.range(-26, 26));
         if (!st) continue;
@@ -1496,11 +1589,22 @@ export class Pinones implements WorldLayer {
       signPanel(kb, p.x, p.y + 2.3, p.z, dir, 1.5, 0.7, 'pinones');
     }
     for (const [gs] of BERM_GAPS) {
-      const st = this.stationAtS(gs);
+      const st = this.stationAtS(gs - 18);
       if (!st) continue;
-      put(st, SHOULDER + 1.4, p);
+      put(st, SHOULDER + 1.6, p);
       kb.wood.cylinder(p.x, p.y, p.z, 0.05, 0.045, 2.1, 6, KIT.steel);
       signPanel(kb, p.x, p.y + 2.1, p.z, Math.atan2(-st.tx, -st.tz), 0.62, 0.62, 'pare');
+    }
+    // a pair of banner flags either side of every ramp mouth, so the kicker
+    // reads as an invitation from 55 m out (§6.2 R4) rather than a sand pile
+    for (const r of RAMPS) {
+      const st = this.stationAtS(r.s - 3);
+      if (!st) continue;
+      for (const dv of [-1.4, 4.8]) {
+        put(st, SHOULDER + 0.6 + dv, p);
+        banners.push({ x: p.x, y: p.y, z: p.z, yaw: Math.atan2(st.tx, st.tz), scale: 1.2 });
+        kb.wood.cylinder(p.x, p.y, p.z, 0.06, 0.045, 3.6, 6, KIT.woodPale);
+      }
     }
 
     /* -------------------------------------------- 3. beach: umbrellas etc */
@@ -1561,6 +1665,24 @@ export class Pinones implements WorldLayer {
       // the hedge line is the densest and tallest; scrub thins as it climbs
       const scale = roll < 0.62 ? rng.range(1.2, 2.3) : roll < 0.88 ? rng.range(0.85, 1.8) : rng.range(0.6, 1.2);
       thickets.push({ x: p.x, y: p.y - 0.12, z: p.z, yaw: rng.range(0, 6.28), scale });
+    }
+
+    /* ------------------------------------- 4b. the lagoon mangrove fringe */
+    const mangroves = Math.round(180 * density);
+    for (let i = 0; i < mangroves; i++) {
+      const st = this.stationAtS(rng.range(300, total - 4));
+      if (!st || st.lagoon < 0.15) continue;
+      const v = -rng.range(26, 74);
+      put(st, v, p);
+      // they stand in the shallows and on the mud, never on the dry dune
+      if (p.y > SEA_LEVEL + 1.6 || p.y < SEA_LEVEL - 1.1) continue;
+      thickets.push({
+        x: p.x,
+        y: Math.max(p.y, SEA_LEVEL - 0.35) - 0.1,
+        z: p.z,
+        yaw: rng.range(0, 6.28),
+        scale: rng.range(1.1, 2.4),
+      });
     }
 
     /* --------------------------------------------------- 5. realise them */
@@ -1786,82 +1908,6 @@ export class Pinones implements WorldLayer {
 /* ========================================================================== *
  *  helpers
  * ========================================================================== */
-
-/** TEMPORARY diagnostic: geometry counts, bounds, and winding sanity. */
-function pinonesDebugDump(deck: THREE.Group, stations: Station[], layout: CityLayout): void {
-  const profile: Array<Record<string, unknown>> = [];
-  for (const si of [10, 60, 110, 160]) {
-    const st = stations[si];
-    if (!st) continue;
-    const row: number[] = [];
-    for (let v = -200; v <= 60; v += 20) {
-      row.push(+layout.groundHeight(st.x + st.nx * v, st.z + st.nz * v).toFixed(1));
-    }
-    profile.push({ s: st.s, x: +st.x.toFixed(0), z: +st.z.toFixed(0), roadY: +st.y.toFixed(2), waterV: +st.waterV.toFixed(1), heights: row });
-  }
-  console.info('[PN-PROFILE]', JSON.stringify(profile));
-  const rows: Array<Record<string, unknown>> = [];
-  const a = new THREE.Vector3();
-  const b = new THREE.Vector3();
-  const c = new THREE.Vector3();
-  const ab = new THREE.Vector3();
-  const ac = new THREE.Vector3();
-  const n = new THREE.Vector3();
-  for (const child of deck.children) {
-    const m = child as THREE.Mesh;
-    const g = m.geometry;
-    const idx = g.getIndex();
-    const pos = g.getAttribute('position') as THREE.BufferAttribute;
-    const nrm = g.getAttribute('normal') as THREE.BufferAttribute;
-    let upFaces = 0;
-    let downFaces = 0;
-    let nrmUp = 0;
-    const tris = idx ? idx.count / 3 : 0;
-    for (let t = 0; t < tris; t++) {
-      const i0 = idx!.getX(t * 3);
-      const i1 = idx!.getX(t * 3 + 1);
-      const i2 = idx!.getX(t * 3 + 2);
-      a.fromBufferAttribute(pos, i0);
-      b.fromBufferAttribute(pos, i1);
-      c.fromBufferAttribute(pos, i2);
-      ab.subVectors(b, a);
-      ac.subVectors(c, a);
-      n.crossVectors(ab, ac);
-      if (n.y > 0) upFaces++;
-      else downFaces++;
-      if (nrm.getY(i0) > 0) nrmUp++;
-    }
-    const bb = g.boundingBox;
-    rows.push({
-      name: m.name,
-      visible: m.visible,
-      tris,
-      verts: pos.count,
-      windingUp: upFaces,
-      windingDown: downFaces,
-      shadingNormalUp: nrmUp,
-      material: (m.material as THREE.Material).name,
-      side: (m.material as THREE.Material).side,
-      bbox: bb ? [bb.min.toArray().map((v) => +v.toFixed(2)), bb.max.toArray().map((v) => +v.toFixed(2))] : null,
-    });
-  }
-  const w = window as unknown as { __pinonesDebug?: unknown };
-  w.__pinonesDebug = {
-    deckChildren: deck.children.length,
-    stations: stations.length,
-    st0: stations[0] ? { x: +stations[0].x.toFixed(1), z: +stations[0].z.toFixed(1), y: +stations[0].y.toFixed(2) } : null,
-    stMid: stations[Math.floor(stations.length / 2)]
-      ? {
-          x: +stations[Math.floor(stations.length / 2)].x.toFixed(1),
-          z: +stations[Math.floor(stations.length / 2)].z.toFixed(1),
-          y: +stations[Math.floor(stations.length / 2)].y.toFixed(2),
-          waterV: +stations[Math.floor(stations.length / 2)].waterV.toFixed(1),
-        }
-      : null,
-    rows,
-  };
-  console.info('[PN-DBG]', JSON.stringify(w.__pinonesDebug));
-}
 
 /** A double-sided sign panel on the atlas material, centred on a post top. */
 function signPanel(

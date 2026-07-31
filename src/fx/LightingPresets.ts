@@ -525,33 +525,50 @@ const RAIN: WeatherVariant = {
   lampBoost: 0.55,
 };
 
+/**
+ * Hurricane.
+ *
+ * The one row here that is *not* a straight read of the §4.2 table, and
+ * deliberately so. A tropical storm with a shelf cloud over it does not go
+ * neutral grey: the zenith goes to a near-black slate with a green bias, the
+ * horizon band underneath turns the sickly yellow-green everyone who has stood
+ * under one remembers, and the whole frame picks up an olive cast from the fog.
+ * The trick is keeping the *ratio* between them big — a uniformly green frame
+ * reads as a broken white balance, whereas black-green above a luminous olive
+ * band reads as weather.
+ *
+ * The sun is cut harder than the reference's rain row (×0.15 rather than ×0.18)
+ * because everything else here is darker, and the lamp boost goes to full: in a
+ * daytime hurricane the street lighting is on, and it is most of what keeps the
+ * driving line legible once the fog density and the gust multiplier stack up.
+ */
 const STORM: WeatherVariant = {
-  sunColor: 0xc8d2da,
-  sunScale: 0.18,
+  sunColor: 0xc6cdb2,
+  sunScale: 0.15,
   minElevation: 20,
-  hemiSky: 0x5f6c78,
-  hemiGround: 0x33383c,
+  hemiSky: 0x5c6852,
+  hemiGround: 0x31352b,
   hemiIntensity: 0.8,
-  ambientColor: 0x6a7681,
+  ambientColor: 0x69725d,
   ambientIntensity: 0.42,
-  bounceScale: 0.3,
-  envScale: 0.9,
-  fogColor: 0x77848d,
-  fogDensity: 0.0062,
-  exposure: 1.12,
-  bloomStrength: 0.5,
-  skyZenith: 0x39434c,
-  skyHorizon: 0x77848d,
-  skyBand: 0x828e96,
+  bounceScale: 0.28,
+  envScale: 0.88,
+  fogColor: 0x6d7663,
+  fogDensity: 0.0068,
+  exposure: 1.14,
+  bloomStrength: 0.55,
+  skyZenith: 0x242b22,
+  skyHorizon: 0x747d5c,
+  skyBand: 0x9aa06a,
   cloudCover: 1.0,
-  cloudLit: 0x76828d,
-  cloudShade: 0x2c3339,
+  cloudLit: 0x7d8464,
+  cloudShade: 0x24281f,
   cloudOpacity: 1.0,
   hazeScale: 0.22,
   sunDiscScale: 0.0,
   starScale: 0.0,
   rain: 1.0,
-  lampBoost: 0.8,
+  lampBoost: 0.95,
 };
 
 /* ------------------------------------------------------------------- math */

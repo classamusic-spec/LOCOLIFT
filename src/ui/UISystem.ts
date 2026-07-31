@@ -41,6 +41,7 @@ import { ResultsScreen, type ResultsData } from './ResultsScreen';
 import { SettingsMenu } from './SettingsMenu';
 import { TitleScreen } from './TitleScreen';
 import { Toasts } from './Toasts';
+import { TouchControls } from './TouchControls';
 import { formatInt, UITheme, type NavAction, type NavigableScreen } from './UITheme';
 
 /* ------------------------------------------------------ structural inputs */
@@ -150,6 +151,8 @@ export class UISystem implements System {
   readonly pause: PauseMenu;
   readonly settingsMenu: SettingsMenu;
   readonly results: ResultsScreen;
+  /** on-screen driving controls; inert until a touch device is detected */
+  readonly touch: TouchControls;
 
   private bus: EventBus | null = null;
   private vehicle: VehicleLike | null;
@@ -166,6 +169,9 @@ export class UISystem implements System {
 
   private viewW = 1280;
   private viewH = 720;
+  /** viewport-derived UI shrink, so a 390 px-tall phone is not all chrome */
+  private compact = 1;
+  private lastSettings: SettingsState;
 
   private score = 0;
 
@@ -218,6 +224,7 @@ export class UISystem implements System {
     this.pause = new PauseMenu(this.theme);
     this.settingsMenu = new SettingsMenu(this.theme, this.settingsStore);
     this.results = new ResultsScreen(this.theme);
+    this.touch = new TouchControls({ theme: this.theme });
 
     this.minimap.mount(this.hud.minimapSlot);
     this.arrow.mount(this.hud.arrowSlot);
@@ -231,7 +238,9 @@ export class UISystem implements System {
       running: false,
     };
 
+    this.lastSettings = this.settingsStore.current;
     this.wireScreens();
+    this.measure();
     this.applySettings(this.settingsStore.current);
     if (opts.world) this.setWorld(opts.world);
   }
@@ -254,7 +263,14 @@ export class UISystem implements System {
     window.addEventListener('keydown', this.onKeyDown);
 
     this.toasts.mount(this.root);
+    // The touch layer lives for the whole session; it shows itself only while
+    // driving, and only on a device that actually has a finger.
+    this.touch.mount(this.root);
     this.setState('title');
+
+    // The page's boot splash has done its job the moment a screen is up.
+    const splash = document.getElementById('boot');
+    if (splash) splash.hidden = true;
   }
 
   /** Re-point the UI at a Jeep (e.g. after a respawn rebuild). */
@@ -350,6 +366,7 @@ export class UISystem implements System {
         break;
     }
     this.root.dataset.state = id;
+    this.touch.setPlaying(id === 'playing');
   }
 
   get currentState(): GameStateId {
@@ -404,6 +421,9 @@ export class UISystem implements System {
     this.frame.running = playing && !ctx.paused && !this.hud.countdownActive;
 
     this.toasts.update(raw);
+    // Runs every frame, not just while playing: the stick has to keep centring
+    // smoothly when a menu opens under the player's thumb.
+    this.touch.update(raw);
     if (this.state === 'results') this.results.update(raw);
 
     if (playing || this.state === 'paused' || this.state === 'settings') {
@@ -419,6 +439,9 @@ export class UISystem implements System {
       this.hud.setSpeed(v.speed);
       this.hud.setBoost(v.boostFraction, v.isBoosting);
       this.hud.setDriveState(v.isDrifting, v.isAirborne);
+      // the TURBO button doubles as the boost meter when the HUD one is stowed
+      this.touch.setBoost(v.boostFraction, v.isBoosting);
+      this.touch.setDrifting(v.isDrifting);
 
       this.forward.set(0, 0, -1).applyQuaternion(v.quaternion);
       const heading = Math.atan2(this.forward.x, -this.forward.z);
@@ -496,14 +519,34 @@ export class UISystem implements System {
   private measure(): void {
     this.viewW = window.innerWidth || 1280;
     this.viewH = window.innerHeight || 720;
+    const next = compactFactor(this.viewW, this.viewH);
+    if (next !== this.compact) {
+      this.compact = next;
+      this.applySettings(this.lastSettings);
+    }
   }
 
   /* ------------------------------------------------------------- settings */
 
+  /**
+   * The player's `uiScale` is a preference, not a layout budget. On a phone the
+   * same chrome eats half the screen, so the theme is handed a *derived* scale:
+   * the user's choice multiplied by a viewport factor. The store is never
+   * written to, so the settings menu still shows what the player actually chose.
+   */
   private applySettings(s: SettingsState): void {
-    this.theme.apply(s);
-    this.hud.applySettings(s);
-    this.minimap.applySettings(s);
+    this.lastSettings = s;
+    const scaled: SettingsState =
+      this.compact === 1 ? s : { ...s, uiScale: s.uiScale * this.compact };
+
+    this.theme.apply(scaled);
+    this.hud.applySettings(scaled);
+    // The minimap is the single biggest HUD element; on a short screen it gets
+    // capped harder than everything else.
+    this.minimap.applySettings(
+      this.viewH <= 560 ? { ...scaled, uiScale: Math.min(scaled.uiScale, 0.75) } : scaled,
+    );
+    this.touch.applySettings(scaled);
   }
 
   onQualityChange(): void {
@@ -592,7 +635,10 @@ export class UISystem implements System {
       this.hud.scorePopup(p.at, '¡CASI!', 'pickup');
     });
     on('vehicle:collision', (p) => {
-      if (p.impulse > 12) this.hud.flash('danger');
+      if (p.impulse > 12) {
+        this.hud.flash('danger');
+        this.touch.haptic('impact');
+      }
     });
     on('vehicle:airTrick', (p) => this.hud.pushCallout(p.name, p.points));
     on('vehicle:jumpLand', (p) => {
@@ -625,6 +671,7 @@ export class UISystem implements System {
       this.dropNearestHail();
       this.setDestinationById(p.destinationId);
       this.hud.flash('pickup');
+      this.touch.haptic('reward');
       this.toasts.push('¡Pasajero a bordo!', 'money', 1800);
     });
 
@@ -929,6 +976,7 @@ export class UISystem implements System {
     this.onKeyDown = null;
     this.onResize = null;
 
+    this.touch.dispose();
     this.arrow.dispose();
     this.minimap.dispose();
     this.hud.dispose();
@@ -949,6 +997,16 @@ export class UISystem implements System {
 }
 
 /* --------------------------------------------------------------- helpers */
+
+/**
+ * How much to shrink the whole UI for the viewport it landed in. Landscape
+ * phones are ~390 px tall: at scale 1 the HUD chrome alone would be most of it.
+ */
+function compactFactor(w: number, h: number): number {
+  if (h <= 430 || w <= 620) return 0.78;
+  if (h <= 560 || w <= 840) return 0.88;
+  return 1;
+}
 
 function pressed(buttons: ReadonlyArray<GamepadButton>, index: number): boolean {
   const b = buttons[index];

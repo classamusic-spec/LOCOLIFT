@@ -85,6 +85,19 @@ export interface MissionVehicle {
   setSeatVisual(occupied: boolean, archetypeId?: string): void;
 }
 
+/**
+ * A named signature route the missions can bind a run to — in practice
+ * `ElTorroRoute`, handed over by `main` so nothing here imports the states
+ * layer. Only these three members are used.
+ */
+export interface MissionRoute {
+  readonly length: number;
+  /** metres from `(x, z)` to the route centreline */
+  distanceTo(x: number, z: number): number;
+  /** the POI ids the route wants visited, in order */
+  waypointIds(): string[];
+}
+
 /** What the missions need from the combo chain. */
 export interface MissionComboFeed {
   readonly pointsBanked: number;
@@ -146,6 +159,8 @@ export const MISSION_TUNING = {
   anchoredSpawnMax: 780,
   /** …and no closer than this, so it is never already on top of you */
   anchoredSpawnMin: 45,
+  /** a side job must stay inside the cull radius or it is recycled at once */
+  sideSpawnMax: 400,
   /** metres from the anchor POI a mission fare may stand */
   anchorRadius: 120,
   /** style money for landing a mid-run leg of a multi-stop job */
@@ -153,6 +168,14 @@ export const MISSION_TUNING = {
 
   /** style money awarded for taking an alley/stairs/rooftop shortcut */
   shortcutPoints: 26,
+  /** metres of clean running on a signature route between style payouts */
+  routeStride: 150,
+  /** style money for each of those */
+  routePoints: 34,
+  /** default metres from a bound route that still counts as "on it" */
+  offRouteRadius: 45,
+  /** most stops a single job may chain */
+  maxLegs: 8,
   /** style money for running down the piragua cart */
   cartCatchPoints: 120,
 
@@ -216,6 +239,20 @@ interface ActiveFare {
   visited: string[];
   /** seconds spent under a job's speed floor */
   slowTimer: number;
+  /** seconds spent over a job's speed ceiling (the escort problem) */
+  fastTimer: number;
+  /** heavy contacts this run, for `heavyHitLimit` */
+  heavyHits: number;
+  /** ordered stops for a `waypoints` job; empty for a normal fare */
+  waypoints: POI[];
+  /** the signature route this run is bound to, or null */
+  route: MissionRoute | null;
+  /** seconds spent away from that route */
+  offRouteTimer: number;
+  /** metres driven on the route since the last adherence payout */
+  routeMetres: number;
+  /** `ride.driven` at the last road sample, so adherence can use the delta */
+  lastSampleDriven: number;
 }
 
 type CartPhase = 'chase' | 'return';
@@ -263,6 +300,8 @@ export class MissionSystem implements System {
   private candidateCursor = 0;
 
   private readonly waiting: Passenger[] = [];
+  /** the waiting fare carrying the pending special job, for the HUD pin */
+  private specialFare: Passenger | null = null;
   private active: ActiveFare | null = null;
   private cart: CartRun | null = null;
 
@@ -289,8 +328,12 @@ export class MissionSystem implements System {
   private readonly regions = new Set<MapRegion>();
   private regionOf = new Map<string, MapRegion>();
   private buckets: Record<MapRegion, POI[]> = { oldTown: [], coast: [], pinones: [] };
+  /** signature routes a job may bind to, keyed by `SpecialMissionDef.route` */
+  private readonly routes = new Map<string, MissionRoute>();
   /** when true, the next special is the next unplayed encargo, not a random job */
   private storyMode = false;
+  /** the campaign's pick, when a story controller is driving the spine */
+  private storyOverrideId: string | null = null;
   /** the spine job currently queued or running, for the story controller */
   private storyActiveId: string | null = null;
   private storyResolved: 'complete' | 'fail' | null = null;
@@ -397,6 +440,34 @@ export class MissionSystem implements System {
     this.storyMode = on;
   }
 
+  /**
+   * Register a signature route (`'el-torro'`). Jobs with a matching `route`
+   * field then follow its waypoints and can be failed for leaving it. Passing
+   * null removes it, and every such job silently degrades to normal routing.
+   */
+  setRoute(name: string, route: MissionRoute | null): void {
+    if (route) this.routes.set(name, route);
+    else this.routes.delete(name);
+  }
+
+  routeFor(name: string | undefined): MissionRoute | null {
+    if (!name) return null;
+    return this.routes.get(name) ?? null;
+  }
+
+  /**
+   * Where each regular is in their own arc, so the dialogue director layers the
+   * right lines. Call once at shift start from the relationship ledger.
+   */
+  setArcStages(entries: Iterable<readonly [string, number]>): void {
+    this.dialogue.setStages(entries);
+  }
+
+  /** The arc stage the director is currently using for `archetypeId`. */
+  arcStageOf(archetypeId: string): number {
+    return this.dialogue.stageOf(archetypeId);
+  }
+
   get storyMissionId(): string | null {
     return this.storyActiveId;
   }
@@ -452,6 +523,7 @@ export class MissionSystem implements System {
   private clearWorld(): void {
     for (const p of this.waiting) p.despawn();
     this.waiting.length = 0;
+    this.specialFare = null;
     if (this.active) {
       this.active.passenger.despawn();
       this.active = null;
@@ -516,6 +588,22 @@ export class MissionSystem implements System {
    */
   get waitingMarkers(): ReadonlyArray<WaitingMarker> {
     return this.markers;
+  }
+
+  /**
+   * Where the special/story fare is standing, or null when none is out. The
+   * minimap should pin this differently from an ordinary hail — it is the one
+   * marker the player is actually being told to drive to.
+   */
+  get specialFarePosition(): THREE.Vector3 | null {
+    const p = this.specialFare;
+    if (!p || !this.waiting.includes(p)) return null;
+    return p.position;
+  }
+
+  /** The job that fare is carrying, or null. */
+  get pendingMissionId(): string | null {
+    return this.pendingSpecial ? this.pendingSpecial.id : null;
   }
 
   /** Where the runaway cart is, or null when no chase is running. */
@@ -653,18 +741,30 @@ export class MissionSystem implements System {
     const vx = this.vehicle.position.x;
     const vz = this.vehicle.position.z;
     const minR2 = MISSION_TUNING.anchoredSpawnMin * MISSION_TUNING.anchoredSpawnMin;
-    const maxR2 = MISSION_TUNING.anchoredSpawnMax * MISSION_TUNING.anchoredSpawnMax;
+    /*
+     * Only a story beat is allowed to stand beyond the cull radius — it is
+     * exempt from culling. A side job placed out there would be recycled the
+     * moment it appeared, so it stays inside the ring the player is working.
+     */
+    const maxR = def.story
+      ? MISSION_TUNING.anchoredSpawnMax
+      : Math.min(MISSION_TUNING.anchoredSpawnMax, MISSION_TUNING.sideSpawnMax);
+    const maxR2 = maxR * maxR;
     const anchorR2 = MISSION_TUNING.anchorRadius * MISSION_TUNING.anchorRadius;
     const sep2 = MISSION_TUNING.spawnSeparation * MISSION_TUNING.spawnSeparation;
 
     let best: SpawnCandidate | null = null;
     let bestD = Infinity;
+    /** nearest legal spot to the anchor regardless of the radius, as a backstop */
+    let fallback: SpawnCandidate | null = null;
+    let fallbackD = Infinity;
+
     for (let i = 0; i < this.candidates.length; i++) {
       const c = this.candidates[i];
       const ax = c.x - anchor.pos.x;
       const az = c.z - anchor.pos.z;
       const ad2 = ax * ax + az * az;
-      if (ad2 > anchorR2 || ad2 >= bestD) continue;
+      if (ad2 >= fallbackD && ad2 >= bestD) continue;
 
       const dx = c.x - vx;
       const dz = c.z - vz;
@@ -682,12 +782,25 @@ export class MissionSystem implements System {
       }
       if (!clear) continue;
 
-      best = c;
-      bestD = ad2;
+      if (ad2 < fallbackD) {
+        fallback = c;
+        fallbackD = ad2;
+      }
+      if (ad2 <= anchorR2 && ad2 < bestD) {
+        best = c;
+        bestD = ad2;
+      }
     }
 
-    if (!best) return false;
-    this.spawnAt(best, true);
+    /*
+     * A district the world has POIs for but no pedestrian graph in — Piñones
+     * before its sidewalks land, say — would otherwise never place its jobs.
+     * Standing the fare at the nearest legal spot *toward* the anchor is a much
+     * better failure than the job silently never appearing.
+     */
+    const chosen = best ?? fallback;
+    if (!chosen) return false;
+    this.spawnAt(chosen, true);
     return true;
   }
 
@@ -740,23 +853,25 @@ export class MissionSystem implements System {
       faceZ: c.fz,
       models: this.models,
       beacons: this.beacons,
-      patienceScale: special ? 1.25 : 1,
+      /* a story beat waits for you; an ordinary special is merely patient */
+      patienceScale: special ? (special.story ? 4 : 1.8) : 1,
     });
     p.spawn(this.group);
     this.waiting.push(p);
     this.onScreenArchetypes.add(archetype.id);
     if (special) {
       SPECIAL_BY_PASSENGER.set(p, special);
+      this.specialFare = p;
       /*
-       * A job anchored across the map is out of hail range, so the player would
-       * never learn it exists. Announce it the moment it appears: the HUD toast
-       * plus the minimap marker are the whole discovery mechanic.
+       * The toast plus the minimap marker *are* the discovery mechanic. This
+       * used to fire only for anchored spawns, which meant a job whose district
+       * had no pedestrian graph appeared with no announcement at all and could
+       * never be found. Every special announces itself now.
        */
-      if (forceSpecial) {
-        p.noticed = true;
-        this.bus.emit('passenger:hail', { archetypeId: archetype.id, at: p.position });
-        this.bus.emit('ui:toast', { text: special.title, icon: 'star', ms: 3200 });
-      }
+      p.noticed = true;
+      this.bus.emit('passenger:hail', { archetypeId: archetype.id, at: p.position });
+      this.bus.emit('ui:toast', { text: special.title, icon: 'star', ms: 3200 });
+      void forceSpecial;
     }
   }
 
@@ -822,7 +937,15 @@ export class MissionSystem implements System {
         continue;
       }
 
-      if (p.shouldCull(vx, vz)) {
+      /*
+       * Ordinary fares — and ordinary side jobs — are recycled once you have
+       * driven away from them; that is how the board keeps offering new work.
+       * A *story* beat never is. An encargo is deliberately anchored across the
+       * map (`anchoredSpawnMax` is 780 m, the cull radius is 460), so culling it
+       * meant a Piñones encargo could be announced, silently recycled on the
+       * next frame, and never be pickable at all.
+       */
+      if (!SPECIAL_BY_PASSENGER.get(p)?.story && p.shouldCull(vx, vz)) {
         this.retire(i, p);
         continue;
       }
@@ -839,6 +962,7 @@ export class MissionSystem implements System {
     this.waiting.splice(index, 1);
     this.onScreenArchetypes.delete(p.archetype.id);
     const special = SPECIAL_BY_PASSENGER.get(p);
+    if (this.specialFare === p) this.specialFare = null;
     if (special) {
       SPECIAL_BY_PASSENGER.delete(p);
       if (this.pendingSpecial === special) this.pendingSpecial = null;
@@ -852,9 +976,28 @@ export class MissionSystem implements System {
   private beginFare(p: Passenger): void {
     const special = SPECIAL_BY_PASSENGER.get(p) ?? null;
     SPECIAL_BY_PASSENGER.delete(p);
+    if (this.specialFare === p) this.specialFare = null;
     if (special && this.pendingSpecial === special) this.pendingSpecial = null;
 
-    const destination = this.chooseDestination(p.position, special, EMPTY_VISITED);
+    /*
+     * A routed job (El Torro) knows exactly where it goes: resolve the ordered
+     * waypoint list up front, then every leg is just the next entry. When the
+     * world has none of the named POIs the list comes back empty and the run
+     * falls through to ordinary destination scoring, so it always plays.
+     */
+    const waypoints = this.resolveWaypoints(special);
+    /* you cannot "arrive" at a stop you are already standing on — skip it */
+    while (waypoints.length > 2) {
+      const first = waypoints[0];
+      const d = Math.hypot(first.pos.x - p.position.x, first.pos.z - p.position.z);
+      if (d >= 38) break;
+      waypoints.shift();
+    }
+    const boundRoute = this.routeFor(special?.route);
+
+    const destination = waypoints.length > 0
+      ? waypoints[0]
+      : this.chooseDestination(p.position, special, EMPTY_VISITED);
     if (!destination) {
       /* no legal destination — let them go rather than soft-lock the loop */
       p.markBailed();
@@ -892,9 +1035,16 @@ export class MissionSystem implements System {
       lastX: this.vehicle.position.x,
       lastZ: this.vehicle.position.z,
       leg: 1,
-      legs: special && special.legs && special.legs > 1 ? Math.min(6, Math.floor(special.legs)) : 1,
+      legs: legCountFor(special, waypoints.length),
       visited: [],
       slowTimer: 0,
+      fastTimer: 0,
+      heavyHits: 0,
+      waypoints,
+      route: boundRoute,
+      offRouteTimer: 0,
+      routeMetres: 0,
+      lastSampleDriven: 0,
     };
     this.lastDestinationId = destination.id;
     this.lastShortcutEdge = -1;
@@ -917,12 +1067,39 @@ export class MissionSystem implements System {
       });
       if (this.active.legs > 1) {
         this.bus.emit('ui:toast', {
-          text: `Parada 1 / ${this.active.legs}`,
+          text: `${legNounFor(special)} 1 / ${this.active.legs}`,
           icon: 'pin',
           ms: 2200,
         });
       }
     }
+  }
+
+  /**
+   * Turn a job's ordered `waypoints` into real POIs. A bound signature route
+   * gets first refusal — it has already matched each garita to whatever the
+   * world actually registered — and anything still unresolved is simply
+   * dropped, shortening the run rather than breaking it.
+   */
+  private resolveWaypoints(def: SpecialMissionDef | null): POI[] {
+    const out: POI[] = [];
+    if (!def) return out;
+
+    const route = this.routeFor(def.route);
+    const ids = route ? route.waypointIds() : def.waypoints;
+    if (!ids || ids.length === 0) return out;
+
+    const seen = new Set<string>();
+    for (const id of ids) {
+      if (seen.has(id)) continue;
+      const poi = this.world.poiById(id);
+      if (!poi) continue;
+      seen.add(id);
+      out.push(poi);
+    }
+    /* a routed job with nothing resolvable is better off using normal routing */
+    if (out.length < 2) out.length = 0;
+    return out;
   }
 
   /**
@@ -1034,18 +1211,46 @@ export class MissionSystem implements System {
       return;
     }
 
+    const def = a.special;
+
+    /*
+     * The comfort clause. A sightseeing run, a nurse who needs both hands
+     * tomorrow, and your seventy-something uncle in the back all fail long
+     * before the passenger would actually bail — this is a *softer* threshold
+     * than `terrified`, and it is the whole difficulty of those missions.
+     */
+    if (def?.terrorFail !== undefined && p.terrorFraction >= def.terrorFail) {
+      this.failFare('terrified', def.failTerror);
+      return;
+    }
+
     /* a chase job dies if you stop chasing */
-    const floor = a.special?.minSpeedAbove;
+    const floor = def?.minSpeedAbove;
     if (floor !== undefined && floor > 0) {
       if (speed < floor) {
         a.slowTimer += dt;
-        const grace = a.special?.minSpeedGrace ?? 5;
+        const grace = def?.minSpeedGrace ?? 5;
         if (a.slowTimer >= grace) {
-          this.failFare('timeout', a.special?.failSlow);
+          this.failFare('timeout', def?.failSlow);
           return;
         }
       } else if (a.slowTimer > 0) {
         a.slowTimer = Math.max(0, a.slowTimer - dt * 2);
+      }
+    }
+
+    /* …and an escort dies if you leave everybody behind */
+    const ceiling = def?.maxSpeedBelow;
+    if (ceiling !== undefined && ceiling > 0) {
+      if (speed > ceiling) {
+        a.fastTimer += dt;
+        const grace = def?.maxSpeedGrace ?? 4;
+        if (a.fastTimer >= grace) {
+          this.failFare('timeout', def?.failFast);
+          return;
+        }
+      } else if (a.fastTimer > 0) {
+        a.fastTimer = Math.max(0, a.fastTimer - dt * 1.5);
       }
     }
 
@@ -1067,12 +1272,10 @@ export class MissionSystem implements System {
     a.visited.push(a.destination.id);
     a.leg++;
 
-    const next = this.chooseDestination(
-      a.destination.pos,
-      def,
-      a.visited,
-      a.passenger.archetype.id,
-    );
+    /* a routed job walks its own list; everything else scores a fresh stop */
+    const next = a.waypoints.length >= a.leg
+      ? a.waypoints[a.leg - 1]
+      : this.chooseDestination(a.destination.pos, def, a.visited, a.passenger.archetype.id);
     if (!next) {
       /* nowhere left to go — pay out what has been earned rather than stall */
       this.completeFare();
@@ -1092,15 +1295,18 @@ export class MissionSystem implements System {
     a.saidAlmostThere = false;
     a.wrongWayTimer = 0;
     a.slowTimer = 0;
+    a.fastTimer = 0;
+    a.offRouteTimer = 0;
     a.ride.missionBonus += legCash;
     a.ride.routeDistance += legDistance;
     a.parTime = parTimeFor(a.ride.routeDistance);
     a.ride.parTime = a.parTime;
     this.lastDestinationId = next.id;
 
-    this.combo?.add(`PARADA ${a.leg - 1} / ${a.legs}`, MISSION_TUNING.legPoints);
-    this.bus.emit('shift:timeAdded', { seconds: legSeconds, reason: `Parada ${a.leg - 1}` });
-    this.bus.emit('ui:notice', { text: `PARADA ${a.leg - 1} / ${a.legs}`, big: false });
+    const noun = legNounFor(def);
+    this.combo?.add(`${noun} ${a.leg - 1} / ${a.legs}`, MISSION_TUNING.legPoints);
+    this.bus.emit('shift:timeAdded', { seconds: legSeconds, reason: `${noun} ${a.leg - 1}` });
+    this.bus.emit('ui:notice', { text: `${noun} ${a.leg - 1} / ${a.legs}`, big: false });
     this.bus.emit('audio:sfx', { id: 'dropoff', volume: 0.8 });
     /* re-points the HUD card, the destination arrow and the minimap */
     this.bus.emit('passenger:pickup', {
@@ -1191,7 +1397,7 @@ export class MissionSystem implements System {
   }
 
   /** A crash-fail mission (the wedding cake) ends the run immediately. */
-  private failMissionByCrash(): void {
+  private failMissionByCrash(override?: string): void {
     const a = this.active;
     if (!a || !a.special) return;
     const p = a.passenger;
@@ -1211,7 +1417,7 @@ export class MissionSystem implements System {
     }
     this.bus.emit('mission:fail', {
       id: special.id,
-      reason: special.failCrash ?? special.failTimeout,
+      reason: override ?? special.failCrash ?? special.failTimeout,
     });
   }
 
@@ -1219,7 +1425,7 @@ export class MissionSystem implements System {
   private queueNextEvent(): void {
     if (!this.pendingSpecial && this.sinceSpecial >= MISSION_TUNING.specialEvery) {
       this.sinceSpecial = 0;
-      const def = this.storyMode ? nextStoryMission(this.completed) : this.rollSideMission();
+      const def = this.storyMode ? this.pickStoryMission() : this.rollSideMission();
       if (def) {
         this.pendingSpecial = def;
         if (def.story) this.storyActiveId = def.id;
@@ -1229,6 +1435,16 @@ export class MissionSystem implements System {
       this.sinceCart = 0;
       this.startCartChase();
     }
+  }
+
+  /** The campaign's choice if it has one, else the flat catalog order. */
+  private pickStoryMission(): SpecialMissionDef | null {
+    const wanted = this.storyOverrideId;
+    if (wanted) {
+      const def = ALL_MISSIONS.find((m) => m.id === wanted);
+      if (def) return def;
+    }
+    return nextStoryMission(this.completed);
   }
 
   /**
@@ -1274,9 +1490,21 @@ export class MissionSystem implements System {
     return true;
   }
 
+  /**
+   * Which encargo the campaign wants next. Set by `StoryRun` from
+   * `StoryCampaign`; null falls back to the flat catalog order, which is what
+   * an old save or a bare `MissionSystem` gets.
+   */
+  setStoryOverride(id: string | null): void {
+    this.storyOverrideId = id;
+  }
+
   /** Queue the next unplayed encargo. Returns its id, or null when done. */
-  queueStoryMission(): string | null {
-    const def = nextStoryMission(this.completed);
+  queueStoryMission(explicitId?: string | null): string | null {
+    const wanted = explicitId ?? this.storyOverrideId;
+    const def = wanted
+      ? (ALL_MISSIONS.find((m) => m.id === wanted) ?? nextStoryMission(this.completed))
+      : nextStoryMission(this.completed);
     if (!def) return null;
     if (this.pendingSpecial === def || this.storyActiveId === def.id) return def.id;
     this.pendingSpecial = def;
@@ -1489,6 +1717,42 @@ export class MissionSystem implements System {
 
     if (!a) return;
 
+    /*
+     * Signature-route adherence. On El Torro the wall road *is* the mission:
+     * running it clean pays style money every 150 m, and a job with an
+     * `offRouteLimit` (the storm run, where the low streets are flooded) fails
+     * outright if you drop off it for too long.
+     */
+    const route = a.route;
+    if (route) {
+      const def = a.special;
+      const radius = def?.offRouteRadius ?? MISSION_TUNING.offRouteRadius;
+      const d = route.distanceTo(pos.x, pos.z);
+      const step = Math.max(0, a.ride.driven - a.lastSampleDriven);
+      a.lastSampleDriven = a.ride.driven;
+
+      if (d <= radius) {
+        a.offRouteTimer = Math.max(0, a.offRouteTimer - 0.4);
+        a.routeMetres += step;
+        while (a.routeMetres >= MISSION_TUNING.routeStride) {
+          a.routeMetres -= MISSION_TUNING.routeStride;
+          this.combo?.add('¡POR LA MURALLA!', MISSION_TUNING.routePoints);
+        }
+      } else {
+        a.routeMetres = 0;
+        a.offRouteTimer += 0.2;
+        const limit = def?.offRouteLimit;
+        if (limit !== undefined && limit > 0 && a.offRouteTimer >= limit) {
+          this.failFare('timeout', def?.failOffRoute);
+          return;
+        }
+        /* one nudge at the halfway mark, so the fail is never a surprise */
+        if (limit !== undefined && limit > 0 && Math.abs(a.offRouteTimer - limit * 0.5) < 0.11) {
+          this.bus.emit('ui:toast', { text: '¡Vuelve a la muralla!', icon: 'warn', ms: 2000 });
+        }
+      }
+    }
+
     /* wrong way: facing away from the destination, at speed, for a while */
     if (this.vehicle.speed < 7) {
       a.wrongWayTimer = 0;
@@ -1609,6 +1873,25 @@ export class MissionSystem implements System {
         return;
       }
       const heavy = p.impulse >= this.heavyImpulse;
+      /*
+       * A hit budget is the middle setting between "one bump ends it" and
+       * "nothing matters": the generator survives two, the storm run four.
+       */
+      if (heavy && a.special) {
+        a.heavyHits++;
+        const limit = a.special.heavyHitLimit;
+        if (limit !== undefined && limit > 0) {
+          if (a.heavyHits > limit) {
+            this.failMissionByCrash(a.special.failHits);
+            return;
+          }
+          this.bus.emit('ui:toast', {
+            text: `Golpe ${a.heavyHits} / ${limit}`,
+            icon: 'warn',
+            ms: 2000,
+          });
+        }
+      }
       a.passenger.react(heavy ? 'heavyCrash' : 'crash', clamp(p.impulse / this.heavyImpulse, 0.4, 2));
       if (a.passenger.consumeMoodChange()) this.emitMood(a.passenger);
       this.dialogue.say(a.passenger.archetype.id, 'crash', a.passenger.mood, this.elapsed);
@@ -1629,6 +1912,23 @@ export class MissionSystem implements System {
 
 /** Shared empty visited-list so the first leg allocates nothing. */
 const EMPTY_VISITED: readonly string[] = [];
+
+/** What a stop is called on this job — "PARADA" unless the writer said otherwise. */
+function legNounFor(def: SpecialMissionDef | null): string {
+  return def?.legNoun ?? 'PARADA';
+}
+
+/**
+ * How many stops the run actually has. A routed job is capped by the waypoints
+ * the world could resolve, so a build missing half the garitas runs a shorter
+ * wall instead of stalling on a stop that does not exist.
+ */
+function legCountFor(def: SpecialMissionDef | null, waypoints: number): number {
+  const authored = def && def.legs && def.legs > 1 ? Math.floor(def.legs) : 1;
+  const capped = Math.min(MISSION_TUNING.maxLegs, authored);
+  if (waypoints > 0) return Math.max(1, Math.min(capped, waypoints));
+  return Math.max(1, capped);
+}
 
 /**
  * Which waiting fare, if any, is carrying a special mission. Kept out of

@@ -15,10 +15,11 @@
 import type { EventBus } from '../core/EventBus';
 import { clamp, clamp01 } from '../core/MathUtils';
 import { RNG } from '../core/RNG';
-import type { FareResult, GameMode, PassengerArchetype, POI } from '../core/types';
+import type { FareResult, GameMode, PassengerArchetype, POI, RoadGraph } from '../core/types';
 import { regionOfPOI } from '../passengers/MissionCatalog';
 import type { SaveSystem } from '../save/SaveSystem';
 import type { ShiftController } from './ArcadeShift';
+import { buildElTorroRoute, type ElTorroRoute } from './ElTorroRoute';
 
 /* ------------------------------------------------------ structural inputs */
 
@@ -33,6 +34,10 @@ export interface ChallengeWorld {
   pois: ReadonlyArray<POI>;
   /** used by the coastal sprint to keep its route out of the old town */
   bounds?: { minX: number; maxX: number; minZ: number; maxZ: number };
+  /** the El Torro time trial derives its checkpoints from the road graph */
+  roads?: RoadGraph;
+  groundHeight?(x: number, z: number): number;
+  poiById?(id: string): POI | undefined;
 }
 
 /**
@@ -57,7 +62,8 @@ export type ChallengeId =
   | 'combo-chain'
   | 'prop-smash'
   | 'clean-streak'
-  | 'coast-sprint';
+  | 'coast-sprint'
+  | 'el-torro-trial';
 
 export interface ChallengeDef {
   id: ChallengeId;
@@ -155,6 +161,15 @@ export const CHALLENGES: readonly ChallengeDef[] = [
     unit: 'puntos',
     reward: 2400,
   },
+  {
+    id: 'el-torro-trial',
+    title: 'EL TORRO · CONTRARRELOJ',
+    objective: 'Las siete garitas de la muralla, de oeste a este, sin levantar el pie.',
+    duration: 62,
+    goal: 7,
+    unit: 'garitas',
+    reward: 3400,
+  },
 ];
 
 /**
@@ -189,6 +204,13 @@ export interface ChallengesOptions {
   heavyImpulse?: number;
 }
 
+/** Challenges whose metric is "touch these places in this order". */
+const ROUTE_CHALLENGES: ReadonlySet<ChallengeId> = new Set<ChallengeId>([
+  'checkpoint-sprint',
+  'coast-sprint',
+  'el-torro-trial',
+]);
+
 /* ------------------------------------------------------------------ class */
 
 export class Challenges implements ShiftController {
@@ -217,6 +239,8 @@ export class Challenges implements ShiftController {
 
   private route: POI[] = [];
   private routeIndex = 0;
+  /** the derived wall road, when the El Torro trial is the live challenge */
+  private torro: ElTorroRoute | null = null;
   /** last-seen mission counters, for the delivery-streak challenge */
   private seenDone = 0;
   private seenLost = 0;
@@ -269,9 +293,25 @@ export class Challenges implements ShiftController {
     return this.succeeded;
   }
 
+  /**
+   * The number that actually has to be reached. A route challenge is bounded by
+   * the stops the world could give it, so a build with six garitas asks for six
+   * rather than becoming impossible.
+   */
+  get goal(): number {
+    if (ROUTE_CHALLENGES.has(this.def.id) && this.route.length > 0) return this.route.length;
+    return this.def.goal;
+  }
+
   /** 0..1 toward the goal. */
   get progress(): number {
-    return this.def.goal > 0 ? clamp01(this.metric / this.def.goal) : 0;
+    const g = this.goal;
+    return g > 0 ? clamp01(this.metric / g) : 0;
+  }
+
+  /** The derived wall road, when the El Torro trial is live. */
+  get wallRoute(): ElTorroRoute | null {
+    return this.torro;
   }
 
   get value(): number {
@@ -303,6 +343,7 @@ export class Challenges implements ShiftController {
     this.announced = 0;
     this.routeIndex = 0;
     this.route.length = 0;
+    this.torro = null;
     this.best = this.save ? (this.save.current.challengeBest[this.def.id] ?? 0) : 0;
 
     this.unsubscribe();
@@ -326,7 +367,7 @@ export class Challenges implements ShiftController {
     }
 
     this.subscribeMetric();
-    if (this.def.id === 'checkpoint-sprint' || this.def.id === 'coast-sprint') this.buildRoute();
+    if (ROUTE_CHALLENGES.has(this.def.id)) this.buildRoute();
 
     this.bus.emit('shift:start', { mode: this.mode, duration: this.def.duration });
     this.bus.emit('mission:start', {
@@ -334,9 +375,7 @@ export class Challenges implements ShiftController {
       title: this.def.title,
       objective: this.def.objective,
     });
-    if (this.def.id === 'checkpoint-sprint' || this.def.id === 'coast-sprint') {
-      this.pointAtCheckpoint();
-    }
+    if (ROUTE_CHALLENGES.has(this.def.id)) this.pointAtCheckpoint();
   }
 
   /**
@@ -433,6 +472,7 @@ export class Challenges implements ShiftController {
         break;
       case 'checkpoint-sprint':
       case 'coast-sprint':
+      case 'el-torro-trial':
         this.tickCheckpoints();
         break;
       case 'delivery-streak':
@@ -448,7 +488,7 @@ export class Challenges implements ShiftController {
         break;
     }
 
-    if (this.metric >= this.def.goal) {
+    if (this.metric >= this.goal) {
       this.finish(true);
       return;
     }
@@ -465,7 +505,7 @@ export class Challenges implements ShiftController {
     this.announced = step;
     const shown = this.def.unit === 'm' || this.def.unit === 's' ? Math.round(this.metric) : this.metric;
     this.bus.emit('ui:toast', {
-      text: `${shown} / ${this.def.goal} ${this.def.unit}`,
+      text: `${shown} / ${this.goal} ${this.def.unit}`,
       icon: 'star',
       ms: 1600,
     });
@@ -498,7 +538,34 @@ export class Challenges implements ShiftController {
 
   /* ---------------------------------------------------------- checkpoints */
 
+  /**
+   * El Torro is the one route in the game that is *authored*, not sampled: the
+   * seven garitas in order, west to east, no shortcuts, no re-ordering. It is
+   * built from the live road graph so it survives the world moving.
+   */
+  private buildTorroRoute(): boolean {
+    const world = this.world;
+    if (!world || !world.roads || !world.bounds) return false;
+    const route: ElTorroRoute | null = buildElTorroRoute({
+      roads: world.roads,
+      pois: world.pois,
+      bounds: world.bounds,
+      groundHeight: world.groundHeight?.bind(world),
+      poiById: world.poiById?.bind(world),
+    });
+    if (!route) return false;
+    const stops = route.garitaPOIs();
+    if (stops.length < 2) return false;
+    this.route = stops;
+    this.torro = route;
+    return true;
+  }
+
   private buildRoute(): void {
+    if (this.def.id === 'el-torro-trial') {
+      if (this.buildTorroRoute()) return;
+      /* no wall road in this build — fall through to the generic sampler */
+    }
     let pois = this.world ? this.world.pois.slice() : [];
     if (pois.length === 0) return;
 
@@ -565,7 +632,8 @@ export class Challenges implements ShiftController {
     this.routeIndex++;
     this.metric = this.routeIndex;
     this.addTime(this.checkpointTime);
-    this.bus.emit('ui:notice', { text: `PUNTO ${this.routeIndex} / ${this.def.goal}`, big: false });
+    const noun = this.def.id === 'el-torro-trial' ? 'GARITA' : 'PUNTO';
+    this.bus.emit('ui:notice', { text: `${noun} ${this.routeIndex} / ${this.route.length}`, big: false });
     this.bus.emit('audio:sfx', { id: 'timeExtend', volume: 0.7 });
     if (this.routeIndex < this.route.length) this.pointAtCheckpoint();
   }
@@ -578,7 +646,8 @@ export class Challenges implements ShiftController {
     this.running = false;
     this.succeeded = success;
 
-    const overshoot = this.def.goal > 0 ? clamp(this.metric / this.def.goal, 0, 3) : 0;
+    const goal = this.goal;
+    const overshoot = goal > 0 ? clamp(this.metric / goal, 0, 3) : 0;
     const payout = success
       ? Math.round(this.def.reward * (1 + (overshoot - 1) * 0.5) + this.left * 12)
       : Math.round(this.def.reward * 0.35 * this.progress);
@@ -599,7 +668,7 @@ export class Challenges implements ShiftController {
     else {
       this.bus.emit('mission:fail', {
         id: this.def.id,
-        reason: `${Math.round(this.metric)} / ${this.def.goal} ${this.def.unit}`,
+        reason: `${Math.round(this.metric)} / ${this.goal} ${this.def.unit}`,
       });
     }
 
@@ -617,7 +686,7 @@ export class Challenges implements ShiftController {
   }
 
   stop(): void {
-    if (!this.ended) this.finish(this.metric >= this.def.goal);
+    if (!this.ended) this.finish(this.metric >= this.goal);
     this.running = false;
     this.unsubscribe();
   }

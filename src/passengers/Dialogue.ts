@@ -19,6 +19,7 @@
 import type { EventBus } from '../core/EventBus';
 import type { RNG } from '../core/RNG';
 import type { DialogueLine, DialogueTrigger, PassengerMood } from '../core/types';
+import { arcLines, arcStageCount } from './StoryArcs';
 
 /* ------------------------------------------------------------------ bank */
 
@@ -765,6 +766,101 @@ const ABUELO_PARRANDERO: readonly DialogueLine[] = [
   L('shortcut', 'Por ahí me escapaba yo del colegio. Nada ha cambiado.', 18),
 ];
 
+/* --- Tío Wiso — treinta y un años en esta misma ruta, ahora de pasajero ---- */
+
+const TIO_WISO: readonly DialogueLine[] = [
+  L('hail', 'Nene. Aquí. No me toques bocina que estoy viejo, no sordo.', 30),
+  L('hail', 'Ven acá, que hoy me toca a mí ir sentado atrás. Qué cosa.', 30),
+  L('hail', 'Párate ahí. Ahí no, ahí. Donde yo me paraba siempre.', 30),
+
+  L('pickup', 'Espérate, que la cadera nueva todavía no sabe montarse sola.', 44),
+  L('pickup', 'Arranca. Y no me mires por el espejo, que ya sé lo que vas a preguntar.', 44),
+  L('pickup', 'Treinta y un años manejando esto y hoy voy de paquete. La vida, mijo.', 46),
+
+  L('idle', 'Esa calle la cogí yo cuarenta mil veces. Cuarenta mil, sin exagerar mucho.', 50),
+  L('idle', 'El truco no es correr. El truco es no tener que frenar.', 48),
+  L('idle', 'Tu papá se montaba aquí atrás igualito. Con los pies en el asiento, también.', 52),
+  L('idle', 'Yo empecé con una guagüita prestada y un letrero pintado a mano. Fíjate ahora.', 54),
+  L('idle', 'A esa esquina le tienes que llegar en segunda. Segunda. No en tercera, en segunda.', 50),
+  L('idle', 'La gente no se acuerda de cómo manejas. Se acuerda de cómo la trataste.', 52),
+  L('idle', 'Yo conozco a todo el mundo en este casco. Bueno... conocía. Se va muriendo gente.', 55),
+
+  L('drift', '¡Óyeme! Eso lo inventé yo en el setenta y nueve.', 13),
+  L('drift', 'Bonito. Peligroso, pero bonito. No lo hagas con clientes.', 13),
+
+  L('jump', '¡Coño, la cadera! Bueno... aguantó.', 12),
+  L('jump', 'Eso no lo hacía ni yo. Y yo hacía de todo.', 12),
+
+  L('nearMiss', 'Ese venía distraído. Tú lo viste antes que él. Bien.', 11),
+  L('nearMiss', 'Uf. Ese cruce siempre ha sido malo. Desde antes de ti.', 11),
+
+  L('crash', 'Ay. Bueno. Se abolla y se arregla. Nelo lo arregla.', 9),
+  L('crash', 'Eso te va a costar. Y no hablo de dinero.', 9),
+
+  L('boost', '¿Y esa prisa? El pasajero no te paga por asustarlo.', 15),
+  L('boost', 'Corre si quieres. Yo ya corrí lo mío.', 15),
+
+  L('wrongWay', 'Por ahí no, mijo. Confía en el viejo.', 16),
+  L('wrongWay', 'Vira en la próxima. Esa calle cambió de sentido en el noventa y cuatro.', 16),
+
+  L('almostThere', 'Ahí mismo. Déjame donde hay sombra, hazme el favor.', 20),
+  L('almostThere', 'Ya llegamos. Y llegamos bien. Eso es lo que hay que decir.', 20),
+
+  L('dropoff', 'Toma. No, cógelo. Tú trabajaste, se cobra. Regla número uno.', 30),
+  L('dropoff', 'Bien ahí, mijo. Mañana seguimos.', 30),
+
+  L('perfect', 'Eso. Exactamente eso. Ni un frenazo. Ya estás manejando.', 30),
+  L('perfect', 'Manejaste como se debe. Y yo sé de eso, que llevo treinta y un años calificando.', 30),
+
+  L('timeout', 'Déjalo. Me siento aquí en el banco y espero. Tengo práctica.', 28),
+
+  L('shortcut', 'Ese callejón lo usaba yo. ¿Quién te lo enseñó? Nadie. Ah.', 19),
+  L('shortcut', 'Por ahí se sale bien. Bueno. Aprendiste solo. Está bien.', 19),
+];
+
+/* --- Nelo — Taller Los Hermanos, manos de grasa y libreta de favores ------ */
+
+const MECANICO: readonly DialogueLine[] = [
+  L('hail', '¡Ey! ¿Me tiras al muelle? Voy a buscar una pieza y ya cerré el taller.', 30),
+  L('hail', 'Pana, un viaje. Traigo las manos sucias, no toco nada.', 30),
+  L('hail', '¿Estás libre? Y de paso te reviso ese ruido que traes.', 30),
+
+  L('pickup', 'Ese ruido que hace en tercera no es normal. Te lo digo gratis.', 42),
+  L('pickup', 'Dale. Y no le metas mucho, que yo sé lo que le duele a ese carro.', 42),
+  L('pickup', 'Arranca. Yo escucho el motor mejor de pasajero que con la capota abierta.', 44),
+
+  L('idle', 'El taller era de mi papá y de mi tío. Por eso son "Los Hermanos" y yo estoy solo.', 54),
+  L('idle', 'Tengo una van del ochenta y siete atrás que no arranca desde marzo. Va a arrancar.', 52),
+  L('idle', 'La mitad de lo que hago no lo cobro. La otra mitad tampoco, pero esa la anoto.', 52),
+  L('idle', 'Aquí la pieza no llega. Uno la busca, la pide, la espera, y al final la fabrica.', 54),
+  L('idle', 'Ese carro tuyo tiene más historia que motor. Cuídalo.', 48),
+  L('idle', 'Wiso me trajo ese Jeep en el noventa y seis con el bloque partido. Aquí sigue.', 55),
+
+  L('drift', 'Ey. Las gomas cuestan. Las gomas cuestan, pana.', 13),
+  L('drift', 'Eso suena bien. Caro, pero bien.', 13),
+
+  L('jump', '¡La suspensión! ¡Mi suspensión, la que yo puse!', 12),
+
+  L('nearMiss', 'Uf. Ese hubiera sido trabajo para mí y no del bueno.', 11),
+
+  L('crash', 'Ey, ey. Eso lo voy a tener que enderezar yo. Yo mismo.', 9),
+  L('crash', 'Anótalo en la libreta: un bonete. Me lo pagas en café.', 9),
+
+  L('boost', '¡Dale! Ese turbo lo instalé yo, así que puedo decir que suena precioso.', 14),
+
+  L('wrongWay', 'Nah, pana. Es al revés. Yo reparto por aquí desde los quince.', 15),
+
+  L('almostThere', 'Ahí mismo, en el portón azul. Ese es.', 19),
+
+  L('dropoff', 'Bien ahí. Pásate el sábado que te miro ese ruido y no te cobro.', 30),
+
+  L('perfect', 'Limpio. Y sin castigarme el embrague. Eso se agradece.', 30),
+
+  L('timeout', 'Nada, me voy a pie. Igual tengo que pensar cómo pago la pieza.', 28),
+
+  L('shortcut', 'Por ese callejón entra mi grúa. Justito. Bien ahí.', 19),
+];
+
 /** Used for any archetype without its own bank — should never be needed. */
 export const GENERIC_DIALOGUE: readonly DialogueLine[] = [
   L('hail', '¡Taxi! ¡Aquí!', 25),
@@ -801,6 +897,8 @@ export const DIALOGUE: Readonly<Record<string, readonly DialogueLine[]>> = {
   dj: DJ_MELAZA,
   'party-host': PARTY_HOST,
   'abuelo-parrandero': ABUELO_PARRANDERO,
+  'tio-wiso': TIO_WISO,
+  mecanico: MECANICO,
 };
 
 /** Total authored lines — used by the harness to assert the bank stayed big. */
@@ -900,6 +998,15 @@ export class DialogueDirector {
   private readonly banks = new Map<string, CompiledBank>();
   private readonly generic = compile(GENERIC_DIALOGUE);
 
+  /**
+   * Arc banks, compiled on first use and keyed `<archetype>#<stage>`. A stage
+   * is a thin overlay: only the triggers the writer covered are present, so a
+   * miss falls straight through to the base bank below.
+   */
+  private readonly arcBanks = new Map<string, CompiledBank>();
+  /** current arc stage per archetype; absent means the base bank */
+  private readonly stages = new Map<string, number>();
+
   /** scratch candidate buffer — reused, never reallocated */
   private readonly candidates: CompiledLine[] = [];
 
@@ -927,12 +1034,81 @@ export class DialogueDirector {
         for (const line of list) line.lastSaid = Number.NEGATIVE_INFINITY;
       }
     }
+    for (const bank of this.arcBanks.values()) {
+      for (const list of bank.values()) {
+        for (const line of list) line.lastSaid = Number.NEGATIVE_INFINITY;
+      }
+    }
     for (const list of this.generic.values()) {
       for (const line of list) line.lastSaid = Number.NEGATIVE_INFINITY;
     }
     this.lastSpokeAt = Number.NEGATIVE_INFINITY;
     this.lastPriority = -1;
     this.nextIdleAt = now + this.idleMin;
+  }
+
+  /* ------------------------------------------------------------- arcs */
+
+  /**
+   * Where this person is in their own story. `stage` 0 is the base bank; 1..n
+   * layer an arc stage on top. Safe to call every shift with the same value.
+   */
+  setStage(archetypeId: string, stage: number): void {
+    const max = arcStageCount(archetypeId);
+    const s = Number.isFinite(stage) ? Math.max(0, Math.min(max, Math.floor(stage))) : 0;
+    if (s === 0) this.stages.delete(archetypeId);
+    else this.stages.set(archetypeId, s);
+  }
+
+  /** Bulk form, for restoring a saved relationship ledger at shift start. */
+  setStages(entries: Iterable<readonly [string, number]>): void {
+    for (const [id, stage] of entries) this.setStage(id, stage);
+  }
+
+  stageOf(archetypeId: string): number {
+    return this.stages.get(archetypeId) ?? 0;
+  }
+
+  /** Compiled overlay for the archetype's current stage, or null. */
+  private arcBankFor(archetypeId: string): CompiledBank | null {
+    const stage = this.stages.get(archetypeId);
+    if (stage === undefined || stage <= 0) return null;
+    const key = `${archetypeId}#${stage}`;
+    let bank = this.arcBanks.get(key);
+    if (!bank) {
+      const lines = arcLines(archetypeId, stage);
+      if (lines.length === 0) return null;
+      bank = compile(lines);
+      this.arcBanks.set(key, bank);
+    }
+    return bank;
+  }
+
+  /**
+   * Append every line in `list` that clears its cooldown, preferring
+   * mood-specific ones. Returns true when anything was added.
+   */
+  private collect(
+    list: CompiledLine[] | undefined,
+    mood: PassengerMood,
+    now: number,
+  ): boolean {
+    if (!list || list.length === 0) return false;
+    const before = this.candidates.length;
+    for (let i = 0; i < list.length; i++) {
+      const line = list[i];
+      if (line.mood !== mood) continue;
+      if (now - line.lastSaid < line.cooldown) continue;
+      this.candidates.push(line);
+    }
+    if (this.candidates.length > before) return true;
+    for (let i = 0; i < list.length; i++) {
+      const line = list[i];
+      if (line.mood !== undefined) continue;
+      if (now - line.lastSaid < line.cooldown) continue;
+      this.candidates.push(line);
+    }
+    return this.candidates.length > before;
   }
 
   /** A new passenger boarded — re-arm the idle timer. */
@@ -959,28 +1135,18 @@ export class DialogueDirector {
     }
 
     const bank = this.banks.get(archetypeId) ?? this.generic;
-    let list = bank.get(trigger);
-    if (!list || list.length === 0) list = this.generic.get(trigger);
+    const base = bank.get(trigger) ?? this.generic.get(trigger);
+    const arc = this.arcBankFor(archetypeId)?.get(trigger);
+    /* the arc overlay is where this person is *right now* — it goes first */
+    const list = arc && arc.length > 0 ? arc : base;
     if (!list || list.length === 0) return false;
 
     const cand = this.candidates;
     cand.length = 0;
 
-    // pass 1: mood-specific lines that are off cooldown
-    for (let i = 0; i < list.length; i++) {
-      const line = list[i];
-      if (line.mood !== mood) continue;
-      if (now - line.lastSaid < line.cooldown) continue;
-      cand.push(line);
-    }
-    // pass 2: mood-agnostic lines that are off cooldown
-    if (cand.length === 0) {
-      for (let i = 0; i < list.length; i++) {
-        const line = list[i];
-        if (line.mood !== undefined) continue;
-        if (now - line.lastSaid < line.cooldown) continue;
-        cand.push(line);
-      }
+    // passes 1+2: the overlay, then the base bank underneath it
+    if (!this.collect(list, mood, now) && list !== base) {
+      this.collect(base, mood, now);
     }
     // pass 3: everything is on cooldown — take the stalest mood-agnostic line,
     // but only for beats the player must hear.
@@ -991,6 +1157,13 @@ export class DialogueDirector {
         const line = list[i];
         if (line.mood !== undefined) continue;
         if (!stalest || line.lastSaid < stalest.lastSaid) stalest = line;
+      }
+      if (!stalest && base) {
+        for (let i = 0; i < base.length; i++) {
+          const line = base[i];
+          if (line.mood !== undefined) continue;
+          if (!stalest || line.lastSaid < stalest.lastSaid) stalest = line;
+        }
       }
       if (!stalest) return false;
       cand.push(stalest);

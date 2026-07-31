@@ -69,8 +69,18 @@
     'Liberation Sans', Arial, sans-serif;
   --ll-ui: var(--ll-display);
 
-  --pad: max(var(--ll-sp-5), env(safe-area-inset-top, 0px));
-  --pad-b: max(var(--ll-sp-5), env(safe-area-inset-bottom, 0px));
+  /* Notch/rounded-corner insets. Split out as their own custom properties so
+     the mobile harness can *simulate* a notch by overriding four values, which
+     `env()` alone can never be made to do. */
+  --ll-safe-top: env(safe-area-inset-top, 0px);
+  --ll-safe-right: env(safe-area-inset-right, 0px);
+  --ll-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --ll-safe-left: env(safe-area-inset-left, 0px);
+
+  --pad: max(var(--ll-sp-5), var(--ll-safe-top));
+  --pad-b: max(var(--ll-sp-5), var(--ll-safe-bottom));
+  --pad-l: max(var(--ll-sp-5), var(--ll-safe-left));
+  --pad-r: max(var(--ll-sp-5), var(--ll-safe-right));
 
   position: fixed;
   inset: 0;
@@ -274,7 +284,7 @@
 }
 
 .ll-hud__tl {
-  left: var(--pad);
+  left: var(--pad-l);
   top: var(--pad);
   flex-direction: column;
   align-items: flex-start;
@@ -290,14 +300,14 @@
 }
 
 .ll-hud__tr {
-  right: var(--pad);
+  right: var(--pad-r);
   top: var(--pad);
   flex-direction: column;
   align-items: flex-end;
 }
 
 .ll-hud__bl {
-  left: var(--pad);
+  left: var(--pad-l);
   bottom: var(--pad-b);
   flex-direction: column;
   align-items: flex-start;
@@ -305,7 +315,7 @@
 }
 
 .ll-hud__br {
-  right: var(--pad);
+  right: var(--pad-r);
   bottom: var(--pad-b);
   flex-direction: column;
   align-items: flex-end;
@@ -1341,7 +1351,7 @@
   flex-direction: column;
   justify-content: safe center;
   gap: var(--ll-sp-3);
-  padding: var(--pad) var(--ll-sp-7);
+  padding: var(--pad) var(--ll-sp-7) var(--pad-b) max(var(--ll-sp-7), var(--ll-safe-left));
   width: min(62vw, calc(700px * var(--ll-ui-scale)));
   max-width: 100%;
   height: 100%;
@@ -2480,7 +2490,7 @@
 
 .ll-toasts {
   position: absolute;
-  left: var(--pad);
+  left: var(--pad-l);
   top: calc(var(--pad) + var(--ll-fs-3xl) * 3.7);
   display: flex;
   flex-direction: column;
@@ -2634,6 +2644,844 @@
     display: none;
   }
   .ll-mi__en {
+    display: none;
+  }
+}
+
+/* =============================================================================
+   Touch controls
+   -----------------------------------------------------------------------------
+   Sizes arrive as px custom properties (`--tc-*`) written by `TouchControls`
+   once per layout change — never per frame. The only properties that move
+   during play are `transform` and `opacity`, on elements that declare
+   `will-change`, so a thumb sweep never triggers layout.
+   ========================================================================== */
+
+.ll-touch {
+  --tc-scale: 1;
+  --tc-alpha: 0.82;
+  --tc-gas: 104px;
+  --tc-brake: 80px;
+  --tc-boost: 84px;
+  --tc-drift: 78px;
+  --tc-small: 54px;
+  --tc-gap: 10px;
+  --tc-util: 48px;
+  --tc-stick: 136px;
+  --tc-knob: 66px;
+  --tc-wheel: 232px;
+  --tc-arrow-w: 92px;
+  --tc-arrow-h: 84px;
+  --tc-steer-dx: 0px;
+  --tc-steer-dy: 0px;
+  --tc-pad-dx: 0px;
+  --tc-pad-dy: 0px;
+
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+  /* NOTE: deliberately *not* `touch-action: none` here. Chromium intersects
+     touch-action down the ancestor chain, so blocking it on this full-screen
+     layer would also stop the setup panel inside it from scrolling. Each
+     interactive cluster opts out individually instead. */
+}
+
+.ll-touch[hidden] {
+  display: none;
+}
+
+/* ------------------------------------------------------------- steering */
+
+.ll-touch__steer {
+  position: absolute;
+  left: calc(var(--pad-l) + var(--tc-steer-dx));
+  bottom: calc(var(--pad-b) + var(--tc-steer-dy));
+  width: min(42vw, calc(var(--tc-stick) * 2.5));
+  height: min(56vh, calc(var(--tc-stick) * 1.75));
+  pointer-events: auto;
+  touch-action: none;
+  opacity: var(--tc-alpha);
+}
+
+.ll-touch[data-hand='left'] .ll-touch__steer {
+  left: auto;
+  right: calc(var(--pad-r) + var(--tc-steer-dx));
+}
+
+.ll-tstick {
+  position: absolute;
+  /* Centred in the zone by CSS, then moved by transform. Anchoring it here
+     rather than at the zone's origin means that even before the first measure
+     — or if a layout pass is somehow missed — the stick is on screen. */
+  left: calc(50% - var(--tc-stick) / 2);
+  top: calc(50% - var(--tc-stick) / 2);
+  width: var(--tc-stick);
+  height: var(--tc-stick);
+  color: var(--ll-paper);
+  opacity: 0.88;
+  will-change: transform;
+  transition: opacity var(--ll-t-fast) linear;
+}
+
+.ll-tstick.is-live {
+  opacity: 1;
+}
+
+.ll-tstick__ring {
+  position: absolute;
+  inset: 0;
+  filter: drop-shadow(0 4px 10px rgba(2, 6, 11, 0.55));
+}
+
+.ll-tstick__ring svg,
+.ll-tstick__knob svg,
+.ll-twheel svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.ll-tstick__knob {
+  position: absolute;
+  left: calc(50% - var(--tc-knob) / 2);
+  top: calc(50% - var(--tc-knob) / 2);
+  width: var(--tc-knob);
+  height: var(--tc-knob);
+  border-radius: 50%;
+  background: var(--ll-hud-bg);
+  border: var(--ll-key) solid var(--ll-ink);
+  box-shadow:
+    0 5px 0 rgba(4, 9, 14, 0.5),
+    0 8px 18px rgba(2, 6, 11, 0.45);
+  color: var(--ll-player);
+  will-change: transform;
+}
+
+.ll-twheel {
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--tc-wheel) * -0.44);
+  width: var(--tc-wheel);
+  height: var(--tc-wheel);
+  margin-left: calc(var(--tc-wheel) / -2);
+  color: var(--ll-paper);
+  filter: drop-shadow(0 6px 14px rgba(2, 6, 11, 0.55));
+  will-change: transform;
+}
+
+.ll-tarrows {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  display: flex;
+  gap: var(--tc-gap);
+}
+
+.ll-touch[data-scheme='stick'] .ll-twheel,
+.ll-touch[data-scheme='stick'] .ll-tarrows,
+.ll-touch[data-scheme='wheel'] .ll-tstick,
+.ll-touch[data-scheme='wheel'] .ll-tarrows,
+.ll-touch[data-scheme='zones'] .ll-tstick,
+.ll-touch[data-scheme='zones'] .ll-twheel {
+  display: none;
+}
+
+/* --------------------------------------------------------------- pedals */
+
+.ll-touch__pad {
+  position: absolute;
+  right: calc(var(--pad-r) + var(--tc-pad-dx));
+  bottom: calc(var(--pad-b) + var(--tc-pad-dy));
+  display: grid;
+  grid-template-columns: var(--tc-small) var(--tc-brake) var(--tc-gas);
+  grid-template-rows: var(--tc-boost) var(--tc-gas);
+  gap: var(--tc-gap);
+  align-items: center;
+  justify-items: center;
+  pointer-events: auto;
+  touch-action: none;
+  opacity: var(--tc-alpha);
+}
+
+.ll-touch[data-hand='left'] .ll-touch__pad {
+  right: auto;
+  left: calc(var(--pad-l) + var(--tc-pad-dx));
+  grid-template-columns: var(--tc-gas) var(--tc-brake) var(--tc-small);
+}
+
+.ll-touch__util {
+  position: absolute;
+  left: var(--pad-l);
+  top: var(--pad);
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--tc-gap) * 0.8);
+  pointer-events: auto;
+  touch-action: none;
+  opacity: var(--tc-alpha);
+}
+
+/* -------------------------------------------------------------- buttons */
+
+.ll-tbtn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  gap: 1px;
+  padding: 0;
+  border: var(--ll-key) solid var(--ll-ink);
+  border-radius: 50%;
+  background: var(--ll-hud-bg);
+  color: var(--ll-text);
+  overflow: hidden;
+  cursor: pointer;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  box-shadow:
+    0 5px 0 rgba(4, 9, 14, 0.5),
+    0 9px 20px rgba(2, 6, 11, 0.45);
+  transition:
+    transform var(--ll-t-fast) var(--ll-ease-standard),
+    background var(--ll-t-fast) linear,
+    box-shadow var(--ll-t-fast) linear;
+}
+
+.ll-tbtn.is-down {
+  transform: translateY(4px);
+  box-shadow:
+    0 1px 0 rgba(4, 9, 14, 0.5),
+    0 3px 10px rgba(2, 6, 11, 0.45);
+  background: rgba(255, 246, 232, 0.2);
+}
+
+.ll-tbtn:focus-visible {
+  outline: 3px solid var(--ll-pickup);
+  outline-offset: 3px;
+}
+
+.ll-tbtn__glyph {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 40%;
+  height: 40%;
+}
+
+.ll-tbtn__glyph svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.ll-tbtn__es {
+  position: relative;
+  z-index: 1;
+  font-size: calc(10.5px * var(--tc-scale));
+  font-weight: 900;
+  letter-spacing: 0.09em;
+  text-shadow: 0 1px 2px var(--ll-ink);
+}
+
+.ll-tbtn__fill {
+  position: absolute;
+  inset: 0;
+  transform: scaleY(0);
+  transform-origin: 50% 100%;
+  background: linear-gradient(
+    0deg,
+    color-mix(in srgb, var(--ll-pickup) 88%, transparent),
+    color-mix(in srgb, var(--ll-pickup) 28%, transparent)
+  );
+  will-change: transform;
+  pointer-events: none;
+}
+
+.ll-tbtn[data-role='flip'] {
+  grid-area: 1 / 1;
+}
+.ll-tbtn[data-role='horn'] {
+  grid-area: 2 / 1;
+}
+.ll-tbtn[data-role='drift'] {
+  grid-area: 1 / 2;
+}
+.ll-tbtn[data-role='brake'] {
+  grid-area: 2 / 2;
+}
+.ll-tbtn[data-role='boost'] {
+  grid-area: 1 / 3;
+}
+.ll-tbtn[data-role='gas'] {
+  grid-area: 2 / 3;
+}
+
+.ll-touch[data-hand='left'] .ll-tbtn[data-role='flip'] {
+  grid-area: 1 / 3;
+}
+.ll-touch[data-hand='left'] .ll-tbtn[data-role='horn'] {
+  grid-area: 2 / 3;
+}
+.ll-touch[data-hand='left'] .ll-tbtn[data-role='boost'] {
+  grid-area: 1 / 1;
+}
+.ll-touch[data-hand='left'] .ll-tbtn[data-role='gas'] {
+  grid-area: 2 / 1;
+}
+
+.ll-tbtn--gas {
+  width: var(--tc-gas);
+  height: var(--tc-gas);
+  background: color-mix(in srgb, var(--ll-combo) 24%, var(--ll-hud-bg));
+  color: var(--ll-combo);
+}
+
+.ll-tbtn--gas.is-down {
+  background: color-mix(in srgb, var(--ll-combo) 62%, var(--ll-ink));
+  color: var(--ll-ink);
+}
+
+.ll-tbtn--brake {
+  width: var(--tc-brake);
+  height: var(--tc-brake);
+  background: color-mix(in srgb, var(--ll-danger) 20%, var(--ll-hud-bg));
+  color: color-mix(in srgb, var(--ll-danger) 70%, var(--ll-paper));
+}
+
+.ll-tbtn--brake.is-down {
+  background: color-mix(in srgb, var(--ll-danger) 60%, var(--ll-ink));
+  color: var(--ll-paper);
+}
+
+.ll-tbtn--drift {
+  width: var(--tc-drift);
+  height: var(--tc-drift);
+  color: var(--ll-player);
+}
+
+.ll-tbtn--drift.is-down {
+  background: color-mix(in srgb, var(--ll-player) 58%, var(--ll-ink));
+  color: var(--ll-ink);
+}
+
+.ll-tbtn--boost {
+  width: var(--tc-boost);
+  height: var(--tc-boost);
+  color: var(--ll-pickup);
+}
+
+.ll-tbtn--boost.is-down,
+.ll-tbtn--boost.is-live {
+  color: var(--ll-ink);
+}
+
+.ll-tbtn--boost.is-ready {
+  box-shadow:
+    0 5px 0 rgba(4, 9, 14, 0.5),
+    0 0 22px color-mix(in srgb, var(--ll-pickup) 70%, transparent);
+  animation: ll-touch-ready 1.15s ease-in-out infinite;
+  animation-play-state: var(--ll-anim-play);
+}
+
+@keyframes ll-touch-ready {
+  0%,
+  100% {
+    filter: brightness(1);
+  }
+  50% {
+    filter: brightness(1.35);
+  }
+}
+
+.ll-tbtn--small {
+  width: var(--tc-small);
+  height: var(--tc-small);
+  color: var(--ll-text-muted);
+}
+
+.ll-tbtn--small .ll-tbtn__glyph {
+  width: 46%;
+  height: 46%;
+}
+
+.ll-tbtn--util {
+  width: var(--tc-util);
+  height: var(--tc-util);
+  border-radius: var(--ll-r-md);
+  color: var(--ll-text);
+}
+
+.ll-tbtn--util .ll-tbtn__glyph {
+  width: 52%;
+  height: 52%;
+}
+
+.ll-tbtn--arrow {
+  width: var(--tc-arrow-w);
+  height: var(--tc-arrow-h);
+  border-radius: var(--ll-r-lg);
+  color: var(--ll-paper);
+}
+
+.ll-tbtn--arrow.is-down {
+  background: color-mix(in srgb, var(--ll-player) 55%, var(--ll-ink));
+  color: var(--ll-ink);
+}
+
+.ll-tbtn--arrow .ll-tbtn__glyph {
+  width: 44%;
+  height: 44%;
+}
+
+/* --------------------------------------------------------- reposition UI */
+
+.ll-touch.is-editing .ll-touch__steer,
+.ll-touch.is-editing .ll-touch__pad {
+  outline: 2px dashed var(--ll-player);
+  outline-offset: calc(var(--tc-gap) * 0.6);
+  border-radius: var(--ll-r-lg);
+  opacity: 1;
+}
+
+.ll-touch.is-configuring:not(.is-editing) .ll-touch__steer,
+.ll-touch.is-configuring:not(.is-editing) .ll-touch__pad {
+  pointer-events: none;
+}
+
+.ll-touch.is-editing .ll-touch__steer,
+.ll-touch.is-editing .ll-touch__pad {
+  cursor: move;
+}
+
+/* ----------------------------------------------------------- setup panel */
+
+.ll-tcfg {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: var(--pad) var(--pad-r) var(--pad-b) var(--pad-l);
+  background: var(--ll-scrim);
+  pointer-events: auto;
+}
+
+.ll-tcfg[hidden] {
+  display: none;
+}
+
+/* While repositioning, the panel gets out of the way: it keeps only its
+   actions, moves to the top, and stops swallowing pointers so the clusters
+   underneath can actually be dragged. */
+.ll-tcfg.is-editing {
+  background: transparent;
+  align-items: start;
+  pointer-events: none;
+}
+
+.ll-tcfg.is-editing .ll-tcfg__card {
+  pointer-events: auto;
+  width: min(92vw, calc(430px * var(--ll-ui-scale)));
+}
+
+.ll-tcfg.is-editing .ll-row {
+  display: none;
+}
+
+.ll-tcfg__card {
+  width: min(92vw, calc(560px * var(--ll-ui-scale)));
+  max-height: min(94vh, calc(680px * var(--ll-ui-scale)));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ll-tcfg__head {
+  display: flex;
+  align-items: center;
+  gap: var(--ll-sp-3);
+  padding: var(--ll-sp-3) var(--ll-sp-4);
+  border-bottom: 1px solid var(--ll-line);
+}
+
+.ll-tcfg__titles {
+  display: flex;
+  align-items: baseline;
+  gap: var(--ll-sp-3);
+  flex-wrap: wrap;
+}
+
+.ll-tcfg__title {
+  margin: 0;
+  font-size: var(--ll-fs-xl);
+  font-weight: 900;
+  letter-spacing: 0.12em;
+}
+
+.ll-tcfg__sub {
+  font-size: var(--ll-fs-2xs);
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: var(--ll-text-muted);
+}
+
+.ll-tcfg__head .ll-btn {
+  margin-left: auto;
+}
+
+.ll-tcfg__body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
+  padding: var(--ll-sp-2) var(--ll-sp-4) var(--ll-sp-4);
+}
+
+.ll-tcfg__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ll-sp-2);
+  padding-top: var(--ll-sp-4);
+}
+
+.ll-tcfg__hint {
+  margin-top: var(--ll-sp-3);
+  font-size: var(--ll-fs-xs);
+  color: var(--ll-text-muted);
+  line-height: 1.45;
+}
+
+/* ------------------------------------------------- rotate-device prompt */
+
+.ll-rotate {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: var(--pad) var(--pad-r) var(--pad-b) var(--pad-l);
+  background: rgba(4, 9, 14, 0.94);
+  pointer-events: auto;
+}
+
+.ll-rotate[hidden] {
+  display: none;
+}
+
+.ll-rotate__card {
+  width: min(90vw, calc(430px * var(--ll-ui-scale)));
+  padding: var(--ll-sp-5) var(--ll-sp-4);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--ll-sp-3);
+  text-align: center;
+}
+
+.ll-rotate__art {
+  width: calc(104px * var(--ll-ui-scale));
+  color: var(--ll-player);
+  animation: ll-rotate-tip 2.6s var(--ll-ease-standard) infinite;
+  animation-play-state: var(--ll-anim-play);
+}
+
+.ll-rotate__art svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+@keyframes ll-rotate-tip {
+  0%,
+  45%,
+  100% {
+    transform: rotate(0deg);
+  }
+  62%,
+  88% {
+    transform: rotate(-90deg);
+  }
+}
+
+.ll-rotate__es {
+  font-size: var(--ll-fs-xl);
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  color: var(--ll-player);
+}
+
+.ll-rotate__en {
+  font-size: var(--ll-fs-sm);
+  color: var(--ll-text-muted);
+  line-height: 1.4;
+}
+
+.ll-rotate__row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--ll-sp-2);
+  margin-top: var(--ll-sp-2);
+}
+
+/* =============================================================================
+   HUD reflow while the touch controls are up
+   -----------------------------------------------------------------------------
+   The bottom corners belong to the thumbs, so the passenger card moves to the
+   bottom centre, the speed chip lifts clear of the pedal cluster, and the boost
+   meter is dropped entirely — the TURBO button *is* the boost meter.
+   ========================================================================== */
+
+.ll-root[data-touch='1'] .ll-hud__tl {
+  left: calc(var(--pad-l) + var(--ll-touch-util-w, 60px));
+}
+
+.ll-root[data-touch='1'] .ll-toasts {
+  left: calc(var(--pad-l) + var(--ll-touch-util-w, 60px));
+}
+
+.ll-root[data-touch='1'] .ll-hud__bl {
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+  align-items: center;
+  max-width: min(56vw, 400px);
+}
+
+.ll-root[data-touch='1'] .ll-card {
+  width: min(56vw, calc(320px * var(--ll-ui-scale)));
+}
+
+.ll-root[data-touch='1'] .ll-card__blurb {
+  display: none;
+}
+
+.ll-root[data-touch='1'] .ll-boost {
+  display: none;
+}
+
+.ll-root[data-touch='1'] .ll-hud__br {
+  bottom: calc(var(--pad-b) + var(--ll-touch-pad-h, 0px) + var(--ll-sp-2));
+}
+
+.ll-root[data-touch='1'] .ll-speedo {
+  min-width: 0;
+  padding: var(--ll-sp-1) var(--ll-sp-3);
+}
+
+.ll-root[data-touch='1'] .ll-speedo__gauge {
+  display: none;
+}
+
+.ll-root[data-touch='1'] .ll-speedo__value {
+  font-size: var(--ll-fs-2xl);
+}
+
+.ll-root[data-touch='1'] .ll-nav__arrow {
+  top: 56%;
+}
+
+.ll-root[data-touch='1'] .ll-sub {
+  bottom: calc(var(--pad-b) + var(--ll-sp-2) + 86px * var(--ll-ui-scale));
+  width: min(46ch, 56vw);
+}
+
+/* =============================================================================
+   Phone-sized viewports
+   ========================================================================== */
+
+/* Anything driven by a finger gets finger-sized targets (WCAG 2.5.5 / HIG). */
+@media (pointer: coarse) {
+  .ll-root .ll-btn {
+    min-height: 44px;
+    padding: var(--ll-sp-3) var(--ll-sp-4);
+  }
+
+  .ll-root .ll-seg__opt {
+    min-height: 40px;
+    padding: var(--ll-sp-2) var(--ll-sp-3);
+  }
+
+  .ll-root .ll-tab {
+    min-height: 44px;
+  }
+
+  .ll-root .ll-slider {
+    height: calc(16px * var(--ll-ui-scale));
+  }
+
+  .ll-root .ll-slider::-webkit-slider-thumb {
+    width: calc(28px * var(--ll-ui-scale));
+    height: calc(28px * var(--ll-ui-scale));
+  }
+
+  .ll-root .ll-slider::-moz-range-thumb {
+    width: calc(28px * var(--ll-ui-scale));
+    height: calc(28px * var(--ll-ui-scale));
+  }
+
+  .ll-settings__body,
+  .ll-title__col,
+  .ll-pause__dialog,
+  .ll-results__panel,
+  .ll-title__panel {
+    touch-action: pan-y;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Keyboard/gamepad legends are noise on a device with neither. */
+  .ll-hints,
+  .ll-pause__hint,
+  .ll-results__hint {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .ll-title__col {
+    width: min(96vw, 640px);
+    padding-left: max(var(--ll-sp-4), var(--ll-safe-left));
+    padding-right: var(--ll-sp-4);
+  }
+
+  .ll-title__panel {
+    width: min(94vw, 520px);
+    max-height: calc(100% - var(--ll-sp-5));
+  }
+
+  .ll-settings__shell {
+    width: 96vw;
+    max-height: 94vh;
+  }
+
+  .ll-settings__head,
+  .ll-settings__body,
+  .ll-tabs,
+  .ll-settings__foot {
+    padding-left: var(--ll-sp-3);
+    padding-right: var(--ll-sp-3);
+  }
+
+  .ll-pause__dialog {
+    width: min(94vw, 440px);
+    padding: var(--ll-sp-4);
+  }
+
+  .ll-hud__tc {
+    max-width: 52vw;
+  }
+
+  .ll-sub {
+    width: min(48ch, 70vw);
+  }
+}
+
+/* Landscape phones: ~320–430 px of height for the whole game. */
+@media (max-height: 520px) {
+  .ll-card__blurb,
+  .ll-logo__tag,
+  .ll-logo__badge,
+  .ll-mi__en,
+  .ll-boost__label {
+    display: none;
+  }
+
+  .ll-hud__tl,
+  .ll-hud__tc,
+  .ll-hud__tr,
+  .ll-hud__bl,
+  .ll-hud__br {
+    gap: var(--ll-sp-2);
+  }
+
+  .ll-speedo__gauge {
+    width: calc(96px * var(--ll-ui-scale));
+    margin-bottom: calc(-10px * var(--ll-ui-scale));
+  }
+
+  .ll-speedo__value {
+    font-size: var(--ll-fs-2xl);
+  }
+
+  .ll-timer__digits {
+    font-size: var(--ll-fs-2xl);
+  }
+
+  .ll-settings__shell,
+  .ll-tcfg__card {
+    max-height: 96vh;
+  }
+
+  .ll-pause__dialog {
+    max-height: 92vh;
+    gap: var(--ll-sp-3);
+  }
+
+  .ll-rotate__art {
+    width: calc(72px * var(--ll-ui-scale));
+  }
+
+  /* The title screen must fit without scrolling: a menu the player has to
+     discover by dragging is a menu they never find. */
+  .ll-title__col {
+    gap: var(--ll-sp-2);
+    padding-top: max(var(--ll-sp-3), var(--ll-safe-top));
+    padding-bottom: max(var(--ll-sp-3), var(--ll-safe-bottom));
+  }
+
+  .ll-logo {
+    width: min(100%, calc(272px * var(--ll-ui-scale)));
+  }
+
+  .ll-logo__ribbon {
+    font-size: var(--ll-fs-2xs);
+    letter-spacing: 0.14em;
+  }
+
+  .ll-title__menu {
+    padding-top: var(--ll-sp-1);
+    padding-bottom: var(--ll-sp-1);
+  }
+
+  .ll-mi {
+    padding: calc(var(--ll-sp-1) + 1px) var(--ll-sp-3);
+    gap: var(--ll-sp-2);
+  }
+
+  .ll-mi__es {
+    font-size: var(--ll-fs-lg);
+  }
+
+  .ll-mi__hint {
+    display: none;
+  }
+
+  .ll-title__sep {
+    margin: var(--ll-sp-1) 0;
+  }
+
+  .ll-pause__stats {
+    gap: var(--ll-sp-2);
+  }
+}
+
+/* Very short — small phones held sideways are only ~320 px tall. */
+@media (max-height: 400px) {
+  .ll-logo {
+    width: min(100%, calc(224px * var(--ll-ui-scale)));
+  }
+
+  .ll-logo__ribbon,
+  .ll-title__brand .ll-logo__tag {
+    display: none;
+  }
+
+  .ll-mi__es {
+    font-size: var(--ll-fs-md);
+  }
+
+  .ll-timer__label,
+  .ll-fare__label {
     display: none;
   }
 }

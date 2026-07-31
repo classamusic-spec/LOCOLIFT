@@ -676,6 +676,9 @@ function buildProp(kind: CarriedProp, s: VariantSpec, rig: Rig, d: Detail): THRE
 
 /* --------------------------------------------------------------- variants */
 
+/** People the game always reads as elders — grey/white hair, every variant. */
+const ELDERS: ReadonlySet<string> = new Set(['abuela', 'abuelo-parrandero', 'tio-wiso']);
+
 /** Deterministic per-(archetype, variant) appearance. No RNG object needed. */
 function specFor(archetypeId: string, variant: number): VariantSpec {
   const v = visualFor(archetypeId);
@@ -698,7 +701,9 @@ function specFor(archetypeId: string, variant: number): VariantSpec {
   /* the whole melanin ramp, evenly walked, jittered so it is not a staircase */
   const skinT = clamp01((idx + 0.5) / VARIANTS_PER_ARCHETYPE + (r(1) - 0.5) * (0.9 / VARIANTS_PER_ARCHETYPE));
 
-  const elder = archetypeId === 'abuela' || (archetypeId === 'tour-guide' && r(9) > 0.7);
+  const elder =
+    ELDERS.has(archetypeId) ||
+    ((archetypeId === 'tour-guide' || archetypeId === 'fisherman') && r(9) > 0.7);
   const hairPool = elder ? GREY_HAIR_COLORS : HAIR_COLORS;
 
   return {

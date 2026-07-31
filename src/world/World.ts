@@ -34,6 +34,9 @@ import type { SkyWeather } from '../fx/LightingPresets';
 import { generateCityLayout, DISTRICT_BOUNDS, SEA_LEVEL } from './CityLayout';
 import { Buildings } from './Buildings';
 import { Coast } from './Coast';
+import { ElPerlo } from './ElPerlo';
+import { PlazaLife } from './PlazaLife';
+import { StreetDressing } from './StreetDressing';
 import { Mountains } from './Mountains';
 import { Pinones } from './Pinones';
 import { CoastProps } from './CoastProps';
@@ -145,6 +148,14 @@ export class World implements System, WorldAPI {
     // chinchorro strip east along the coast.
     this.registerLayer(new Mountains(opts.quality));
     this.registerLayer(new Pinones(opts.quality));
+
+    // El Perlo hangs on the seaward slope under the fort wall.
+    this.registerLayer(new ElPerlo(opts.quality));
+
+    // Street furniture and greenery last: both read the finished layout and
+    // share the material library's wetness uniform so rain reaches them too.
+    this.registerLayer(new PlazaLife(opts.quality, { materials: this.materials }));
+    this.registerLayer(new StreetDressing(opts.quality, { materials: this.materials }));
 
     this.weatherFx = new Weather({
       materials: this.materials,

@@ -37,6 +37,65 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   airRollRight: ['KeyD', 'ArrowRight'],
 };
 
+/**
+ * What a virtual (touch) controller writes into.
+ *
+ * The analogue fields are levels — held for as long as the finger is down. The
+ * three `*Pressed` fields are edges: the overlay sets them true, and the next
+ * `Input.poll` consumes them, so a tap fires exactly once no matter how many
+ * frames it spans.
+ */
+export interface TouchInputChannel {
+  /** true while a touch overlay is mounted and driving this channel */
+  active: boolean;
+  throttle: number;
+  brake: number;
+  steer: number;
+  handbrake: number;
+  boost: boolean;
+  horn: boolean;
+  lookBack: boolean;
+  pausePressed: boolean;
+  cameraPressed: boolean;
+  resetPressed: boolean;
+}
+
+/**
+ * The single touch channel every `Input` instance reads.
+ *
+ * The on-screen controls are built by the UI layer, which never sees the
+ * `Input` the game constructed in `main`. Sharing one module-level object is
+ * what connects the two without threading a reference through five constructors
+ * — and it stays a plain mutable record, so writing to it costs nothing.
+ */
+export const touchChannel: TouchInputChannel = {
+  active: false,
+  throttle: 0,
+  brake: 0,
+  steer: 0,
+  handbrake: 0,
+  boost: false,
+  horn: false,
+  lookBack: false,
+  pausePressed: false,
+  cameraPressed: false,
+  resetPressed: false,
+};
+
+/** Zero every level and edge on the shared channel (blur, unmount, portrait). */
+export function resetTouchChannel(): void {
+  touchChannel.throttle = 0;
+  touchChannel.brake = 0;
+  touchChannel.steer = 0;
+  touchChannel.handbrake = 0;
+  touchChannel.boost = false;
+  touchChannel.horn = false;
+  touchChannel.lookBack = false;
+  touchChannel.pausePressed = false;
+  touchChannel.cameraPressed = false;
+  touchChannel.resetPressed = false;
+}
+
 const EMPTY: InputState = {
   throttle: 0,
   brake: 0,
@@ -74,15 +133,8 @@ export class Input {
   /** when set, the test hook / cutscenes override real input */
   private override: Partial<InputState> | null = null;
 
-  /** virtual touch controls write here */
-  readonly touch = {
-    active: false,
-    throttle: 0,
-    brake: 0,
-    steer: 0,
-    handbrake: 0,
-    boost: false,
-  };
+  /** virtual touch controls write here — see `touchChannel` */
+  readonly touch: TouchInputChannel = touchChannel;
 
   private disposers: Array<() => void> = [];
 
@@ -196,12 +248,15 @@ export class Input {
     if (!usingGamepad && performance.now() - this.lastGamepadActivity < 1500) usingGamepad = true;
 
     /* ---- touch ---- */
-    if (this.touch.active) {
-      throttle = Math.max(throttle, this.touch.throttle);
-      brake = Math.max(brake, this.touch.brake);
-      if (Math.abs(this.touch.steer) > Math.abs(steer)) steer = this.touch.steer;
-      handbrake = Math.max(handbrake, this.touch.handbrake);
-      boost = boost || this.touch.boost;
+    const t = this.touch;
+    if (t.active) {
+      throttle = Math.max(throttle, t.throttle);
+      brake = Math.max(brake, t.brake);
+      if (Math.abs(t.steer) > Math.abs(steer)) steer = t.steer;
+      handbrake = Math.max(handbrake, t.handbrake);
+      boost = boost || t.boost;
+      horn = horn || t.horn;
+      lookBack = lookBack || t.lookBack;
     }
 
     /* ---- accessibility ---- */
@@ -229,12 +284,17 @@ export class Input {
     s.lookBack = lookBack;
     s.airPitch = clamp(airPitch, -1, 1);
     s.airRoll = clamp(airRoll, -1, 1);
-    s.pausePressed = this.edge('pause') || !!pad?.buttons[9]?.pressed;
-    s.cameraPressed = this.edge('camera') || !!pad?.buttons[8]?.pressed;
-    s.resetPressed = this.edge('reset') || !!pad?.buttons[3]?.pressed;
+    s.pausePressed = this.edge('pause') || !!pad?.buttons[9]?.pressed || t.pausePressed;
+    s.cameraPressed = this.edge('camera') || !!pad?.buttons[8]?.pressed || t.cameraPressed;
+    s.resetPressed = this.edge('reset') || !!pad?.buttons[3]?.pressed || t.resetPressed;
     s.usingGamepad = usingGamepad;
 
     if (this.override) Object.assign(s, this.override);
+
+    // Touch edges are consumed here: the overlay only has to set them true.
+    t.pausePressed = false;
+    t.cameraPressed = false;
+    t.resetPressed = false;
 
     this.pressedThisFrame.clear();
     return s;

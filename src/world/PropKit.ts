@@ -45,16 +45,16 @@ import type { CityLayout, Lot } from './WorldTypes';
 /** Plaza and street-dressing colours, sRGB. */
 export const DRESS = {
   /* limestone / cantera — the fountain, the coping, the bandstand plinth */
-  stoneLight: 0xe4dccb,
-  stoneMid: 0xcfc5b0,
-  stoneShade: 0xb0a692,
-  stoneDeep: 0x8f8674,
-  stoneWet: 0x9c9584,
+  stoneLight: 0xe6ddc9,
+  stoneMid: 0xc4b89f,
+  stoneShade: 0x9c9280,
+  stoneDeep: 0x7b7362,
+  stoneWet: 0x7f8a86,
 
   /* the inlaid paving of a formal plaza */
-  paveField: 0xd9d2c2,
-  paveBand: 0xa9b0b8,
-  paveDark: 0x6f7c8a,
+  paveField: 0xd3ccbb,
+  paveBand: 0x93a0ab,
+  paveDark: 0x5c6a78,
   paveWarm: 0xc9b79a,
   kerbStone: 0xbfb7a5,
 
@@ -302,21 +302,20 @@ function leafTexture(size: number): THREE.Texture {
     tone: number;
   }
   const leaves: Leaflet[] = [];
-  for (let i = 0; i < 78; i++) {
+  for (let i = 0; i < 300; i++) {
     leaves.push({
       x: rng.next(),
       y: rng.next(),
-      rx: rng.range(0.052, 0.115),
-      ry: rng.range(0.026, 0.058),
+      rx: rng.range(0.026, 0.056),
+      ry: rng.range(0.013, 0.03),
       rot: rng.range(0, Math.PI),
-      tone: rng.range(0.66, 1.0),
+      tone: rng.range(0.62, 1.0),
     });
   }
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       const u = x / size;
       const v = y / size;
-      let alpha = 0;
       let tone = 0.8;
       let best = 1e9;
       for (const l of leaves) {
@@ -333,19 +332,20 @@ function leafTexture(size: number): THREE.Texture {
         const ly = (-dx * s + dy * c) / l.ry;
         // a pointed oval: |x|^1.6 + |y|^2 <= 1
         const d = Math.pow(Math.abs(lx), 1.7) + ly * ly;
-        if (d <= 1) {
-          alpha = 1;
-          if (d < best) {
-            best = d;
-            tone = l.tone * (0.78 + 0.28 * (1 - d));
-          }
+        if (d < best) {
+          best = d;
+          tone = l.tone * (0.78 + 0.28 * clamp01(1 - d));
         }
       }
+      // A soft two-texel edge rather than a binary mask: a hard cut-out
+      // mip-maps into speckle at `alphaTest`, which is exactly the dithered
+      // fringe §8.25 calls out on close foliage.
+      const alpha = clamp01((1.04 - best) / 0.16);
       const i = (y * size + x) * 4;
       data[i] = Math.round(clamp(238 * tone, 0, 255));
       data[i + 1] = Math.round(clamp(248 * tone, 0, 255));
       data[i + 2] = Math.round(clamp(230 * tone, 0, 255));
-      data[i + 3] = alpha ? 255 : 0;
+      data[i + 3] = Math.round(alpha * 255);
     }
   }
   const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat, THREE.UnsignedByteType);
@@ -542,7 +542,7 @@ const WAVE_APPLY = /* glsl */ `
 /** Emissive ramp: 0 by day, 1 at night. Lamps, festoons, kiosk soffits. */
 const GLOW_FRAG = /* glsl */ `
 #include <emissivemap_fragment>
-totalEmissiveRadiance += diffuseColor.rgb * uDressNight * 2.35;
+totalEmissiveRadiance += diffuseColor.rgb * uDressNight * 3.4;
 `;
 
 /** The fountain. `aWater.x` 0 = pool surface, 1 = falling sheet, 2 = jet. */
@@ -604,17 +604,17 @@ const WATER_FRAG = /* glsl */ `
     float n = dressNoise( vWaterPos.xz * 2.6 + vec2( t * 0.35, -t * 0.28 ) )
       + dressNoise( vWaterPos.xz * 6.1 - vec2( t * 0.6, t * 0.42 ) ) * 0.5;
     float sparkle = smoothstep( 0.86, 1.18, n );
-    diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 1.0 ), sparkle * 0.55 );
-    diffuseColor.a *= 0.74 + sparkle * 0.26;
+    diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 1.0 ), sparkle * 0.5 );
+    diffuseColor.a *= 0.6 + sparkle * 0.3;
   } else if ( vWaterAux.x < 1.5 ) {
     float streak = dressNoise( vec2( vWaterAux.y * 26.0, vWaterPos.y * 5.5 - t * 5.2 ) );
-    float veil = smoothstep( 0.18, 0.9, streak );
-    diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 1.0 ), veil * 0.8 );
-    diffuseColor.a *= 0.34 + veil * 0.5;
+    float veil = smoothstep( 0.1, 0.92, streak );
+    diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 1.0 ), veil * 0.62 );
+    diffuseColor.a *= 0.14 + veil * 0.42;
   } else {
     float pulse = dressNoise( vec2( vWaterAux.z * 40.0, vWaterAux.y * 7.0 - t * 8.0 ) );
-    diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 1.0 ), 0.42 + pulse * 0.4 );
-    diffuseColor.a *= 0.5 + pulse * 0.35;
+    diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 1.0 ), 0.45 + pulse * 0.4 );
+    diffuseColor.a *= 0.55 + pulse * 0.35;
   }
 }
 `;
@@ -716,7 +716,7 @@ export class DressKit {
       roughness: 0.62,
       metalness: 0,
       side: THREE.DoubleSide,
-      alphaTest: 0.42,
+      alphaTest: 0.5,
       envMapIntensity: 0.6,
     });
     this.patch(this.foliage, 'loco/dress-foliage-v1', { wave: true, wet: 0.45 });
@@ -762,7 +762,7 @@ export class DressKit {
       roughness: 0.07,
       metalness: 0.02,
       transparent: true,
-      opacity: 0.9,
+      opacity: 0.72,
       depthWrite: false,
       side: THREE.DoubleSide,
       envMapIntensity: 1.5,
@@ -1556,6 +1556,7 @@ export function buildFountainStone(rng: RNG): THREE.BufferGeometry {
   polyDrum(g, 0, 0.37, 0, F.basinR, F.basinR - 0.06, F.copingY - 0.37, 8, stone, false);
   polyDrum(g, 0, 0.4, 0, F.poolR, F.poolR, 0.02, 8, DRESS.stoneWet, true);
   polyDrum(g, 0, 0.42, 0, F.poolR, F.poolR, F.copingY - 0.48, 8, shade(deep, 0.92), false);
+  polyDrum(g, 0, F.copingY - 0.14, 0, F.basinR + 0.02, F.basinR + 0.14, 0.06, 8, DRESS.stoneDeep, false);
   polyDrum(g, 0, F.copingY - 0.08, 0, F.basinR + 0.14, F.basinR + 0.12, 0.08, 8, DRESS.stoneLight, false);
   polyDrum(g, 0, F.copingY, 0, F.basinR + 0.12, F.poolR - 0.02, 0.02, 8, DRESS.stoneLight, false);
 
@@ -1583,7 +1584,7 @@ export function buildFountainStone(rng: RNG): THREE.BufferGeometry {
     const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
     const r = 0.74;
     p.set(Math.cos(a) * r, 0.82, Math.sin(a) * r, -a + Math.PI * 0.5);
-    carvedFigure(g, p, rng.range(1.52, 1.66), i % 2 === 0 ? DRESS.stoneLight : DRESS.stoneMid);
+    carvedFigure(g, p, rng.range(1.52, 1.66), i % 2 === 0 ? DRESS.stoneMid : DRESS.stoneShade);
   }
 
   const geo = g.build('aDress');
@@ -1605,7 +1606,7 @@ export function buildFountainWater(): THREE.BufferGeometry {
 
   // falling veils: an open drum from each bowl rim to the water below
   const veilDrum = (r: number, yTop: number, yBot: number, sides: number, key: number): void => {
-    _c2.setHex(DRESS.foam, THREE.SRGBColorSpace);
+    _c2.setHex(0xdff2f4, THREE.SRGBColorSpace);
     const ring0: number[] = [];
     const ring1: number[] = [];
     for (let i = 0; i <= sides; i++) {
@@ -1670,6 +1671,137 @@ export function buildFountainWater(): THREE.BufferGeometry {
 /* ========================================================================== *
  *  plaza furniture
  * ========================================================================== */
+
+/**
+ * Shade-tree crown — a *dome* of leaf cards, not a pancake.
+ *
+ * `ShackKit.buildShadeCanopy` is authored for a chinchorro's roadside scrub and
+ * puts eleven wide cards on one horizontal plane with UVs pinned to 0..1, which
+ * at plaza scale stretches a single leaflet to half a metre and reads as a
+ * painted slab. This one stacks four rings of narrower cards over a 5.6 m
+ * crown, tilts each card outward, caps the top with horizontal planes so the
+ * canopy reads from a balcony or the fort, and drives the UVs at a fixed
+ * **0.42 m per leaf tile** so the foliage grain is the same on a sapling and on
+ * a mature laurel.
+ */
+export function buildTreeCrown(rng: RNG, radius = 4.4, bloom = false): THREE.BufferGeometry {
+  const g = new GeoBuilder().enableAux();
+  const phase = rng.next();
+  const wave = new THREE.Vector3();
+  const TILE = 0.42;
+
+  /**
+   * One leaf card: a *standing* plane, width `w` tangential and height `h`
+   * vertical, leaning outward by `lean` radians. Standing cards are what give
+   * a crown volume — a ring of horizontal plates reads as a table top, which
+   * is exactly the failure this replaces.
+   */
+  const leafCard = (
+    cx: number,
+    cy: number,
+    cz: number,
+    dirX: number,
+    dirZ: number,
+    w: number,
+    h: number,
+    lean: number,
+    color: number,
+    sway: number,
+  ): void => {
+    const px = -dirZ;
+    const pz = dirX;
+    const outX = dirX * Math.sin(lean) * h;
+    const outZ = dirZ * Math.sin(lean) * h;
+    const topY = cy + Math.cos(lean) * h;
+    const a = new THREE.Vector3(cx - px * w * 0.5, cy, cz - pz * w * 0.5);
+    const b = new THREE.Vector3(cx + px * w * 0.5, cy, cz + pz * w * 0.5);
+    const c = new THREE.Vector3(b.x + outX, topY, b.z + outZ);
+    const d = new THREE.Vector3(a.x + outX, topY, a.z + outZ);
+    emit(a, b, c, d, w, h, color, sway, false);
+  };
+
+  /** A horizontal leaf plane — used sparingly, only to close the crown's top. */
+  const leafPlane = (cx: number, cy: number, cz: number, w: number, color: number, sway: number): void => {
+    const a = new THREE.Vector3(cx - w * 0.5, cy, cz - w * 0.5);
+    const b = new THREE.Vector3(cx + w * 0.5, cy, cz - w * 0.5);
+    const c = new THREE.Vector3(cx + w * 0.5, cy, cz + w * 0.5);
+    const d = new THREE.Vector3(cx - w * 0.5, cy, cz + w * 0.5);
+    emit(a, b, c, d, w, w, color, sway, true);
+  };
+
+  function emit(
+    a: THREE.Vector3,
+    b: THREE.Vector3,
+    c: THREE.Vector3,
+    d: THREE.Vector3,
+    w: number,
+    h: number,
+    color: number,
+    sway: number,
+    flat: boolean,
+  ): void {
+    _e1.subVectors(b, a);
+    _e2.subVectors(d, a);
+    _n.crossVectors(_e1, _e2);
+    if (_n.lengthSq() < 1e-12) return;
+    _n.normalize();
+    // lift the shading normal toward the sky so a crown lights like a mass,
+    // not like a fence — §8.25 wants two-sided foliage lighting
+    if (!flat) {
+      _n.set(_n.x * 0.55, 0.72, _n.z * 0.55).normalize();
+    }
+    _c2.setHex(color, THREE.SRGBColorSpace);
+    const su = w / TILE;
+    const sv = h / TILE;
+    const u0 = rng.next() * 3;
+    const v0 = rng.next() * 3;
+    wave.set(sway, phase, sway * 1.4);
+    const i0 = g.vertex(a.x, a.y, a.z, _n.x, _n.y, _n.z, u0, v0, _c2.r, _c2.g, _c2.b, wave.x, wave.y, wave.z);
+    const i1 = g.vertex(b.x, b.y, b.z, _n.x, _n.y, _n.z, u0 + su, v0, _c2.r, _c2.g, _c2.b, wave.x, wave.y, wave.z);
+    const i2 = g.vertex(c.x, c.y, c.z, _n.x, _n.y, _n.z, u0 + su, v0 + sv, _c2.r, _c2.g, _c2.b, wave.x, wave.y, wave.z);
+    const i3 = g.vertex(d.x, d.y, d.z, _n.x, _n.y, _n.z, u0, v0 + sv, _c2.r, _c2.g, _c2.b, wave.x, wave.y, wave.z);
+    g.quadIdx(i0, i1, i2, i3);
+  }
+
+  // §7.4 — the flamboyán in flower is the island's own tree; the rest are
+  // laurel and almendro greens
+  const greens = bloom
+    ? [0xe23c1f, 0xf05a22, 0xd4341c, 0x2f5e29, 0xef7433, 0x3d6b2c]
+    : [DRESS.leafDark, DRESS.leafMid, DRESS.leafLit, 0x37692c, 0x5a8d34];
+
+  /* Four rings of standing cards over a 5.5 m crown: a low skirt that hides
+     the branch ends, two mid bands leaning outward, and a small upright crown.
+     Each ring is rotated off the last so the silhouette is never regular. */
+  const rings: Array<{ y: number; r: number; n: number; w: number; h: number; lean: number }> = [
+    { y: 2.75, r: radius * 0.9, n: 10, w: 2.0, h: 1.9, lean: 0.42 },
+    { y: 3.35, r: radius * 1.0, n: 11, w: 2.1, h: 2.0, lean: 0.16 },
+    { y: 4.1, r: radius * 0.74, n: 8, w: 2.0, h: 1.9, lean: -0.16 },
+    { y: 4.75, r: radius * 0.38, n: 6, w: 1.8, h: 1.7, lean: -0.34 },
+  ];
+  for (let ri = 0; ri < rings.length; ri++) {
+    const ring = rings[ri];
+    const sway = 0.05 + ri * 0.032;
+    for (let i = 0; i < ring.n; i++) {
+      const a = (i / ring.n) * Math.PI * 2 + ri * 0.53 + rng.range(-0.16, 0.16);
+      const r = ring.r * rng.range(0.84, 1.12);
+      const cx = Math.cos(a) * r;
+      const cz = Math.sin(a) * r;
+      const cy = ring.y + rng.range(-0.26, 0.3);
+      const col = greens[(i * 3 + ri) % greens.length];
+      leafCard(cx, cy, cz, Math.cos(a), Math.sin(a), ring.w * rng.range(0.82, 1.18),
+        ring.h * rng.range(0.82, 1.18), ring.lean + rng.range(-0.18, 0.18), col, sway);
+    }
+  }
+  // three horizontal planes right at the top, so the crown reads from a
+  // balcony, an azotea or the fort ramparts
+  for (let i = 0; i < 3; i++) {
+    const a = (i / 3) * Math.PI * 2 + 0.7;
+    const r = radius * rng.range(0.2, 0.46);
+    leafPlane(Math.cos(a) * r, 6.05 + rng.range(-0.2, 0.25), Math.sin(a) * r,
+      radius * rng.range(0.62, 0.9), greens[i % greens.length], 0.12);
+  }
+  return g.build('aWave') ?? new THREE.BufferGeometry();
+}
 
 /**
  * Curved stone bench — the ring of seats around a fountain. Authored as a
@@ -1867,6 +1999,64 @@ export function buildPlanterBox(rng: RNG): THREE.BufferGeometry {
 }
 
 /**
+ * The workhorse doorway pot: a terracotta pot and a fan of leaf cards, at
+ * **46 triangles**.
+ *
+ * `ShackKit.buildPottedPlant` costs 93 — twice this — because it double-sides
+ * every blade and runs nine-sided drums. At the density the reference
+ * photographs actually show (a cluster beside most doorways, eight hundred of
+ * them across the district) that difference is 40 000 triangles, so this one is
+ * authored for the street rather than borrowed from the beach.
+ */
+export function buildDoorwayPot(rng: RNG, big = false): THREE.BufferGeometry {
+  const g = new GeoBuilder().enableAux();
+  const s = big ? 1.45 : 1;
+  const r = 0.22 * s;
+  polyDrum(g, 0, 0, 0, r * 0.76, r, 0.34 * s, 6, DRESS.terracotta, false);
+  polyDrum(g, 0, 0.34 * s, 0, r + 0.025 * s, r + 0.005 * s, 0.055 * s, 6, DRESS.terracottaPale, false);
+  polyDrum(g, 0, 0.36 * s, 0, r - 0.02 * s, r - 0.02 * s, 0.01, 6, DRESS.soil, true);
+  const blades = big ? 7 : 5;
+  const phase = rng.next();
+  const wave = new THREE.Vector3();
+  const cols = [DRESS.leafDark, DRESS.leafMid, DRESS.leafLit];
+  for (let i = 0; i < blades; i++) {
+    const ang = (i / blades) * Math.PI * 2 + rng.range(-0.28, 0.28);
+    const lean = rng.range(0.2, 0.62);
+    const len = rng.range(0.5, 0.92) * s;
+    const wdt = rng.range(0.24, 0.4) * s;
+    const y0 = 0.36 * s;
+    const dx = Math.cos(ang);
+    const dz = Math.sin(ang);
+    wave.set(0.26, phase, 0.34);
+    windCard(
+      g,
+      new THREE.Vector3(-dz * wdt * 0.34, y0, dx * wdt * 0.34),
+      new THREE.Vector3(dz * wdt * 0.34, y0, -dx * wdt * 0.34),
+      new THREE.Vector3(dx * len * lean + dz * wdt * 0.5, y0 + len, dz * len * lean - dx * wdt * 0.5),
+      new THREE.Vector3(dx * len * lean - dz * wdt * 0.5, y0 + len, dz * len * lean + dx * wdt * 0.5),
+      cols[i % 3],
+      wave,
+    );
+  }
+  return g.build('aWave') ?? new THREE.BufferGeometry();
+}
+
+/**
+ * Festoon bulb — a warm teardrop on a short flex, **20 triangles**. Six
+ * hundred of them hang over the district's streets, so the cheap version is
+ * the only version worth having.
+ */
+export function buildBulb(): THREE.BufferGeometry {
+  const g = new GeoBuilder();
+  // deliberately over-scale: a true 4 cm bulb is sub-pixel at 30 m, and these
+  // have to read as a strung light at speed, at night, through bloom
+  polyDrum(g, 0, -0.05, 0, 0.018, 0.024, 0.05, 3, 0x2a2a2a, false);
+  polyDrum(g, 0, -0.15, 0, 0.055, 0.042, 0.1, 4, 0xffd9a0, false);
+  polyDrum(g, 0, -0.2, 0, 0.045, 0.014, 0.05, 4, 0xffe6bc, true);
+  return g.build('aDress') ?? new THREE.BufferGeometry();
+}
+
+/**
  * A pot with a small fan palm in it — the *palmita* outside every doorway in
  * the reference photographs. Foliage material; carries the wind channel.
  */
@@ -1874,13 +2064,13 @@ export function buildPottedPalm(rng: RNG): THREE.BufferGeometry {
   const g = new GeoBuilder().enableAux();
   const still = new THREE.Vector3(0, 0.5, 0);
   const potR = rng.range(0.26, 0.32);
-  polyDrum(g, 0, 0, 0, potR * 0.8, potR, 0.42, 9, DRESS.terracotta, false);
-  polyDrum(g, 0, 0.42, 0, potR + 0.03, potR + 0.02, 0.06, 9, DRESS.terracottaPale, false);
-  polyDrum(g, 0, 0.44, 0, potR - 0.02, potR - 0.02, 0.02, 8, DRESS.soil);
+  polyDrum(g, 0, 0, 0, potR * 0.8, potR, 0.42, 6, DRESS.terracotta, false);
+  polyDrum(g, 0, 0.42, 0, potR + 0.03, potR + 0.02, 0.06, 6, DRESS.terracottaPale, false);
+  polyDrum(g, 0, 0.44, 0, potR - 0.02, potR - 0.02, 0.02, 6, DRESS.soil, true);
   void still;
   const h = rng.range(0.9, 1.5);
-  polyDrum(g, 0, 0.46, 0, 0.07, 0.045, h * 0.42, 6, 0x7b6a4e, false);
-  const fronds = rng.int(7, 10);
+  polyDrum(g, 0, 0.46, 0, 0.07, 0.045, h * 0.42, 4, 0x7b6a4e, false);
+  const fronds = rng.int(7, 9);
   const phase = rng.next();
   const wave = new THREE.Vector3();
   for (let i = 0; i < fronds; i++) {
@@ -1922,11 +2112,11 @@ export function buildHangingPlanter(rng: RNG, bloom: number): THREE.BufferGeomet
   // pot
   const potR = rng.range(0.15, 0.2);
   const potY = -0.28;
-  polyDrum(g, 0, potY, reach, potR * 0.72, potR, 0.24, 8, DRESS.terracotta, false);
-  polyDrum(g, 0, potY + 0.24, reach, potR + 0.02, potR, 0.03, 8, DRESS.terracottaPale);
-  // three chains
-  for (let i = 0; i < 3; i++) {
-    const a = (i / 3) * Math.PI * 2;
+  polyDrum(g, 0, potY, reach, potR * 0.72, potR, 0.24, 6, DRESS.terracotta, false);
+  polyDrum(g, 0, potY + 0.24, reach, potR + 0.02, potR, 0.03, 6, DRESS.terracottaPale, true);
+  // two chains
+  for (let i = 0; i < 2; i++) {
+    const a = i * Math.PI;
     strut(
       g,
       new THREE.Vector3(0, 0.07, reach * 0.9),
@@ -1938,7 +2128,7 @@ export function buildHangingPlanter(rng: RNG, bloom: number): THREE.BufferGeomet
   // trailing growth
   const wave = new THREE.Vector3();
   const phase = rng.next();
-  const cards = 6;
+  const cards = 5;
   for (let i = 0; i < cards; i++) {
     const a = (i / cards) * Math.PI * 2 + rng.range(-0.3, 0.3);
     const rad = rng.range(0.05, potR * 0.9);
@@ -1971,7 +2161,7 @@ export function buildProduceCrate(rng: RNG): THREE.BufferGeometry {
   const h = rng.range(0.13, 0.18);
   g.box(0, h, 0, w, h, d, DRESS.crate);
   g.box(0, h * 2 - 0.02, 0, w - 0.02, 0.03, d - 0.02, DRESS.crateDark);
-  const n = rng.int(4, 7);
+  const n = rng.int(3, 5);
   for (let i = 0; i < n; i++) {
     polyDrum(
       g,
@@ -1981,8 +2171,9 @@ export function buildProduceCrate(rng: RNG): THREE.BufferGeometry {
       0.055,
       0.045,
       0.075,
-      5,
+      4,
       rng.pick(DRESS.produce),
+      false,
     );
   }
   return g.build('aDress') ?? new THREE.BufferGeometry();
@@ -2046,13 +2237,13 @@ export function buildAboardFaces(key: DressSign): THREE.BufferGeometry {
  * Market stall: four poles, a striped canvas roof with a valance, a table of
  * goods. Cloth material (wind), so the awning breathes.
  */
-export function buildStall(rng: RNG): THREE.BufferGeometry {
+export function buildStall(rng: RNG, stripe?: number): THREE.BufferGeometry {
   const g = new GeoBuilder().enableAux();
   const w = 1.55;
   const d = 0.95;
   const h = 2.2;
   const still = new THREE.Vector3(0, 0, 0);
-  const stripe = rng.pick(DRESS.awning);
+  const awning = stripe ?? (rng.pick(DRESS.awning) as number);
   for (const sx of [-w, w]) {
     for (const sz of [-d, d]) {
       g.box(sx, h * 0.5, sz, 0.035, h * 0.5, 0.035, KIT.steel, 0, still);
@@ -2063,7 +2254,7 @@ export function buildStall(rng: RNG): THREE.BufferGeometry {
   for (let i = 0; i < bays; i++) {
     const x0 = -w + (2 * w * i) / bays;
     const x1 = -w + (2 * w * (i + 1)) / bays;
-    const col = i % 2 === 0 ? stripe : 0xf7f4ec;
+    const col = i % 2 === 0 ? awning : 0xf7f4ec;
     wave.set(0.03, 0.3, 0.22);
     g.quad(
       new THREE.Vector3(x0, h, -d - 0.12),
@@ -2178,9 +2369,9 @@ export function pavePattern(
   }
 
   // the rosette: alternating radiating wedges around the focus
-  const spokes = 24;
-  const rOuter = 8.6;
-  const rInner = 1.6;
+  const spokes = 32;
+  const rOuter = 7.6;
+  const rInner = 1.7;
   for (let i = 0; i < spokes; i++) {
     const a0 = (i / spokes) * Math.PI * 2;
     const a1 = ((i + 1) / spokes) * Math.PI * 2;

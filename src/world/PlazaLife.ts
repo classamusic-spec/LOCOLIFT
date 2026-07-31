@@ -28,9 +28,11 @@
  *
  * ## Cost
  *
- * Fourteen draw calls for every square in the city. Everything repeated is an
- * `InstancedMesh`; the fountain, bandstand, paving and kerbs merge into one
- * mesh per material. Distance culling is in the vertex shader — see
+ * Twelve draw calls for every square in the city. Anything repeated more than
+ * about thirty times is an `InstancedMesh`; everything rarer — the fountain,
+ * the bandstand, the paving, the kerbs, the flagpoles, the tree grates, the
+ * stone benches and the pigeons — merges into one mesh per material, because
+ * below that count a whole draw call costs more than the duplicated vertices. Distance culling is in the vertex shader — see
  * {@link ./PropKit} — so nothing here rasterises past `propDetailDistance`,
  * with the fountain and the bandstand given a landmark multiplier so the
  * square still reads from the other end of a *calle larga*.
@@ -46,8 +48,6 @@ import {
   buildBench,
   buildLampGlobe,
   buildLampPost,
-  buildPottedPlant,
-  buildShadeCanopy,
   buildShadeTrunk,
   buildTreeGrate,
   puertoRicanFlag,
@@ -62,10 +62,12 @@ import {
   buildFountainStone,
   buildFountainWater,
   buildKiosk,
+  buildDoorwayPot,
   buildPigeon,
   buildPlanterBox,
   buildPottedPalm,
   buildStoneBench,
+  buildTreeCrown,
   dressInstanced,
   islandKerb,
   mergeInstances,
@@ -87,6 +89,14 @@ const TIER: Record<QualityTier, { density: number; pigeons: number; canopyLayers
   ultra: { density: 1.22, pigeons: 38, canopyLayers: 2 },
 };
 
+/**
+ * The fountain is authored at documented proportions and then set up 18 % —
+ * an arcade adjustment. At true scale a 7 m basin reads as street furniture
+ * from a car at 45 m/s; the whole point of the thing is that it is the plaza's
+ * landmark, so it is sized to hold the centre of the frame.
+ */
+const FOUNTAIN_SCALE = 1.18;
+
 /** Landmarks stay visible far past the prop cut — they are the orientation. */
 const LANDMARK_CULL = 3.4;
 const FURNITURE_CULL = 1.15;
@@ -102,14 +112,11 @@ const MIN_ISLAND_CELLS = 26;
 interface Island {
   cells: number[];
   count: number;
-  /** cell index with the greatest clearance */
-  coreCell: number;
+  /** world position of the cell with the greatest clearance */
   coreX: number;
   coreZ: number;
   /** metres from the core to the nearest blocked cell */
   coreR: number;
-  minX: number;
-  minZ: number;
 }
 
 interface FreeGrid {
@@ -145,7 +152,6 @@ export class PlazaLife implements WorldLayer {
   private quality: QualityTier;
   private options: PlazaLifeOptions;
   private kit: DressKit | null = null;
-  private guard: PlacementGuard | null = null;
   private physics: WorldOpts['physics'] | null = null;
 
   private geometries: THREE.BufferGeometry[] = [];
@@ -156,6 +162,7 @@ export class PlazaLife implements WorldLayer {
   /* placement accumulators, drained in `finish` */
   private trees: DressPlacement[] = [];
   private canopies: DressPlacement[] = [];
+  private blooms: DressPlacement[] = [];
   private grates: DressPlacement[] = [];
   private benches: DressPlacement[] = [];
   private stoneBenches: DressPlacement[] = [];
@@ -186,7 +193,6 @@ export class PlazaLife implements WorldLayer {
     kit.useWetness(this.options.materials);
     this.kit = kit;
     const guard = new PlacementGuard(layout);
-    this.guard = guard;
     const rng = opts.rng.fork(0x91a2_a17d);
 
     const areas = layout.areas.filter((a) => isSquare(a));
@@ -339,12 +345,9 @@ export class PlazaLife implements WorldLayer {
       out.push({
         cells,
         count: cells.length,
-        coreCell: core,
         coreX: g.x(core),
         coreZ: g.z(core),
         coreR: g.dist[core],
-        minX: g.minX,
-        minZ: g.minZ,
       });
     }
     return out;
@@ -379,17 +382,17 @@ export class PlazaLife implements WorldLayer {
     const stone = buildFountainStone(rng.fork(0x1f0c));
     const water = buildFountainWater();
     this.solid.open(x, y, z, LANDMARK_CULL);
-    appendGeometry(this.solid, stone, x, y, z);
+    appendGeometry(this.solid, stone, x, y, z, 0, FOUNTAIN_SCALE, FOUNTAIN_SCALE);
     this.solid.close();
     this.water.open(x, y, z, LANDMARK_CULL);
-    appendGeometry(this.water, water, x, y, z);
+    appendGeometry(this.water, water, x, y, z, 0, FOUNTAIN_SCALE, FOUNTAIN_SCALE);
     this.water.close();
     stone.dispose();
     water.dispose();
     this._stats.fountains++;
 
     // ring of stone bench arcs, with two gaps to walk through
-    const R = FOUNTAIN.stepR + 1.65;
+    const R = FOUNTAIN.stepR * FOUNTAIN_SCALE + 1.7;
     for (let i = 0; i < 8; i++) {
       if (i === 2 || i === 6) continue;
       const a = (i / 8) * Math.PI * 2 + Math.PI / 8;
@@ -457,8 +460,8 @@ export class PlazaLife implements WorldLayer {
       this.bodies.push(
         this.physics.createBody({
           kind: 'static',
-          shape: { type: 'cylinder', radius: FOUNTAIN.basinR + 0.16, halfHeight: 0.75 },
-          position: new THREE.Vector3(x, y + 0.75, z),
+          shape: { type: 'cylinder', radius: FOUNTAIN.basinR * FOUNTAIN_SCALE + 0.18, halfHeight: 0.85 },
+          position: new THREE.Vector3(x, y + 0.85, z),
           friction: 0.9,
           restitution: 0.05,
           group: GROUP.WORLD,
@@ -528,9 +531,13 @@ export class PlazaLife implements WorldLayer {
     hasFountain: boolean,
     hasKiosk: boolean,
   ): void {
-    const density = TIER[this.quality].density * (this.options.density ?? 1);
+    // the market floor is a working square: it carries a fringe of shade but
+    // the middle has to stay clear for the stalls StreetDressing lays out
+    const market = area.zone === 'marketRow';
+    const density = TIER[this.quality].density * (this.options.density ?? 1) * (market ? 0.45 : 1);
     const taken: Array<{ x: number; z: number; r: number }> = [];
-    if (hasFountain) taken.push({ x: island.coreX, z: island.coreZ, r: FOUNTAIN.stepR + 7.4 });
+    if (market) taken.push({ x: area.center.x, z: area.center.z, r: 22 });
+    if (hasFountain) taken.push({ x: island.coreX, z: island.coreZ, r: FOUNTAIN.stepR * FOUNTAIN_SCALE + 7.6 });
     if (hasKiosk) taken.push({ x: island.coreX, z: island.coreZ, r: 9.2 });
 
     const fits = (x: number, z: number, r: number): boolean => {
@@ -544,30 +551,32 @@ export class PlazaLife implements WorldLayer {
     const pick = (): number => cells[rng.int(0, cells.length - 1)];
 
     // — shade trees, the single most valuable thing in a tropical square —
-    const treeBudget = Math.round(clamp((island.count / 46) * density, 0, 9));
+    const treeBudget = Math.round(clamp((island.count / 26) * density, 0, 14));
     const layers = TIER[this.quality].canopyLayers;
     for (let n = 0, tries = 0; n < treeBudget && tries < treeBudget * 26; tries++) {
       const k = pick();
       const x = g.x(k) + rng.range(-0.35, 0.35);
       const z = g.z(k) + rng.range(-0.35, 0.35);
-      if (!this.clearAt(g, x, z, 3.1)) continue;
-      if (!fits(x, z, 5.4)) continue;
+      if (!this.clearAt(g, x, z, 2.6)) continue;
+      if (!fits(x, z, 4.4)) continue;
       const y = layout.groundHeight(x, z) + 0.014;
       const s = rng.range(0.88, 1.28);
       const yaw = rng.range(0, Math.PI * 2);
       this.trees.push({ x, y, z, yaw, scale: s, cull: LANDMARK_CULL });
       this.grates.push({ x, y: y + 0.002, z, yaw, scale: s * 1.05, cull: FURNITURE_CULL });
+      // roughly one tree in four is a flamboyán in flower (§7.4)
+      const list = rng.bool(0.26) ? this.blooms : this.canopies;
       for (let l = 0; l < layers; l++) {
-        this.canopies.push({
+        list.push({
           x,
-          y: y + l * 0.62,
+          y: y + l * 0.48,
           z,
           yaw: yaw + l * 1.9,
-          scale: s * (l === 0 ? 1 : 0.82),
+          scale: s * (l === 0 ? 1 : 0.78),
           cull: LANDMARK_CULL,
         });
       }
-      taken.push({ x, z, r: 5.2 });
+      taken.push({ x, z, r: 4.6 });
       n++;
       this._stats.trees++;
     }
@@ -619,7 +628,6 @@ export class PlazaLife implements WorldLayer {
         islandKerb(this.paving, poly, (px, pz) => layout.groundHeight(px, pz), LANDMARK_CULL);
       }
     }
-    void area;
   }
 
   /* ------------------------------------------------------------ perimeter */
@@ -693,7 +701,7 @@ export class PlazaLife implements WorldLayer {
     // Low-count props merge into the shared solid mesh rather than paying a
     // draw call each; every merged prop still carries its own cluster anchor,
     // so the vertex cull treats it exactly like an instance.
-    mergeInstances(this.solid, buildStoneBench(FOUNTAIN.stepR + 1.65, 0.62), this.stoneBenches, true);
+    mergeInstances(this.solid, buildStoneBench(FOUNTAIN.stepR * FOUNTAIN_SCALE + 1.7, 0.6), this.stoneBenches, true);
     mergeInstances(this.solid, buildFlagpole(8.6), this.poles, true);
     mergeInstances(this.solid, buildTreeGrate(), this.grates, true);
     mergeInstances(this.solid, buildPlanterBox(rng.fork(0x13)), this.planters, true);
@@ -703,20 +711,27 @@ export class PlazaLife implements WorldLayer {
 
     this.addInstanced(buildShadeTrunk(rng.fork(0x11)), kit.solid, this.trees, 'plaza/treeTrunk');
     this.addInstanced(
-      buildShadeCanopy(rng.fork(0x12), true),
+      buildTreeCrown(rng.fork(0x12), 4.4, false),
       kit.foliage,
       this.canopies,
       'plaza/treeCanopy',
     );
+    this.addInstanced(
+      buildTreeCrown(rng.fork(0x16), 4.1, true),
+      kit.foliage,
+      this.blooms,
+      'plaza/treeBloom',
+    );
     this.addInstanced(buildBench(), kit.solid, this.benches, 'plaza/bench');
     this.addInstanced(buildLampPost(true), kit.solid, this.lamps, 'plaza/lampPost');
     this.addInstanced(buildLampGlobe(true), kit.glow, this.lamps, 'plaza/lampGlobe');
-    this.addInstanced(buildPottedPlant(rng.fork(0x14), true), kit.foliage, this.pots, 'plaza/pot');
+    this.addInstanced(buildDoorwayPot(rng.fork(0x14), true), kit.foliage, this.pots, 'plaza/pot');
     this.addInstanced(buildPottedPalm(rng.fork(0x15)), kit.foliage, this.palms, 'plaza/palm');
 
     // the accumulators are only needed while building
     this.trees = [];
     this.canopies = [];
+    this.blooms = [];
     this.grates = [];
     this.benches = [];
     this.stoneBenches = [];
@@ -811,7 +826,6 @@ export class PlazaLife implements WorldLayer {
     this.bodies.length = 0;
     this.kit?.release(this);
     this.kit = null;
-    this.guard = null;
     this.group.removeFromParent();
     this.group.clear();
   }
