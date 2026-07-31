@@ -316,6 +316,8 @@ export class JeepModel {
 
   constructor(quality: QualityTier = 'high') {
     this.object3d.name = 'Jeep';
+    this.chassis.name = 'jeepChassis';
+    this.beams.name = 'headlightBeams';
     this.object3d.add(this.chassis);
 
     /* ---------------------------------------------------------- materials */
@@ -1002,34 +1004,39 @@ export class JeepModel {
     const R = SUSPENSION.wheelRadius;
     const W = SUSPENSION.wheelWidth;
 
-    /* --- tyre carcass + tread --- */
+    /* --- tyre carcass + tread ---
+     * The lug BOXES define the rolling surface, so their outermost CORNER — not
+     * their face — has to land exactly on the physics wheel radius. Get this
+     * wrong and the tread visibly saws through the cobblestones. */
+    const lugRadial = 0.045; // half-height, sticks out of the carcass
+    const lugTangential = 0.05; // half-depth around the circumference
+    const lugCornerR = Math.hypot(lugRadial, lugTangential);
+    /* +12 mm so the lugs bed very slightly into the road rather than hovering
+     * over it — a loaded tyre squashes, and a visible gap reads as broken */
+    const lugCentreR = R - lugCornerR + 0.012;
+    const carcassR = lugCentreR - lugRadial * 0.95; // lug roots stay buried
+
     const tyre = new Shell();
-    tyre.add(cyl(R - 0.035, R - 0.035, W, 20, 0, 0, 0, 'x'));
-    /* shoulders */
-    tyre.add(cyl(R - 0.09, R - 0.09, W + 0.03, 16, 0, 0, 0, 'x'));
+    tyre.add(cyl(carcassR, carcassR, W, 20, 0, 0, 0, 'x'));
+    /* sidewalls, slightly wider and smaller — the classic bulged profile */
+    tyre.add(cyl(carcassR - 0.045, carcassR - 0.045, W + 0.03, 16, 0, 0, 0, 'x'));
 
     const blocks = 16;
     for (let i = 0; i < blocks; i++) {
       const a = (i / blocks) * Math.PI * 2;
-      const ca = Math.cos(a);
-      const sa = Math.sin(a);
       /* two staggered rows of chunky lugs */
       for (let row = 0; row < 2; row++) {
         const off = (row === 0 ? -1 : 1) * W * 0.22;
-        const stagger = row === 0 ? 0 : Math.PI / blocks;
-        const aa = a + stagger;
-        const r = R - 0.012;
-        const g = new THREE.BoxGeometry(W * 0.42, 0.075, 0.115);
+        const aa = a + (row === 0 ? 0 : Math.PI / blocks);
+        const g = new THREE.BoxGeometry(W * 0.42, lugRadial * 2, lugTangential * 2);
         g.rotateX(-aa);
-        g.translate(off, Math.sin(aa) * r, Math.cos(aa) * r);
+        g.translate(off, Math.sin(aa) * lugCentreR, Math.cos(aa) * lugCentreR);
         tyre.add(g);
-        void ca;
-        void sa;
       }
       /* sidewall knobs for silhouette */
       const s = new THREE.BoxGeometry(0.035, 0.05, 0.09);
       s.rotateX(-a);
-      s.translate(W * 0.5, Math.sin(a) * (R - 0.09), Math.cos(a) * (R - 0.09));
+      s.translate(W * 0.5, Math.sin(a) * (carcassR - 0.05), Math.cos(a) * (carcassR - 0.05));
       tyre.addMirrored(s);
     }
 

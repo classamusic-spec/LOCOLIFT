@@ -207,6 +207,16 @@ export class PhysicsWorld implements PhysicsWorldAPI {
       colDesc.setMass(desc.mass);
     }
 
+    // Collider pose is relative to the parent body, so this shifts the shape
+    // without moving the origin the vehicle code steers by.
+    if (desc.colliderOffset) {
+      colDesc.setTranslation(
+        desc.colliderOffset.x,
+        desc.colliderOffset.y,
+        desc.colliderOffset.z,
+      );
+    }
+
     const collider = this.world.createCollider(colDesc, rb);
 
     // A lowered centre of mass is what stops an arcade car rolling over; apply

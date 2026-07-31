@@ -510,6 +510,123 @@ export function formatInt(value: number): string {
   return neg ? `-${s}` : s;
 }
 
+/* ------------------------------------------------------ menu accessibility */
+
+/** Directional intent, from either the keyboard or a gamepad. */
+export type NavAction = 'up' | 'down' | 'left' | 'right' | 'confirm' | 'back';
+
+/** A full-screen UI surface that can take directional input. */
+export interface NavigableScreen {
+  readonly el: HTMLElement;
+  /** Return true when the action was consumed (the caller preventDefaults). */
+  handleNav(action: NavAction): boolean;
+  focusFirst(): void;
+}
+
+const FOCUSABLE =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), ' +
+  'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/** Visible, enabled, focusable descendants in document order. */
+export function focusables(container: HTMLElement): HTMLElement[] {
+  const out: HTMLElement[] = [];
+  const list = container.querySelectorAll<HTMLElement>(FOCUSABLE);
+  for (let i = 0; i < list.length; i++) {
+    const node = list[i];
+    if (node.hasAttribute('inert')) continue;
+    if (node.closest('[hidden], [aria-hidden="true"], .is-gone')) continue;
+    out.push(node);
+  }
+  return out;
+}
+
+/**
+ * Roving focus + Tab wrap for one menu surface.
+ *
+ * Deliberately *not* a global key handler: `UISystem` owns the single window
+ * listener and routes into the active screen, so two mounted surfaces can never
+ * fight over the same key.
+ */
+export class MenuNavigator {
+  constructor(private readonly container: HTMLElement) {}
+
+  items(): HTMLElement[] {
+    return focusables(this.container);
+  }
+
+  focusFirst(): void {
+    const items = this.items();
+    const preferred = items.find((n) => n.dataset.autofocus === '1') ?? items[0];
+    preferred?.focus();
+  }
+
+  /** Move focus by `delta` positions, wrapping at both ends. */
+  move(delta: number): boolean {
+    const items = this.items();
+    if (items.length === 0) return false;
+    const active = document.activeElement as HTMLElement | null;
+    let i = active ? items.indexOf(active) : -1;
+    if (i < 0) {
+      items[delta > 0 ? 0 : items.length - 1].focus();
+      return true;
+    }
+    i = (i + delta + items.length) % items.length;
+    items[i].focus();
+    return true;
+  }
+
+  /** Keep Tab inside the surface. Call from a keydown handler. */
+  trapTab(e: KeyboardEvent): void {
+    const items = this.items();
+    if (items.length === 0) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = document.activeElement as HTMLElement | null;
+    if (e.shiftKey && (active === first || !this.container.contains(active))) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && (active === last || !this.container.contains(active))) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
+  /** Gamepad left/right → nudge whatever is focused. */
+  adjustFocused(dir: -1 | 1): boolean {
+    const active = document.activeElement as HTMLElement | null;
+    if (!active || !this.container.contains(active)) return false;
+    if (active instanceof HTMLInputElement && active.type === 'range') {
+      const step = Number(active.step) || 1;
+      const next = clamp(
+        Number(active.value) + step * dir,
+        Number(active.min) || 0,
+        Number(active.max) || 1,
+      );
+      if (next === Number(active.value)) return true;
+      active.value = String(next);
+      active.dispatchEvent(new Event('input', { bubbles: true }));
+      active.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }
+    const group = active.closest<HTMLElement>('[data-segmented]');
+    if (group) {
+      const options = Array.from(group.querySelectorAll<HTMLElement>('[role="radio"]'));
+      const i = options.indexOf(active);
+      if (i >= 0) {
+        const next = options[(i + dir + options.length) % options.length];
+        next.focus();
+        next.click();
+        return true;
+      }
+    }
+    if (active.getAttribute('role') === 'switch') {
+      active.click();
+      return true;
+    }
+    return false;
+  }
+}
+
 /** `M:SS` above a minute, `SS` below it — the arcade convention. */
 export function formatClock(seconds: number): string {
   const t = Math.max(0, seconds);

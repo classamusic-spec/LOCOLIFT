@@ -48,6 +48,12 @@ export interface BodyDesc {
   ccd?: boolean;
   /** centre-of-mass offset from the body origin, metres */
   centerOfMass?: THREE.Vector3;
+  /**
+   * Collider translation relative to the body origin, metres. The vehicle
+   * keeps its body origin at ride height while sitting the chassis box higher,
+   * so this must be honoured or ground clearance is wrong under compression.
+   */
+  colliderOffset?: THREE.Vector3;
   /** opaque tag surfaced in collision callbacks */
   userData?: unknown;
 }
