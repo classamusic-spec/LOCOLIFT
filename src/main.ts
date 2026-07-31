@@ -24,6 +24,10 @@ import { World, type WeatherKind } from './world/World';
 import { Vehicle } from './vehicle/Vehicle';
 import { ChaseCamera } from './camera/ChaseCamera';
 import { AudioSystem } from './audio/AudioSystem';
+import { TrafficSystem } from './traffic/TrafficSystem';
+import { PedestrianSystem } from './traffic/PedestrianSystem';
+import { isVehicleId, DEFAULT_VEHICLE_ID } from './vehicle/VehicleRoster';
+import type { VehicleId } from './vehicle/VehicleRoster';
 import { UISystem } from './ui/UISystem';
 import { MissionSystem } from './passengers/MissionSystem';
 import { ComboSystem } from './scoring/ComboSystem';
@@ -66,7 +70,15 @@ declare global {
   }
 }
 
+/** Boot-stage timing, so a hang or a slow build is attributable at a glance. */
+function stage(name: string, t0: number): number {
+  const now = performance.now();
+  console.info(`[boot] ${name}: ${Math.round(now - t0)}ms`);
+  return now;
+}
+
 async function boot(): Promise<void> {
+  let t = performance.now();
   const canvas = document.getElementById('gl') as HTMLCanvasElement | null;
   if (!canvas) throw new Error('missing #gl canvas');
 
@@ -83,7 +95,9 @@ async function boot(): Promise<void> {
   const input = new Input();
   engine.setInput(input.state);
 
+  t = stage('engine', t);
   const physics = await PhysicsWorld.create(CONFIG.gravity);
+  t = stage('physics', t);
 
   const world = await World.create({
     scene: engine.scene,
@@ -92,15 +106,28 @@ async function boot(): Promise<void> {
     quality: settingsStore.current.quality,
   });
   await world.whenReady();
+  t = stage('world', t);
 
   const spawn = world.spawnPoint;
+  // Saved choice wins; ?vehicle=bus overrides it for testing and captures.
+  const urlVehicle = new URLSearchParams(location.search).get('vehicle');
+  const savedVehicle = (save.current as { vehicleId?: string }).vehicleId;
+  const vehicleId: VehicleId = isVehicleId(urlVehicle)
+    ? urlVehicle
+    : isVehicleId(savedVehicle)
+      ? savedVehicle
+      : DEFAULT_VEHICLE_ID;
+
   const vehicle = Vehicle.create({
     scene: engine.scene,
     physics,
     position: spawn.pos,
     heading: spawn.heading,
     quality: settingsStore.current.quality,
+    vehicleId,
   });
+
+  t = stage('vehicle', t);
 
   const camera = new ChaseCamera(engine.camera, vehicle, physics, engine.bus);
 
@@ -108,12 +135,16 @@ async function boot(): Promise<void> {
   audio.setVehicle(vehicle);
   audio.setWorld(world);
 
+  t = stage('audio', t);
+
   const ui = new UISystem({
     settings: settingsStore,
     save,
     vehicle,
     world,
   });
+
+  t = stage('ui', t);
 
   /* ---- gameplay ---- */
   const combo = new ComboSystem({ bus: engine.bus, vehicle });
@@ -142,9 +173,34 @@ async function boot(): Promise<void> {
   };
   ui.onAction = (a) => director.handleUIAction(a);
 
+  t = stage('gameplay', t);
+
+  const traffic = new TrafficSystem({
+    scene: engine.scene,
+    physics,
+    world,
+    player: vehicle,
+    rng: new RNG(CONFIG.worldSeed ^ 0x7a4c),
+    quality: settingsStore.current.quality,
+  });
+  const pedestrians = new PedestrianSystem({
+    scene: engine.scene,
+    physics,
+    world,
+    player: vehicle,
+    rng: new RNG(CONFIG.worldSeed ^ 0x9e11),
+    quality: settingsStore.current.quality,
+    hazard: traffic.hazard,
+  });
+
+  t = stage('traffic+peds', t);
+
   engine.add(world);
   engine.add(vehicle);
   engine.add(new PhysicsStepper(physics));
+  // Traffic before missions so near-miss and blip data is current this frame.
+  engine.add(traffic);
+  engine.add(pedestrians);
   engine.add(combo);
   engine.add(missions);
   engine.add(score);
@@ -161,6 +217,7 @@ async function boot(): Promise<void> {
   });
 
   await engine.initSystems();
+  t = stage('initSystems', t);
   camera.snapToTarget();
   engine.timeOfDay = 15.5;
   engine.start();

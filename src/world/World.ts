@@ -34,6 +34,8 @@ import type { SkyWeather } from '../fx/LightingPresets';
 import { generateCityLayout, DISTRICT_BOUNDS, SEA_LEVEL } from './CityLayout';
 import { Buildings } from './Buildings';
 import { Coast } from './Coast';
+import { Mountains } from './Mountains';
+import { Pinones } from './Pinones';
 import { CoastProps } from './CoastProps';
 import { Ocean } from './Ocean';
 import { Vegetation } from './Vegetation';
@@ -138,6 +140,11 @@ export class World implements System, WorldAPI {
     this.registerLayer(this.coast);
     this.registerLayer(new Vegetation(opts.quality));
     this.registerLayer(new CoastProps(opts.quality));
+
+    // Distant cordillera first so it is behind everything, then the Pinones
+    // chinchorro strip east along the coast.
+    this.registerLayer(new Mountains(opts.quality));
+    this.registerLayer(new Pinones(opts.quality));
 
     this.weatherFx = new Weather({
       materials: this.materials,

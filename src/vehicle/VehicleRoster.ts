@@ -82,7 +82,7 @@ export const VEHICLE_ROSTER: readonly VehicleDefinition[] = [
 ];
 
 /** The vehicle a fresh save starts in. */
-export const DEFAULT_VEHICLE_ID: VehicleId = 'bus';
+export const DEFAULT_VEHICLE_ID: VehicleId = 'jeep';
 
 /** Every id, in roster order. */
 export const VEHICLE_IDS: readonly VehicleId[] = VEHICLE_ROSTER.map((v) => v.id);
