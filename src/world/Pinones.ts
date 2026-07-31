@@ -44,7 +44,7 @@
 import * as THREE from 'three';
 import { QUALITY_BUDGET } from '../core/Config';
 import type { POI, QualityTier, RoadGraph } from '../core/types';
-import { clamp, clamp01, lerp, smoothstep } from '../core/MathUtils';
+import { clamp, clamp01, lerp, smoothstep, smootherstep } from '../core/MathUtils';
 import { RNG } from '../core/RNG';
 import { GROUP } from '../physics/PhysicsTypes';
 import type { BodyHandle, PhysicsWorldAPI } from '../physics/PhysicsTypes';
@@ -118,6 +118,33 @@ const STEP = 4;
 const HALF_ROAD = 5.6;
 /** Where the gravel shoulder ends and the apron begins. */
 const SHOULDER = 6.7;
+
+/**
+ * Inland cut shelf. The mainland behind Piñones climbs to a 42 m plateau at
+ * roughly 1 : 2.5, which would put a green wall on the driver's shoulder and
+ * leave nowhere for the inland chinchorros to stand. So the layer cuts a
+ * near-level bench out of the hillside, `CUT_V` metres from the centreline,
+ * and blends onto the natural slope over `CUT_BLEND`. That bench is the gravel
+ * parking, the inland shack row and the dune scrub.
+ */
+const CUT_V = 13;
+const CUT_BLEND = 25;
+/** Outermost column of the inland apron — past this the base terrain resumes. */
+const BLUFF_V = -152;
+
+/**
+ * Where the mainland ends and the barrier spit begins. East of this the road
+ * runs on a true sand spit: Atlantic on the seaward side, the shallow mangrove
+ * lagoon on the inland side — which is both the real geography of PR-187 and
+ * the only honest thing to draw, because the district's own terrain mesh stops
+ * at x = 720 and there is open sea under everything past it.
+ */
+const SPIT_X0 = 690;
+const SPIT_X1 = 806;
+/** Lagoon: where its shore sits, how deep its floor goes. */
+const LAGOON_SHORE = -44;
+const LAGOON_FLOOR = -2.6;
+const LAGOON_BED = -104;
 /** Depth of water the beach's waterline aims for — this is what keeps the surf
  *  over the turquoise part of the ocean's bathymetry rather than the deep blue. */
 const WATER_TARGET = -1.2;
@@ -128,9 +155,10 @@ const SHELF_DEPTH = -3.4;
 
 /** Road crests — free air at speed. `[station metres, height, width]`. */
 const HUMPS: ReadonlyArray<readonly [number, number, number]> = [
-  [148, 1.5, 21],
-  [352, 1.15, 18],
-  [560, 1.65, 24],
+  [150, 2.1, 19],
+  [354, 1.6, 16],
+  [562, 2.35, 22],
+  [712, 1.75, 17],
 ];
 
 /** Berm gaps: the sand is open to the road here. `[station, half-width]`. */
@@ -142,13 +170,38 @@ const BERM_GAPS: ReadonlyArray<readonly [number, number]> = [
   [648, 16],
 ];
 
+/**
+ * Seaward launch ramps. A wedge of packed sand and old boardwalk timber that
+ * leaves the gravel shoulder in a berm gap, runs down-coast while drifting out
+ * over the beach, and ends in a hard lip with nothing under it. Flick seaward
+ * at speed and Piñones throws you at the Atlantic.
+ *
+ * `[station, run length, lip height, seaward drift, half-width at the lip]`.
+ */
+interface RampSpec {
+  s: number;
+  len: number;
+  height: number;
+  drift: number;
+  halfW: number;
+}
+const RAMPS: readonly RampSpec[] = [
+  { s: 88, len: 26, height: 3.1, drift: 9.5, halfW: 3.1 },
+  { s: 226, len: 23, height: 2.6, drift: 7.5, halfW: 3.3 },
+  { s: 390, len: 28, height: 3.5, drift: 11.0, halfW: 3.0 },
+  { s: 530, len: 24, height: 2.9, drift: 8.5, halfW: 3.2 },
+  { s: 640, len: 30, height: 3.8, drift: 12.0, halfW: 3.0 },
+];
+
 /** Sand kickers at the tideline. `[station, lateral fraction of the beach]`. */
 const KICKERS: ReadonlyArray<readonly [number, number]> = [
   [188, 0.62],
   [468, 0.55],
+  [604, 0.6],
 ];
 
-type SurfaceCode = 0 | 1 | 2 | 3; // sand | asphalt | gravel | scrub
+/** sand | asphalt | gravel | dune scrub | forest floor */
+type SurfaceCode = 0 | 1 | 2 | 3 | 4;
 
 interface Column {
   /** 'abs' = fixed lateral offset; 'beach' / 'surf' = fraction of the run */
@@ -157,37 +210,53 @@ interface Column {
   kind: SurfaceCode;
   /** include in the drivable collider */
   solid: boolean;
+  /** collider surface class — decides the friction body this strip joins */
+  grip?: 'asphalt' | 'gravel' | 'sand';
 }
 
 /**
- * The cross-section, inland (negative) to seaward (positive). The inland side
- * is a cut bank that simply rides the existing hillside 5 cm proud of it; the
- * seaward side is entirely new sand the layer owns outright.
+ * The cross-section, inland (negative) to seaward (positive).
+ *
+ * Inland of the carriageway the ribbon owns a **cut bench** — gravel apron,
+ * shack row, dune scrub — and then climbs the mainland bluff (or falls into
+ * the lagoon, east of the spit line) all the way out to {@link BLUFF_V}. That
+ * is what stops the raw district terrain from ever being the thing the driver
+ * looks at. Seaward it is all new sand.
  */
 const COLUMNS: readonly Column[] = [
-  { mode: 'abs', v: -34, kind: 3, solid: false },
-  { mode: 'abs', v: -26, kind: 3, solid: false },
-  { mode: 'abs', v: -20, kind: 3, solid: false },
-  { mode: 'abs', v: -16, kind: 3, solid: true },
-  { mode: 'abs', v: -13, kind: 0, solid: true },
-  { mode: 'abs', v: -11, kind: 0, solid: true },
-  { mode: 'abs', v: -9.4, kind: 2, solid: true },
-  { mode: 'abs', v: -8, kind: 2, solid: true },
-  { mode: 'abs', v: -6.7, kind: 2, solid: true },
-  { mode: 'abs', v: -5.6, kind: 1, solid: true },
-  { mode: 'abs', v: -2.8, kind: 1, solid: true },
-  { mode: 'abs', v: 0, kind: 1, solid: true },
-  { mode: 'abs', v: 2.8, kind: 1, solid: true },
-  { mode: 'abs', v: 5.6, kind: 1, solid: true },
-  { mode: 'abs', v: 6.7, kind: 2, solid: true },
-  { mode: 'beach', v: 0.0, kind: 2, solid: true },
-  { mode: 'beach', v: 0.18, kind: 2, solid: true },
-  { mode: 'beach', v: 0.34, kind: 2, solid: true },
-  { mode: 'beach', v: 0.46, kind: 0, solid: true },
-  { mode: 'beach', v: 0.58, kind: 0, solid: true },
-  { mode: 'beach', v: 0.72, kind: 0, solid: true },
-  { mode: 'beach', v: 0.86, kind: 0, solid: true },
-  { mode: 'beach', v: 1.0, kind: 0, solid: true },
+  { mode: 'abs', v: BLUFF_V, kind: 4, solid: false },
+  { mode: 'abs', v: -130, kind: 4, solid: false },
+  { mode: 'abs', v: -111, kind: 4, solid: false },
+  { mode: 'abs', v: -94, kind: 4, solid: false },
+  { mode: 'abs', v: -79, kind: 4, solid: false },
+  { mode: 'abs', v: -66, kind: 4, solid: false },
+  { mode: 'abs', v: -55, kind: 4, solid: false },
+  { mode: 'abs', v: -46, kind: 4, solid: false },
+  { mode: 'abs', v: -38, kind: 4, solid: false },
+  { mode: 'abs', v: -31, kind: 4, solid: true, grip: 'sand' },
+  { mode: 'abs', v: -25, kind: 4, solid: true, grip: 'sand' },
+  { mode: 'abs', v: -20, kind: 3, solid: true, grip: 'sand' },
+  { mode: 'abs', v: -16, kind: 3, solid: true, grip: 'sand' },
+  { mode: 'abs', v: -13, kind: 3, solid: true, grip: 'sand' },
+  { mode: 'abs', v: -10.8, kind: 0, solid: true, grip: 'sand' },
+  { mode: 'abs', v: -9.4, kind: 2, solid: true, grip: 'gravel' },
+  { mode: 'abs', v: -8, kind: 2, solid: true, grip: 'gravel' },
+  { mode: 'abs', v: -6.7, kind: 2, solid: true, grip: 'gravel' },
+  { mode: 'abs', v: -5.6, kind: 1, solid: true, grip: 'asphalt' },
+  { mode: 'abs', v: -2.8, kind: 1, solid: true, grip: 'asphalt' },
+  { mode: 'abs', v: 0, kind: 1, solid: true, grip: 'asphalt' },
+  { mode: 'abs', v: 2.8, kind: 1, solid: true, grip: 'asphalt' },
+  { mode: 'abs', v: 5.6, kind: 1, solid: true, grip: 'asphalt' },
+  { mode: 'abs', v: 6.7, kind: 2, solid: true, grip: 'gravel' },
+  { mode: 'abs', v: 8.6, kind: 2, solid: true, grip: 'gravel' },
+  { mode: 'beach', v: 0.0, kind: 2, solid: true, grip: 'sand' },
+  { mode: 'beach', v: 0.18, kind: 2, solid: true, grip: 'sand' },
+  { mode: 'beach', v: 0.34, kind: 2, solid: true, grip: 'sand' },
+  { mode: 'beach', v: 0.46, kind: 0, solid: true, grip: 'sand' },
+  { mode: 'beach', v: 0.58, kind: 0, solid: true, grip: 'sand' },
+  { mode: 'beach', v: 0.72, kind: 0, solid: true, grip: 'sand' },
+  { mode: 'beach', v: 0.86, kind: 0, solid: true, grip: 'sand' },
+  { mode: 'beach', v: 1.0, kind: 0, solid: true, grip: 'sand' },
   { mode: 'surf', v: 0.3, kind: 0, solid: false },
   { mode: 'surf', v: 0.65, kind: 0, solid: false },
   { mode: 'surf', v: 1.0, kind: 0, solid: false },
@@ -352,6 +421,10 @@ interface Station {
   bermV: number;
   /** height added to the berm crest, 0 in a gap */
   bermH: number;
+  /** 0 on the mainland, 1 out on the barrier spit with the lagoon behind */
+  lagoon: number;
+  /** height of the inland cut bench at this station */
+  benchY: number;
 }
 
 export class Pinones implements WorldLayer {
@@ -383,7 +456,7 @@ export class Pinones implements WorldLayer {
     uTime: { value: 0 },
     uSeaLevel: { value: SEA_LEVEL },
     uWetness: { value: 0 },
-    uSand: { value: new THREE.Color().setHex(0xe6d3a6, THREE.SRGBColorSpace) },
+    uSand: { value: new THREE.Color().setHex(0xe0cb9c, THREE.SRGBColorSpace) },
     uSandWet: { value: new THREE.Color().setHex(0x8a7757, THREE.SRGBColorSpace) },
     uFoam: { value: new THREE.Color().setHex(0xf6fbfa, THREE.SRGBColorSpace) },
     uAsphalt: { value: new THREE.Color().setHex(0x4b4a48, THREE.SRGBColorSpace) },
@@ -498,7 +571,15 @@ export class Pinones implements WorldLayer {
         nx = -nx;
         nz = -nz;
       }
-      stations.push({ x, z, tx, tz, nx, nz, s, y: 0, waterV: 20, bermV: 12, bermH: 0.5 });
+      stations.push({
+        x, z, tx, tz, nx, nz, s,
+        y: 0,
+        waterV: 20,
+        bermV: 12,
+        bermH: 0.5,
+        lagoon: smootherstep((x - SPIT_X0) / (SPIT_X1 - SPIT_X0)),
+        benchY: 0,
+      });
     }
 
     /* --- grade the carriageway: flat across its own width, above the ground - */
@@ -554,6 +635,17 @@ export class Pinones implements WorldLayer {
       st.bermH = lerp(0.55 + 0.35 * Math.sin(st.s * 0.031), -0.25, clamp01(gap * 1.25));
     }
 
+    /* --- the inland cut bench: a level shelf carved out of the bluff ------- */
+    // It sits a touch below the carriageway so water sheds off the road onto
+    // it, and never below the natural ground at the road edge.
+    const bench: number[] = stations.map((st) => st.y - 0.42 - 0.18 * Math.sin(st.s * 0.017));
+    for (let pass = 0; pass < 4; pass++) {
+      for (let i = 1; i < bench.length - 1; i++) {
+        bench[i] = bench[i - 1] * 0.26 + bench[i] * 0.48 + bench[i + 1] * 0.26;
+      }
+    }
+    for (let i = 0; i < stations.length; i++) stations[i].benchY = bench[i];
+
     this.stations = stations;
   }
 
@@ -564,26 +656,67 @@ export class Pinones implements WorldLayer {
     return st.waterV + SURF_RUN * c.v;
   }
 
-  /** Surface height of the ribbon at a station and lateral offset. */
+  /**
+   * Surface height of the ribbon at a station and lateral offset.
+   *
+   * Three regimes meet here and every one of them has to be C0-continuous with
+   * its neighbours, because the same function drives the mesh, the analytic
+   * normals, the collider and every prop's footing:
+   *
+   *  - **carriageway** `|v| ≤ HALF_ROAD` — flat with a 2 % crown.
+   *  - **inland** — shoulder, gravel apron, then the level cut bench, then
+   *    either the mainland bluff (west) or the lagoon shelf (east of the spit
+   *    line), cross-faded by `st.lagoon`.
+   *  - **seaward** — apron, berm, beach face, wet run-up, submerged shelf,
+   *    plus the launch ramps and tideline kickers cut straight into it.
+   */
   private profile(st: Station, v: number): number {
     const gh = this.layout ? this.layout.groundHeight : (): number => 0;
     const x = st.x + st.nx * v;
     const z = st.z + st.nz * v;
     const ground = gh(x, z);
     let y: number;
+    // how much of the "never below the district's own terrain" clamp applies —
+    // out on the spit the terrain is a phantom 42 m plateau with no mesh under
+    // it, so honouring it there would build a green wall over open sea
+    let clampW = 1;
 
     if (v >= -HALF_ROAD && v <= HALF_ROAD) {
       // 2 % crown, §1.1
       y = st.y - 0.09 * (v / HALF_ROAD) ** 2;
     } else if (v < -HALF_ROAD) {
-      const shoulder = st.y - 0.12;
       const d = -v - HALF_ROAD;
-      if (d < 2.4) {
-        y = shoulder - d * 0.06;
+      const shoulder = st.y - 0.12;
+      if (d < 1.9) {
+        y = shoulder - d * 0.075;
       } else {
-        // the cut bank simply rides the hillside, blended off the shoulder
-        const t = clamp01((d - 2.4) / 4.5);
-        y = lerp(shoulder - 0.14, ground + 0.06, t);
+        // gravel apron rolls off the shoulder onto the cut bench
+        const tb = smootherstep((d - 1.9) / 4.6);
+        const benchY = lerp(shoulder - 0.14, st.benchY, tb);
+        const bench = benchY;
+
+        /* mainland: blend the bench onto the natural hillside */
+        const tBank = smootherstep((-v - CUT_V) / CUT_BLEND);
+        const bluff = lerp(bench, Math.max(bench, ground + 0.55), tBank);
+
+        /* spit: the bench falls to a mangrove shore and a lagoon floor */
+        const dune = bench + 1.35 * Math.exp(-(((-v - 27) / 9) ** 2));
+        const lag = lerp(
+          dune,
+          SEA_LEVEL + LAGOON_FLOOR,
+          smootherstep((-v + LAGOON_SHORE) / (-LAGOON_BED + LAGOON_SHORE)),
+        );
+
+        y = lerp(bluff, lag, st.lagoon);
+        clampW = 1 - st.lagoon;
+        // a dry-season crust of ripples on the bench so it is not a billiard table
+        y += Math.sin(st.s * 0.37 + v * 0.79) * 0.03 * smoothstep((d - 2.5) / 3);
+        /* the far edge dives under the district's own terrain, so the boundary
+           between this layer's ground and the world's is a ragged intersection
+           line lost in the canopy rather than a straight 60 cm lip */
+        const dive = smootherstep((-v + BLUFF_V + 26) / 22);
+        y -= dive * 3.2 * (1 - st.lagoon);
+        clampW *= 1 - dive;
       }
     } else {
       const bermY = st.y - 0.55 + st.bermH;
@@ -603,18 +736,23 @@ export class Pinones implements WorldLayer {
         const t = clamp01((v - st.waterV) / SURF_RUN);
         y = SEA_LEVEL + SHELF_DEPTH * t ** 1.25;
       }
+      // wind ripple on the loose sand — small, but it is what stops the beach
+      // reading as a bedsheet and what makes a shoulder excursion chatter
+      y += Math.sin(v * 0.62 + st.s * 0.11) * 0.055 * smoothstep((v - SHOULDER) / 3);
+
       // sand kickers: a wedge of packed sand at the tideline, lip to the sea
       for (const [ks, kf] of KICKERS) {
         const kv = lerp(st.bermV, st.waterV, kf);
         const ds = (st.s - ks) / 11;
         const dv = (v - kv) / 7;
         const bump = Math.exp(-(ds * ds) - dv * dv);
-        y += bump * 2.3 * clamp01(1.35 - Math.abs(ds) * 0.9);
+        y += bump * 2.6 * clamp01(1.35 - Math.abs(ds) * 0.9);
       }
     }
     // never below the world's own ground: the existing terrain collider and mesh
-    // stay honest under everything this layer draws
-    return Math.max(y, ground + 0.04);
+    // stay honest under everything this layer draws — except out on the spit,
+    // where there is no terrain mesh to stay honest with
+    return lerp(y, Math.max(y, ground + 0.04), clampW);
   }
 
   /** Analytic normal of the ribbon surface. */
@@ -640,29 +778,51 @@ export class Pinones implements WorldLayer {
     const perChunk = Math.ceil((sts.length - 1) / chunks);
     const nrm = new THREE.Vector3();
 
-    const colPos: number[] = [];
-    const colIdx: number[] = [];
-    const sandPos: number[] = [];
-    const sandIdx: number[] = [];
-
+    /**
+     * Per-vertex tint. The shader owns grain, ripple and wetness; the vertex
+     * colour owns the *large* structure — how the dune scrub greens up as it
+     * leaves the sand, how the bluff forest darkens as it climbs away from the
+     * light, and how the lagoon shore bleaches back to mud.
+     */
+    const c1 = new THREE.Color();
+    const c2 = new THREE.Color();
     const kindColour = (kind: SurfaceCode, v: number, st: Station): number => {
       switch (kind) {
         case 1:
           return 0xffffff;
         case 2:
-          return v < 0 ? 0xcfc3a8 : 0xd7cbb0;
-        case 3: {
-          // the cut bank dissolves from dune sand into the district's own green
-          const t = clamp01((-v - 13) / 18);
-          return shade(0xb9b481, 1 - t * 0.22) & (t > 0.5 ? 0xffffff : 0xffffff);
-        }
-        default: {
-          const dry = clamp01((this.profileHeightCache - SEA_LEVEL) / 2.4);
-          void dry;
-          void st;
+          return v < 0 ? 0xd0c4a6 : 0xd9cdb2;
+        case 3:
+          // the shader owns the sand → sea-grape blend, driven by lateral offset
           return 0xffffff;
+        case 4: {
+          // the bluff forest: saturated tropical green, deepening as it climbs
+          // out of the sun, cross-fading to lagoon silt out on the spit
+          const climb = clamp01((this.profileHeightCache - st.y) / 22);
+          c1.setHex(0x6d9a34, THREE.SRGBColorSpace);
+          c2.setHex(0x255a24, THREE.SRGBColorSpace);
+          c1.lerp(c2, smoothstep(climb));
+          if (st.lagoon > 0.01) {
+            const wet = clamp01((SEA_LEVEL + 1.6 - this.profileHeightCache) / 3.2);
+            c2.setHex(0x8a8560, THREE.SRGBColorSpace);
+            c1.lerp(c2, st.lagoon * wet);
+          }
+          // hand off to the district's own terrain tone at the far edge
+          c2.setHex(0x93a878, THREE.SRGBColorSpace);
+          c1.lerp(c2, smoothstep((-v - 96) / 44) * (1 - st.lagoon));
+          return c1.getHex(THREE.SRGBColorSpace);
         }
+        default:
+          return 0xffffff;
       }
+    };
+
+    /** collider strips, one array pair per friction class */
+    const grip: Record<string, { pos: number[]; idx: number[] }> = {
+      asphalt: { pos: [], idx: [] },
+      gravel: { pos: [], idx: [] },
+      sand: { pos: [], idx: [] },
+      ramp: { pos: [], idx: [] },
     };
 
     for (let c = 0; c < chunks; c++) {
@@ -759,13 +919,16 @@ export class Pinones implements WorldLayer {
         put(s1, va1, pb);
         put(s1, vb1, pc);
         put(s0, vb0, pd);
-        const road = ca.kind === 1 && cb.kind === 1;
-        const pos = road ? colPos : sandPos;
-        const idx = road ? colIdx : sandIdx;
-        pushTri(pos, idx, pa, pb, pc);
-        pushTri(pos, idx, pa, pc, pd);
+        // the coarser of the two strips wins, so the asphalt body never claims
+        // a triangle that is half gravel
+        const cls = ca.grip === cb.grip ? (ca.grip ?? 'sand') : ca.grip === 'asphalt' || cb.grip === 'asphalt' ? 'gravel' : 'sand';
+        const bucket = grip[cls];
+        pushTri(bucket.pos, bucket.idx, pa, pb, pc);
+        pushTri(bucket.pos, bucket.idx, pa, pc, pd);
       }
     }
+
+    this.buildRamps(grip.ramp);
 
     const makeBody = (pos: number[], idx: number[], friction: number, surface: string): void => {
       if (idx.length === 0) return;
@@ -782,8 +945,143 @@ export class Pinones implements WorldLayer {
       this.bodies.push(body);
       this._stats.colliderTriangles += idx.length / 3;
     };
-    makeBody(colPos, colIdx, 1.0, 'asphalt');
-    makeBody(sandPos, sandIdx, 0.72, 'sand');
+    makeBody(grip.asphalt.pos, grip.asphalt.idx, 1.0, 'asphalt');
+    makeBody(grip.gravel.pos, grip.gravel.idx, 0.86, 'gravel');
+    makeBody(grip.sand.pos, grip.sand.idx, 0.62, 'sand');
+    makeBody(grip.ramp.pos, grip.ramp.idx, 0.98, 'ramp');
+  }
+
+  /**
+   * The five launch ramps, as real swept geometry rather than a bump in the
+   * height field — the ribbon's columns are 1.5–4 m apart out on the sand and
+   * would smear a kicker's lip into a hill. Built on the deck material and its
+   * `aBeach` channel so they take the same sand shading, and appended to the
+   * loose-surface collider so the picture and the physics agree.
+   */
+  private buildRamps(collide: { pos: number[]; idx: number[] }): void {
+    if (this.stations.length < 4) return;
+    const db = new DeckBuilder();
+    const SEG = 12;
+    const PACKED = 0xc7b189;
+    const LOOSE = 0xe9decc;
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const c = new THREE.Vector3();
+    const d = new THREE.Vector3();
+    const pushTri = (p0: THREE.Vector3, p1: THREE.Vector3, p2: THREE.Vector3): void => {
+      const base = collide.pos.length / 3;
+      collide.pos.push(p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
+      collide.idx.push(base, base + 1, base + 2);
+    };
+
+    for (const r of RAMPS) {
+      const st0 = this.stationAtS(r.s);
+      if (!st0) continue;
+      const v0 = SHOULDER + 0.4;
+      const ox = st0.x + st0.nx * v0;
+      const oz = st0.z + st0.nz * v0;
+      const entryY = this.profile(st0, v0);
+      // travel direction: down-coast, drifting seaward, so it is a flick right
+      const dirX = st0.tx * r.len + st0.nx * r.drift;
+      const dirZ = st0.tz * r.len + st0.nz * r.drift;
+      const dl = Math.hypot(dirX, dirZ) || 1;
+      const ux = dirX / dl;
+      const uz = dirZ / dl;
+      const px = -uz;
+      const pz = ux;
+      /** centreline height: flat at the mouth, steepest at the lip */
+      const riseAt = (t: number): number => r.height * smootherstep(t) * (0.3 + 0.7 * t);
+      const halfAt = (t: number): number => lerp(4.6, r.halfW, t);
+      /** running surface point, `side` = -1 | +1 across the ramp */
+      const face = (t: number, side: number, out: THREE.Vector3): THREE.Vector3 => {
+        const hw = halfAt(t);
+        return out.set(
+          ox + ux * dl * t + px * hw * side,
+          entryY + riseAt(t) - 0.11,
+          oz + uz * dl * t + pz * hw * side,
+        );
+      };
+
+      // three vertex rings per station: outer skirt, running edge, running edge, outer skirt
+      const rows: Array<[number, number, number, number]> = [];
+      for (let i = 0; i <= SEG; i++) {
+        const t = i / SEG;
+        const hw = halfAt(t);
+        const along = (t * dl) / 6;
+        const aux = SHOULDER + 1 + t * r.drift;
+        const ring: number[] = [];
+        for (const [side, out, packed] of [
+          [-1, 1.6, false],
+          [-1, 0, true],
+          [1, 0, true],
+          [1, 1.6, false],
+        ] as Array<[number, number, boolean]>) {
+          const wx = ox + ux * dl * t + px * (hw + out) * side;
+          const wz = oz + uz * dl * t + pz * (hw + out) * side;
+          const y = packed ? entryY + riseAt(t) - 0.11 : Math.min(this.surfaceHeight(wx, wz), entryY + riseAt(t)) - 0.07;
+          ring.push(
+            db.vertex(
+              wx, y, wz,
+              0, 1, 0,
+              along, ((hw + out) * side) / 6,
+              packed ? PACKED : LOOSE,
+              aux, 0, st0.s + t * r.len,
+            ),
+          );
+        }
+        rows.push([ring[0], ring[1], ring[2], ring[3]]);
+      }
+
+      for (let i = 0; i < SEG; i++) {
+        const q0 = rows[i];
+        const q1 = rows[i + 1];
+        // wound CCW seen from above, same convention as the deck
+        for (let k = 0; k < 3; k++) db.quad(q0[k], q1[k], q1[k + 1], q0[k + 1]);
+
+        const t0 = i / SEG;
+        const t1 = (i + 1) / SEG;
+        face(t0, -1, a);
+        face(t0, 1, b);
+        face(t1, 1, c);
+        face(t1, -1, d);
+        pushTri(a, b, c);
+        pushTri(a, c, d);
+      }
+
+      /* the lip: a hard vertical face with nothing under it */
+      const hw = halfAt(1);
+      const lipY = entryY + riseAt(1) - 0.11;
+      const lip: number[] = [];
+      const foot: number[] = [];
+      for (const side of [-1, 1]) {
+        const wx = ox + ux * dl + px * hw * side;
+        const wz = oz + uz * dl + pz * hw * side;
+        const aux = SHOULDER + 1 + r.drift;
+        lip.push(db.vertex(wx, lipY, wz, ux, 0, uz, dl / 6, (hw * side) / 6, PACKED, aux, 0, st0.s + r.len));
+        foot.push(
+          db.vertex(
+            wx, Math.min(this.surfaceHeight(wx, wz), lipY) - 0.2, wz,
+            ux, 0, uz,
+            dl / 6 + 0.4, (hw * side) / 6,
+            0x8d7a58, aux, 0, st0.s + r.len,
+          ),
+        );
+      }
+      db.quad(lip[0], foot[0], foot[1], lip[1]);
+    }
+
+    const geo = db.build();
+    if (!geo) return;
+    const mesh = new THREE.Mesh(geo, this.deckMaterial());
+    mesh.name = 'pinones/ramps';
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.matrixAutoUpdate = false;
+    mesh.updateMatrix();
+    this.deckGroup.add(mesh);
+    this.geometries.push(geo);
+    this.meshes.push(mesh);
+    this._stats.deckTriangles += (geo.getIndex()?.count ?? 0) / 3;
   }
 
   private profileHeightCache = 0;
@@ -815,7 +1113,13 @@ export class Pinones implements WorldLayer {
       shader.vertexShader = shader.vertexShader
         .replace(
           '#include <common>',
-          ['#include <common>', 'attribute vec3 aBeach;', 'varying vec3 vBeach;', 'varying vec3 vWorldPos;'].join('\n'),
+          [
+            '#include <common>',
+            'attribute vec3 aBeach;',
+            'varying vec3 vBeach;',
+            'varying vec3 vWorldPos;',
+            'varying float vNormalUpPn;',
+          ].join('\n'),
         )
         .replace(
           '#include <begin_vertex>',
@@ -823,6 +1127,7 @@ export class Pinones implements WorldLayer {
             '#include <begin_vertex>',
             'vBeach = aBeach;',
             'vWorldPos = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;',
+            'vNormalUpPn = normalize( mat3( modelMatrix ) * normal ).y;',
           ].join('\n'),
         );
 
@@ -842,6 +1147,7 @@ export class Pinones implements WorldLayer {
             'uniform vec3 uLineW;',
             'varying vec3 vBeach;',
             'varying vec3 vWorldPos;',
+            'varying float vNormalUpPn;',
             DECK_COMMON,
           ].join('\n'),
         )
@@ -853,17 +1159,25 @@ export class Pinones implements WorldLayer {
             'float pnKind = vBeach.y;',
             'float pnS = vBeach.z;',
             'vec2 pnW = vWorldPos.xz;',
+            'vec3 pnTint = vColor.rgb;',
             'float pnRough = 0.92;',
 
             /* ---------------- sand ---------------- */
             'float pnGrain = pnFbm( pnW * 3.2 ) * 0.16 + pnNoise( pnW * 11.0 ) * 0.07;',
             'float pnDrift = pnFbm( pnW * 0.055 );',
-            'vec3 pnSandC = uSand * mix( vec3( 0.93, 0.95, 1.03 ), vec3( 1.08, 1.03, 0.92 ), pnDrift );',
+            'vec3 pnSandC = uSand * mix( vec3( 0.86, 0.89, 1.0 ), vec3( 1.11, 1.05, 0.9 ), pnDrift );',
             'float pnRip = sin( ( pnV - vBeach.z * 0.02 ) * 1.5 + pnFbm( pnW * 0.3 ) * 7.0 ) * 0.5 + 0.5;',
-            'pnSandC *= 1.0 + ( pnGrain - 0.11 ) * 0.95 + pnRip * 0.05;',
+            'pnSandC *= 1.0 + ( pnGrain - 0.11 ) * 1.15 + pnRip * 0.07;',
+            // wind-combed ridges running up the beach, the coarse scale that stops
+            // 40 m of dry sand reading as one flat card
+            'pnSandC *= 1.0 + 0.11 * sin( dot( pnW, vec2( 0.22, 0.09 ) ) + pnFbm( pnW * 0.13 ) * 9.0 );',
             // shell hash and dark mineral sand along the old high-tide line
             'float pnHash = smoothstep( 1.6, 0.5, vWorldPos.y - uSeaLevel ) * smoothstep( 0.1, 0.6, vWorldPos.y - uSeaLevel );',
-            'pnSandC = mix( pnSandC, pnSandC * vec3( 0.76, 0.72, 0.68 ), pnHash * smoothstep( 0.45, 0.8, pnFbm( pnW * 0.42 + 11.0 ) ) * 0.6 );',
+            'pnSandC = mix( pnSandC, pnSandC * vec3( 0.72, 0.68, 0.64 ), pnHash * smoothstep( 0.45, 0.8, pnFbm( pnW * 0.42 + 11.0 ) ) * 0.7 );',
+            // wrack line: a broken ribbon of dried sargassum at the spring-tide mark
+            'float pnWrackBand = smoothstep( 0.55, 0.0, abs( vWorldPos.y - uSeaLevel - 1.05 ) );',
+            'float pnWrack = pnWrackBand * smoothstep( 0.5, 0.78, pnFbm( pnW * vec2( 0.7, 0.16 ) + 23.0 ) );',
+            'pnSandC = mix( pnSandC, vec3( 0.29, 0.24, 0.13 ), clamp( pnWrack, 0.0, 0.75 ) );',
             // the animated water edge
             'float pnEdge = uSeaLevel + pnRunUp( uTime, pnS ) + pnFbm( vec2( pnS * 0.05, uTime * 0.07 ) ) * 0.38 - 0.16;',
             'float pnAbove = vWorldPos.y - pnEdge;',
@@ -891,12 +1205,42 @@ export class Pinones implements WorldLayer {
             'pnRoadC = mix( pnRoadC, uLineW, pnEdgeLine * pnWear * 0.9 );',
             'float pnRoadRough = mix( 0.86, 0.72, pnCentre + pnEdgeLine );',
 
-            /* ---------------- gravel and scrub ---------------- */
+            /* ---------------- gravel apron ---------------- */
             'float pnSpeck = pnNoise( pnW * 14.0 );',
-            'vec3 pnGravC = mix( vec3( 0.62, 0.58, 0.5 ), vec3( 0.82, 0.78, 0.68 ), pnSpeck );',
+            'vec3 pnGravC = mix( vec3( 0.62, 0.58, 0.5 ), vec3( 0.84, 0.8, 0.7 ), pnSpeck );',
             'pnGravC = mix( pnGravC, pnSandC * 0.95, 0.35 );',
-            'vec3 pnScrubC = mix( vec3( 0.32, 0.4, 0.22 ), vec3( 0.5, 0.55, 0.33 ), pnFbm( pnW * 0.28 ) );',
-            'pnScrubC = mix( pnScrubC, pnSandC * 0.8, smoothstep( 0.45, 0.0, pnFbm( pnW * 0.11 ) ) );',
+            // tyre-polished ruts where every car swings off the road onto the apron
+            'pnGravC *= 1.0 - 0.14 * smoothstep( 0.58, 0.86, pnFbm( pnW * vec2( 0.5, 0.09 ) ) );',
+
+            /* ---------------- dune scrub ---------------- */
+            // clumped sea-oat / bay-bean cover: bare sand between tussocks, not a lawn
+            'float pnInl = smoothstep( 8.5, 20.0, -pnV );',
+            'float pnTuft = pnFbm( pnW * 0.62 + 3.0 ) + pnInl * 0.34;',
+            'float pnCover = smoothstep( 0.36, 0.62, pnTuft ) * pnInl;',
+            'vec3 pnGrassC = mix( vec3( 0.3, 0.47, 0.13 ), vec3( 0.62, 0.72, 0.24 ), pnNoise( pnW * 2.6 ) );',
+            'pnGrassC *= 0.86 + 0.3 * pnFbm( pnW * 1.4 + 7.0 );',
+            'vec3 pnScrubC = mix( pnSandC * 0.93, pnGrassC, pnCover );',
+            // drag-out sand fans where cars leave the apron for the scrub
+            'pnScrubC = mix( pnScrubC, pnSandC, smoothstep( 0.7, 0.92, pnFbm( pnW * vec2( 0.22, 0.06 ) + 9.0 ) ) * 0.6 );',
+
+            /* ---------------- bluff forest floor / mangrove flat ---------------- */
+            // canopy shadow is the whole trick here: big soft dark blotches with
+            // warm sunfleck gaps, so the hillside reads as planted, not painted
+            'float pnCanopy = pnFbm( pnW * 0.055 + 17.0 ) * 0.65 + pnFbm( pnW * 0.19 + 31.0 ) * 0.35;',
+            'float pnShade = smoothstep( 0.3, 0.68, pnCanopy );',
+            // the vertex tint carries the large structure (height, lagoon); the
+            // shader carries canopy shadow, sunfleck, litter and clay
+            'vec3 pnForestC = pnTint * mix( vec3( 1.34, 1.3, 1.12 ), vec3( 0.4, 0.47, 0.34 ), pnShade );',
+            // leaf litter and exposed red clay where the slope is steep
+            'float pnClay = smoothstep( 0.6, 0.84, pnFbm( pnW * 0.22 + 41.0 ) ) * smoothstep( 0.94, 0.6, vNormalUpPn );',
+            'pnForestC = mix( pnForestC, vec3( 0.4, 0.23, 0.13 ), pnClay * 0.8 );',
+            // fine frond stipple so the 15 m triangles do not read as flat facets
+            'pnForestC *= 0.86 + 0.3 * pnFbm( pnW * 2.2 );',
+            'pnForestC *= 0.95 + 0.1 * pnNoise( pnW * 9.0 );',
+            // lagoon shallows: silty green water over pale mud, darkening with depth
+            'float pnSub = clamp( ( uSeaLevel - vWorldPos.y ) / 2.6, 0.0, 1.0 );',
+            'vec3 pnMudC = mix( vec3( 0.62, 0.58, 0.42 ), vec3( 0.12, 0.3, 0.26 ), pnSub );',
+            'pnForestC = mix( pnForestC, pnMudC, smoothstep( 0.02, 0.3, pnSub ) );',
 
             /* ---------------- blend by kind ---------------- */
             'vec3 pnCol = pnSandC;',
@@ -904,17 +1248,27 @@ export class Pinones implements WorldLayer {
             'float wRoad = 1.0 - clamp( abs( pnKind - 1.0 ), 0.0, 1.0 );',
             'float wGrav = 1.0 - clamp( abs( pnKind - 2.0 ), 0.0, 1.0 );',
             'float wScrub = 1.0 - clamp( abs( pnKind - 3.0 ), 0.0, 1.0 );',
+            'float wWood = 1.0 - clamp( abs( pnKind - 4.0 ), 0.0, 1.0 );',
             'pnCol = mix( pnCol, pnRoadC, wRoad );',
             'pnRough = mix( pnRough, pnRoadRough, wRoad );',
             'pnCol = mix( pnCol, pnGravC, wGrav );',
             'pnRough = mix( pnRough, 0.9, wGrav );',
             'pnCol = mix( pnCol, pnScrubC, wScrub );',
             'pnRough = mix( pnRough, 0.88, wScrub );',
+            'pnCol = mix( pnCol, pnForestC, wWood );',
+            'pnRough = mix( pnRough, mix( 0.78, 0.25, pnSub ), wWood );',
+            // sand blown across the tarmac on the seaward edge — the single most
+            // characteristic thing about a road that runs on a dune
+            'float pnBlow = wRoad * smoothstep( 3.0, 5.6, pnV ) * smoothstep( 0.44, 0.78, pnFbm( pnW * vec2( 0.09, 0.55 ) ) );',
+            'pnCol = mix( pnCol, pnSandC * 0.96, clamp( pnBlow, 0.0, 0.8 ) );',
+            'pnRough = mix( pnRough, 0.95, clamp( pnBlow, 0.0, 0.8 ) );',
             // rain: the shared wetness drive darkens and polishes everything but
             // the already-wet sand
             'pnCol *= mix( 1.0, 0.55, uWetness * ( 1.0 - pnWet * 0.7 ) );',
             'pnRough = mix( pnRough, 0.12, uWetness * 0.8 * ( 1.0 - pnWet * 0.5 ) );',
-            'diffuseColor.rgb *= pnCol;',
+            // absolute: every kind above already folded in whatever part of the
+            // vertex tint it wanted, so a second multiply would square it
+            'diffuseColor.rgb = pnCol;',
           ].join('\n'),
         )
         .replace(
@@ -922,7 +1276,7 @@ export class Pinones implements WorldLayer {
           ['#include <roughnessmap_fragment>', 'roughnessFactor = pnRough;'].join('\n'),
         );
     };
-    mat.customProgramCacheKey = () => 'loco/pinones-deck-v1';
+    mat.customProgramCacheKey = () => 'loco/pinones-deck-v4';
     this.deckMat = mat;
     return mat;
   }
@@ -956,7 +1310,7 @@ export class Pinones implements WorldLayer {
     const dz = z - st.z;
     const v = dx * st.nx + dz * st.nz;
     const along = Math.abs(dx * st.tx + dz * st.tz);
-    if (along > STEP * 1.6 || v < -36 || v > st.waterV + SURF_RUN) {
+    if (along > STEP * 1.6 || v < BLUFF_V || v > st.waterV + SURF_RUN) {
       return this.layout?.groundHeight(x, z) ?? 0;
     }
     return this.profile(st, v);
@@ -970,7 +1324,7 @@ export class Pinones implements WorldLayer {
     const dz = z - st.z;
     const v = dx * st.nx + dz * st.nz;
     const along = Math.abs(dx * st.tx + dz * st.tz);
-    return along <= STEP * 1.6 && v >= -36 && v <= st.waterV + SURF_RUN;
+    return along <= STEP * 1.6 && v >= BLUFF_V && v <= st.waterV + SURF_RUN;
   }
 
   private stationAtS(s: number): Station {
@@ -1184,14 +1538,29 @@ export class Pinones implements WorldLayer {
         scaleY: rng.range(0.4, 1.0),
       });
     }
-    const thicketCount = Math.round(150 * density);
+    /**
+     * Sea grape. Piñones is not a road across a lawn — it is a road cut through
+     * a thicket, and what sells that at 45 m/s is a *wall* of foliage crowding
+     * the back of the bench and climbing the bluff. Six two-sided cards each,
+     * so seven hundred of them cost less than one building.
+     */
+    const thicketCount = Math.round(660 * density);
     for (let i = 0; i < thicketCount; i++) {
       const st = this.stationAtS(rng.range(6, total - 6));
       if (!st) continue;
-      const v = rng.bool(0.78) ? -rng.range(11, 33) : st.bermV + rng.range(-3, 3);
+      const roll = rng.next();
+      // 62 % the hedge line behind the bench, 26 % up the bluff, 12 % on the dune
+      const v =
+        roll < 0.62
+          ? -rng.range(15, 34)
+          : roll < 0.88
+            ? -rng.range(34, 96)
+            : st.bermV + rng.range(-4, 4);
       put(st, v, p);
-      if (p.y < SEA_LEVEL + 0.9) continue;
-      thickets.push({ x: p.x, y: p.y - 0.1, z: p.z, yaw: rng.range(0, 6.28), scale: rng.range(0.75, 1.7) });
+      if (p.y < SEA_LEVEL + 0.7) continue;
+      // the hedge line is the densest and tallest; scrub thins as it climbs
+      const scale = roll < 0.62 ? rng.range(1.2, 2.3) : roll < 0.88 ? rng.range(0.85, 1.8) : rng.range(0.6, 1.2);
+      thickets.push({ x: p.x, y: p.y - 0.12, z: p.z, yaw: rng.range(0, 6.28), scale });
     }
 
     /* --------------------------------------------------- 5. realise them */
@@ -1272,9 +1641,11 @@ export class Pinones implements WorldLayer {
       const a = this.stationAtS(s);
       const b = this.stationAtS(Math.min(total, s + span));
       if (!a || !b) continue;
-      // a strip behind the shacks and up the cut bank, plus a strip on the sand
+      // the palm belt behind the shacks, the bluff forest above it, and the
+      // scattered beach palms out on the sand
       for (const [v0, v1] of [
-        [-30, -9],
+        [-34, -11],
+        [-88, -34],
         [SHOULDER + 2, 0],
       ] as Array<[number, number]>) {
         const outer = v1 === 0 ? Math.min(a.waterV, b.waterV) - 3 : v1;
