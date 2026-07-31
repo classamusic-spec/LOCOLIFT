@@ -368,6 +368,8 @@ function hangingCloth(atlas: FacadeAtlas, flag: boolean): THREE.BufferGeometry {
 /* ------------------------------------------------------------- factory */
 
 const IRON_WIDTHS = [2.9, 5.8, 8.7, 11.6];
+/** Balconette size ladder — matches typical window, door and shopfront spans. */
+const BALCONETTE_WIDTHS = [1.2, 1.8, 2.6, 3.6, 5.0, 7.0];
 
 export interface BalconyStats {
   balconies: number;
@@ -403,7 +405,13 @@ export class BalconyFactory {
       reg.define(`balcIron${i}`, ironBalcony(IRON_WIDTHS[i], i === 0), 'iron');
       reg.define(`balcWood${i}`, woodBalcony(IRON_WIDTHS[i], atlas), 'atlas');
     }
-    reg.define('balconette', balconette(1.6), 'iron');
+    // Balconettes guard openings that range from a narrow window to a wide
+    // shopfront. A single 1.6m rail stretched to fit turns into a continuous
+    // black band across the façade and smears the baluster pitch, so we author
+    // a size ladder and only ever stretch a little — same rule as the balconies.
+    for (let i = 0; i < BALCONETTE_WIDTHS.length; i++) {
+      reg.define(`balconette${i}`, balconette(BALCONETTE_WIDTHS[i]), 'iron');
+    }
     reg.define('pot', plantPot(atlas), 'atlas');
     reg.define('leafS', leafCluster(0.55, 3), 'foliage');
     reg.define('leafL', leafCluster(0.95, 3), 'foliage');
@@ -431,8 +439,13 @@ export class BalconyFactory {
       const rng = new RNG(slot.seed ^ 0x2b7);
 
       if (slot.kind === 'balconette') {
-        instanceMatrix(this.m, wx, y, wz, yaw, w / 1.6, 1, 1);
-        this.reg.add('balconette', this.m, wx, wz);
+        let bi = 0;
+        for (let i = 1; i < BALCONETTE_WIDTHS.length; i++) {
+          if (Math.abs(BALCONETTE_WIDTHS[i] - w) < Math.abs(BALCONETTE_WIDTHS[bi] - w)) bi = i;
+        }
+        const bsx = clamp(w / BALCONETTE_WIDTHS[bi], 0.85, 1.18);
+        instanceMatrix(this.m, wx, y, wz, yaw, bsx, 1, 1);
+        this.reg.add(`balconette${bi}`, this.m, wx, wz);
         this.stats.balconettes++;
         // ground-floor guards get a pot on the sill about a third of the time
         if (rng.bool(0.3)) this.pot(f, cx, slot.y + 0.06, BALCON.balconetteDepth * 0.5, yaw, rng, 0.7);
