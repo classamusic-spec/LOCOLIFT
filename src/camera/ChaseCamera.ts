@@ -155,6 +155,17 @@ export interface LocoCameraTestHook {
   request(view: string): void;
   cycle(): void;
   pose(): Record<string, number>;
+  /**
+   * Raycast from the live camera, `yawDeg` right and `pitchDeg` up from where
+   * it points, and name what it hits. `mine` is true when the hit belongs to
+   * the followed vehicle. The only reliable way to answer "what is in front of
+   * the cockpit camera".
+   */
+  probe(
+    yawDeg?: number,
+    pitchDeg?: number,
+    limit?: number,
+  ): Array<{ name: string; mat: string; dist: number; mine: boolean; y: number }>;
 }
 
 declare global {
@@ -571,7 +582,77 @@ export class ChaseCamera implements System {
         headPitch: Number(self.headPitch.toFixed(4)),
         headRoll: Number(self.headRoll.toFixed(4)),
       }),
+      probe: (yawDeg = 0, pitchDeg = 0, limit = 6) => self.probe(yawDeg, pitchDeg, limit),
     };
+  }
+
+  /**
+   * What is the rig actually looking at?
+   *
+   * Casts a ray from the live camera position, `yawDeg` right and `pitchDeg`
+   * up from where it is pointing, and names what it hits. This exists because
+   * "the cockpit view is a black rectangle" is not a debuggable statement and
+   * reading the geometry to guess which box is in the way does not converge —
+   * the first time this was needed, four separate suspects were wrong and the
+   * real occluder was a mesh nobody had considered. One raycast answered it.
+   *
+   * Debug-only: allocates, walks the whole scene graph, and is reached solely
+   * through `window.__locoCam`.
+   */
+  private probe(
+    yawDeg: number,
+    pitchDeg: number,
+    limit: number,
+  ): Array<{ name: string; mat: string; dist: number; mine: boolean; y: number }> {
+    const root = this.target?.object3d?.parent ?? this.target?.object3d;
+    if (!root) return [];
+    const dir = new THREE.Vector3(0, 0, -1).applyEuler(
+      new THREE.Euler(
+        (pitchDeg * Math.PI) / 180,
+        (yawDeg * Math.PI) / 180,
+        0,
+        'YXZ',
+      ),
+    );
+    dir.applyQuaternion(this.camera.quaternion);
+    root.updateMatrixWorld(true);
+    const rc = new THREE.Raycaster(this.camera.position, dir, 0.01, 400);
+    const vehicle = this.target.object3d;
+    return rc
+      .intersectObject(root, true)
+      /* Three's raycaster deliberately ignores `visible` — it tests layers and
+       * nothing else — so a hidden subtree still reports hits. For a probe whose
+       * entire job is "what can I actually see", that is not a detail: the first
+       * run of this pointed at a hidden coachman's head and sent the search off
+       * in the wrong direction for a while. */
+      .filter((h) => {
+        let node: THREE.Object3D | null = h.object;
+        while (node) {
+          if (node.visible === false) return false;
+          node = node.parent;
+        }
+        return true;
+      })
+      .slice(0, limit)
+      .map((h) => {
+        let node: THREE.Object3D | null = h.object;
+        let mine = false;
+        let name = h.object.name;
+        while (node) {
+          if (node === vehicle) mine = true;
+          if (!name && node.name) name = node.name;
+          node = node.parent;
+        }
+        const mat = (h.object as THREE.Mesh).material as THREE.MeshStandardMaterial | undefined;
+        return {
+          name: name || h.object.type,
+          /* the material colour identifies an unnamed merged shell instantly */
+          mat: mat && mat.color ? `#${mat.color.getHexString()}` : '?',
+          dist: Number(h.distance.toFixed(3)),
+          mine,
+          y: Number(h.point.y.toFixed(2)),
+        };
+      });
   }
 
   /**

@@ -11,9 +11,15 @@
  * city renders at roughly a frame a second, so a `waitForTimeout(500)` buys
  * about half a frame and every assertion downstream of it is a lie.
  *
+ * **Bounded.** `--budget` (seconds, default 480) is a hard wall-clock ceiling on
+ * the whole run. Steps that would start after it stop instead, are listed as
+ * skipped, and the process exits non-zero — so this can sit in CI or a
+ * verification pass without ever hanging.
+ *
  *   node tools/cockpit-test.mjs [--url http://127.0.0.1:4182] [--out .captures-cockpit]
  *                               [--vehicles jeep,bus,carriage]
  *                               [--quality low] [--width 900] [--height 506]
+ *                               [--budget 480] [--patience 150000]
  */
 import { chromium } from 'playwright';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -30,12 +36,26 @@ const WIDTH = Number(arg('width', '900'));
 const HEIGHT = Number(arg('height', '506'));
 const QUALITY = arg('quality', 'low');
 /**
- * Everything waits this long. It is enormous on purpose: this box has four
- * cores and is routinely running two or three other agents' SwiftShader
- * instances at the same time, which takes a frame from ~1 s to ~5 s. A
- * timeout tuned for an idle machine simply reports "broken" for "busy".
+ * Per-wait ceiling, and a whole-run budget.
+ *
+ * These are two different jobs and it matters that they are separate. A single
+ * wait can legitimately be slow — this city renders at about a frame a second
+ * under SwiftShader, and slower still when the box is shared — so `PATIENCE`
+ * has to be generous. But a harness that is *generous nine times in a row* has
+ * hung from the caller's point of view, which is how an earlier version of this
+ * file blew a ten-minute CI timeout and had to be abandoned mid-verification.
+ *
+ * `BUDGET` is the real contract: total wall-clock seconds for the whole run.
+ * When it is gone the harness stops taking new steps, writes whatever it has,
+ * says so, and exits **non-zero**. It never hangs and it never lies about a
+ * partial pass.
  */
-const PATIENCE = Number(arg('patience', '600000'));
+const PATIENCE = Number(arg('patience', '150000'));
+const BUDGET = Number(arg('budget', '480')) * 1000;
+const DEADLINE = Date.now() + BUDGET;
+const left = () => DEADLINE - Date.now();
+/** the ceiling for any single wait: never more than the budget that remains */
+const wait = () => Math.max(1000, Math.min(PATIENCE, left()));
 const VEHICLES = arg('vehicles', 'jeep,bus,carriage').split(',').filter(Boolean);
 
 const LAUNCH = {
@@ -56,7 +76,7 @@ async function frames(page, n) {
   await page.waitForFunction(
     ([start, secs]) => window.__loco.stats().elapsed >= start + secs,
     [t0, n / 60],
-    { timeout: PATIENCE, polling: 400 },
+    { timeout: wait(), polling: 400 },
   );
 }
 
@@ -68,6 +88,11 @@ async function frames(page, n) {
  * process on the box, not the code under test.
  */
 async function step(row, name, fn) {
+  if (left() <= 0) {
+    row.skipped = row.skipped ?? [];
+    row.skipped.push(name);
+    return null;
+  }
   try {
     return await fn();
   } catch (e) {
@@ -84,7 +109,7 @@ async function setView(page, view) {
       window.__locoCam?.mode === v &&
       (v === 'cockpit' ? (window.__locoCam?.interior ?? 0) > 0.98 : true),
     view,
-    { timeout: PATIENCE, polling: 400 },
+    { timeout: wait(), polling: 400 },
   );
   // one more frame so the stats snapshot is of a settled rig
   await frames(page, 2);
@@ -100,6 +125,10 @@ async function stats(page) {
 }
 
 async function runVehicle(browser, vehicleId, report) {
+  if (left() <= 0) {
+    report.vehicles.push({ vehicle: vehicleId, shots: [], errors: [], skipped: ['all'], budgetExhausted: true });
+    return;
+  }
   const page = await browser.newPage({ viewport: { width: WIDTH, height: HEIGHT } });
   // SwiftShader renders this city at seconds per frame on `high`; force a tier
   // the harness can actually finish on, before a single system boots.
@@ -132,7 +161,7 @@ async function runVehicle(browser, vehicleId, report) {
   const shot = async (name) => {
     const file = path.join(OUT, `${vehicleId}-${name}.png`);
     try {
-      await page.screenshot({ path: file, timeout: PATIENCE });
+      await page.screenshot({ path: file, timeout: wait() });
       row.shots.push(file);
     } catch (e) {
       row.errors.push(`shot ${name}: ${String(e?.message ?? e)}`);
@@ -140,11 +169,15 @@ async function runVehicle(browser, vehicleId, report) {
   };
 
   try {
-    await page.goto(`${URL_}/?vehicle=${vehicleId}`, { waitUntil: 'load', timeout: 60_000 });
-    await page.waitForFunction(() => !!window.__loco?.ready, null, { timeout: PATIENCE });
+    /* free roam, because that is the game's front door and therefore the state
+     * a defect is most likely to be reported from */
+    await page.goto(`${URL_}/?vehicle=${vehicleId}&entry=freeRoam`, {
+      waitUntil: 'load',
+      timeout: 60_000,
+    });
+    await page.waitForFunction(() => !!window.__loco?.ready, null, { timeout: wait() });
     page.setDefaultTimeout(PATIENCE);
 
-    await page.evaluate(() => window.__loco.startArcade());
     await frames(page, 20);
 
     /* ---- chase baseline ------------------------------------------------ */
@@ -210,6 +243,7 @@ async function runVehicle(browser, vehicleId, report) {
     });
 
     row.shaderFailures = await page.evaluate(() => window.__locoShaderFailures ?? []);
+    row.entry = 'freeRoam';
     row.touch = await page.evaluate(() => {
       const t = window.__locoTouch;
       return t ? { enabled: t.enabled, roles: t.rects().map((r) => r.role) } : null;
@@ -225,8 +259,16 @@ async function runVehicle(browser, vehicleId, report) {
 async function main() {
   await mkdir(OUT, { recursive: true });
   const browser = await chromium.launch(LAUNCH);
-  const report = { url: URL_, quality: QUALITY, size: [WIDTH, HEIGHT], vehicles: [] };
+  const report = {
+    url: URL_,
+    quality: QUALITY,
+    size: [WIDTH, HEIGHT],
+    budgetSeconds: BUDGET / 1000,
+    vehicles: [],
+  };
   for (const v of VEHICLES) await runVehicle(browser, v, report);
+  report.secondsUsed = Number(((BUDGET - left()) / 1000).toFixed(1));
+  report.budgetExhausted = left() <= 0;
   await browser.close();
 
   await writeFile(path.join(OUT, 'report.json'), JSON.stringify(report, null, 2));
@@ -245,9 +287,16 @@ async function main() {
         `  console errors : ${r.errors.length}${r.errors.length ? '\n    ' + r.errors.slice(0, 5).join('\n    ') : ''}` +
         (r.fatal ? `\n  FATAL: ${r.fatal}` : ''),
     );
-    if (r.fatal || r.shaderFailures.length > 0) ok = false;
+    if (r.fatal || (r.shaderFailures?.length ?? 0) > 0) ok = false;
+    if (r.skipped?.length) {
+      console.log(`  SKIPPED (out of budget): ${r.skipped.join(', ')}`);
+      ok = false;
+    }
   }
-  console.log(`\n${ok ? 'OK' : 'FAILED'} — shots in ${OUT}`);
+  console.log(
+    `\n${ok ? 'OK' : 'FAILED'} — ${report.secondsUsed}s of a ${report.budgetSeconds}s budget` +
+      `${report.budgetExhausted ? ' (EXHAUSTED)' : ''} — shots in ${OUT}`,
+  );
   if (!ok) process.exitCode = 1;
 }
 

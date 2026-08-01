@@ -670,12 +670,31 @@ export class ReinRibbon {
     this.pos.setUsage(THREE.DynamicDrawUsage);
     this.geo.setAttribute('position', this.pos);
     this.geo.setIndex(index);
-    /* Normals are computed once, from the degenerate rest pose, and never
-     * again: a strap is a flat unlit-ish ribbon and recomputing a normal
-     * buffer 60 times a second to shade 0.02 m of leather would cost more than
-     * every other thing in this file put together. The material is
-     * double-sided so the ribbon reads from either end. */
-    this.geo.computeVertexNormals();
+
+    /* Normals are a **constant**, written by hand, and this is load-bearing.
+     *
+     * The obvious thing — `computeVertexNormals()` once at construction — is a
+     * trap, and it cost a whole verification round. At construction every
+     * vertex is (0,0,0), so every triangle is degenerate, so every accumulated
+     * face normal is the zero vector, and `normalizeNormals()` finishes the job
+     * by dividing it by its own length: **0/0 = NaN, for every vertex**.
+     *
+     * A NaN normal produces NaN fragments. On its own that is nearly
+     * invisible — the reins are 26 mm wide and the tier that skips
+     * post-processing (`low`) renders them as a couple of stray pixels, which
+     * is exactly why this survived a full pass of low-tier captures. Turn post
+     * on and it is catastrophic: bloom downsamples the frame into a mip
+     * pyramid, one NaN texel poisons every texel it is averaged with, and the
+     * pyramid spreads it over the entire image. The carriage's cockpit came out
+     * a flat opaque brown at every hour of the day, with the raycast from the
+     * same camera reporting a completely clear view.
+     *
+     * A strap is a flat ribbon lit from both sides by a double-sided material,
+     * so a constant +Y normal is not an approximation to the truth here — it is
+     * the answer, and it cannot be NaN. */
+    const normals = new Float32Array(verts.length);
+    for (let i = 1; i < normals.length; i += 3) normals[i] = 1;
+    this.geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     /* Hand-set, because the spans move every frame and Three would otherwise
      * have to recompute the bounds from the attribute on every change. */
     this.geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, -1), 8);
@@ -703,6 +722,19 @@ export class ReinRibbon {
     sag: number,
   ): void {
     if (span < 0 || span >= this.spans) return;
+    /* One non-finite endpoint would put NaN into a vertex buffer, and a single
+     * NaN texel spreads across the whole frame once the bloom pyramid averages
+     * it — see the note on normals in the constructor. The endpoints come from
+     * a physics-driven chassis and an animated horse, so this is not paranoia;
+     * holding the previous frame's shape is always better than poisoning the
+     * image. */
+    if (
+      !Number.isFinite(ax) || !Number.isFinite(ay) || !Number.isFinite(az) ||
+      !Number.isFinite(bx) || !Number.isFinite(by) || !Number.isFinite(bz) ||
+      !Number.isFinite(sag)
+    ) {
+      return;
+    }
     this.a.set(ax, ay, az);
     this.b.set(bx, by, bz);
     /* the ribbon's width axis: horizontal and perpendicular to the run, so the
