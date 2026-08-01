@@ -40,12 +40,14 @@ import type { QualityTier } from '../core/types';
 import { BUS_FESTOON_COLORS, BUS_GEO, BUS_PAINT, BUS_SUSPENSION, BUS_WHEEL_LAYOUT } from './BusTuning';
 import {
   MeterDisplay,
+  addLit,
   buildGauge,
   buildHands,
   createParts,
   makeGaugeFace,
   makeSwitchStrip,
   needleAngle,
+  setPanelLights,
 } from './CockpitKit';
 import type { BeatSource, VehicleModel } from './VehicleTuning';
 
@@ -377,6 +379,8 @@ export class BusModel implements VehicleModel {
   private needleRpm: THREE.Group | null = null;
   private needleAir: THREE.Group | null = null;
   private meter: MeterDisplay | null = null;
+  /** backlit interior surfaces, at their daylight intensity */
+  private readonly cockpitLit: Array<{ material: THREE.MeshStandardMaterial; day: number }> = [];
   private cockpitOn = false;
   private targetSpeedNeedle = 0;
   private targetRpmNeedle = 0;
@@ -648,6 +652,8 @@ export class BusModel implements VehicleModel {
     this.matHeadlight.emissiveIntensity = on
       ? G.headlightIntensityOn
       : G.headlightIntensityOff;
+    /* dash lights come on with the headlights, exactly as they do in a bus */
+    setPanelLights(this.cockpitLit, on ? 1 : 0);
     this.beams.visible = on && this.beamsAllowed;
   }
 
@@ -1723,6 +1729,7 @@ export class BusModel implements VehicleModel {
         roughness: 0.6,
       });
       this.materials.push(stripMat);
+      addLit(parts, stripMat);
       const g = new THREE.PlaneGeometry(0.62, 0.116);
       g.rotateX(-0.35);
       g.translate(-0.2, 1.3, zDash + 0.04);
@@ -1746,6 +1753,7 @@ export class BusModel implements VehicleModel {
       roughness: 0.55,
     });
     this.materials.push(meterMat);
+    addLit(parts, meterMat);
     const meterPod = new THREE.Group();
     meterPod.position.set(-0.26, 1.46, G.zCowl + 0.14);
     meterPod.rotation.set(-0.34, -0.34, 0);
@@ -1773,6 +1781,12 @@ export class BusModel implements VehicleModel {
     padShell.add(box(2.34, 0.16, 0.05, 0, G.yWindscreenTop - 0.05, zWs + 0.04));
     steelShell.add(box(0.09, 0.72, 0.1, 0, 1.7, zWs + 0.04));
     steelShell.addMirrored(box(0.1, 0.74, 0.12, 1.19, 1.7, zWs + 0.08));
+    /* Trim over the inboard face of the front corner posts. Left bare, those
+     * are school-bus yellow body panels 0.5 m from the driver's left ear,
+     * catching full sun — the brightest thing in the frame by a wide margin
+     * and the first thing the eye goes to. Every bus lines them. */
+    padShell.addMirrored(box(0.05, 0.62, 0.34, 0.95, 1.78, zWs + 0.24));
+    padShell.addMirrored(box(0.22, 0.6, 0.05, 1.06, 1.78, zWs + 0.4));
     /* Sun visor, right up under the header.
      *
      * It was 0.24 m deep and hung 0.14 m below the header, which put a black
@@ -1871,6 +1885,7 @@ export class BusModel implements VehicleModel {
     for (const m of parts.materials) this.materials.push(m);
     for (const g of parts.geometries) this.geometries.push(g);
     for (const t of parts.textures) this.textures.push(t);
+    for (const e of parts.lit) this.cockpitLit.push(e);
     for (const t of [speedFace, rpmFace, airFace]) if (t) this.textures.push(t);
     void matMatte;
 

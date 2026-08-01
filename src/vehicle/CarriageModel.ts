@@ -49,7 +49,14 @@ import {
   CARRIAGE_PAINT as P,
   CARRIAGE_SUSPENSION as S,
 } from './CarriageTuning';
-import { MeterDisplay, ReinRibbon, createParts, taperTube } from './CockpitKit';
+import {
+  MeterDisplay,
+  ReinRibbon,
+  addLit,
+  createParts,
+  setPanelLights,
+  taperTube,
+} from './CockpitKit';
 import { HorseRig } from './HorseRig';
 import type { VehicleModel } from './VehicleTuning';
 
@@ -571,6 +578,8 @@ export class CarriageModel implements VehicleModel {
    */
   private reins: ReinRibbon | null = null;
   private meter: MeterDisplay | null = null;
+  /** backlit interior surfaces, at their daylight intensity */
+  private readonly cockpitLit: Array<{ material: THREE.MeshStandardMaterial; day: number }> = [];
   private cockpitOn = false;
   private fareDistance = 0;
   private fareClock = 0;
@@ -816,6 +825,8 @@ export class CarriageModel implements VehicleModel {
   setHeadlights(on: boolean): void {
     this.headlightsOn = on;
     this.matLamp.emissiveIntensity = on ? G.lampIntensityOn : G.lampIntensityOff;
+    /* the meter's own lamp comes on with the carriage lamps */
+    setPanelLights(this.cockpitLit, on ? 1 : 0);
     this.beams.visible = on && this.beamsAllowed;
   }
 
@@ -1769,6 +1780,7 @@ export class CarriageModel implements VehicleModel {
       roughness: 0.5,
     });
     this.materials.push(meterMat);
+    addLit(parts, meterMat);
     const meterPod = new THREE.Group();
     meterPod.position.set(-0.4, Y(1.6), G.zDash + 0.02);
     meterPod.rotation.set(-0.36, 0.34, 0);
@@ -1802,6 +1814,7 @@ export class CarriageModel implements VehicleModel {
     for (const m of parts.materials) this.materials.push(m);
     for (const g of parts.geometries) this.geometries.push(g);
     for (const t of parts.textures) this.textures.push(t);
+    for (const e of parts.lit) this.cockpitLit.push(e);
 
     this.chassis.add(this.cockpit);
 

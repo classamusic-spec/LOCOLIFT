@@ -31,12 +31,14 @@ import { clamp, clamp01, damp } from '../core/MathUtils';
 import type { QualityTier } from '../core/types';
 import {
   MeterDisplay,
+  addLit,
   buildGauge,
   buildHands,
   createParts,
   makeGaugeFace,
   makeSwitchStrip,
   needleAngle,
+  setPanelLights,
 } from './CockpitKit';
 import { MODEL, SUSPENSION, WHEEL_LAYOUT } from './VehicleTuning';
 
@@ -358,6 +360,8 @@ export class JeepModel {
   private needleSpeed: THREE.Group | null = null;
   private needleRpm: THREE.Group | null = null;
   private meter: MeterDisplay | null = null;
+  /** backlit interior surfaces, at their daylight intensity */
+  private readonly cockpitLit: Array<{ material: THREE.MeshStandardMaterial; day: number }> = [];
   private cockpitOn = false;
   private needleSpeedAngle = 0;
   private needleRpmAngle = 0;
@@ -596,6 +600,8 @@ export class JeepModel {
       ? MODEL.headlightIntensityOn
       : MODEL.headlightIntensityOff;
     this.matSign.emissiveIntensity = on ? MODEL.signIntensity * 1.6 : MODEL.signIntensity;
+    /* dash lights come on with the headlights, exactly as they do in a car */
+    setPanelLights(this.cockpitLit, on ? 1 : 0);
     this.beams.visible = on && this.beamsAllowed;
   }
 
@@ -1239,6 +1245,7 @@ export class JeepModel {
       roughness: 0.5,
     });
     this.materials.push(lampMat);
+    addLit(parts, lampMat);
     const lamps = new Shell();
     for (let i = 0; i < 3; i++) {
       lamps.add(cyl(0.011, 0.011, 0.012, 6, 0.006, 0.058 - i * 0.045, 0.006, 'z'));
@@ -1265,6 +1272,7 @@ export class JeepModel {
       roughness: 0.55,
     });
     this.materials.push(meterMat);
+    addLit(parts, meterMat);
 
     const meterPod = new THREE.Group();
     /* Sited to clear the HUD. The bottom-right of the screen belongs to the
@@ -1302,6 +1310,7 @@ export class JeepModel {
         roughness: 0.6,
       });
       this.materials.push(stripMat);
+      addLit(parts, stripMat);
       const g = new THREE.PlaneGeometry(0.42, 0.079);
       g.translate(0.02, 0.512, -0.4);
       this.geometries.push(g);
@@ -1371,6 +1380,7 @@ export class JeepModel {
     for (const m of parts.materials) this.materials.push(m);
     for (const g of parts.geometries) this.geometries.push(g);
     for (const t of parts.textures) this.textures.push(t);
+    for (const e of parts.lit) this.cockpitLit.push(e);
     if (speedFace) this.textures.push(speedFace);
     if (rpmFace) this.textures.push(rpmFace);
 

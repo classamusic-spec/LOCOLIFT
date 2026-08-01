@@ -29,10 +29,33 @@ export interface CockpitParts {
   readonly materials: THREE.Material[];
   readonly geometries: THREE.BufferGeometry[];
   readonly textures: THREE.Texture[];
+  /**
+   * Backlit surfaces — instrument faces, meter displays, switch legends — with
+   * the daylight emissive intensity they were authored at. `setPanelLights`
+   * scales them together when the headlights come on, which is exactly what
+   * happens in a real car and is the difference between a night cockpit you
+   * can read and a black rectangle with a wheel in it.
+   */
+  readonly lit: Array<{ material: THREE.MeshStandardMaterial; day: number }>;
 }
 
 export function createParts(): CockpitParts {
-  return { materials: [], geometries: [], textures: [] };
+  return { materials: [], geometries: [], textures: [], lit: [] };
+}
+
+/** Register a backlit surface at its daylight intensity. */
+export function addLit(parts: CockpitParts, material: THREE.MeshStandardMaterial): void {
+  parts.lit.push({ material, day: material.emissiveIntensity });
+}
+
+/** Panel lighting: 0 = daylight, 1 = headlights on. */
+export function setPanelLights(
+  lit: ReadonlyArray<{ material: THREE.MeshStandardMaterial; day: number }>,
+  night: number,
+  boost = 2.2,
+): void {
+  const k = 1 + (boost - 1) * (night < 0 ? 0 : night > 1 ? 1 : night);
+  for (const e of lit) e.material.emissiveIntensity = e.day * k;
 }
 
 /** Absorb `src` into `dst` — for a cockpit assembled from several builders. */
@@ -40,6 +63,7 @@ export function absorb(dst: CockpitParts, src: CockpitParts): void {
   for (const m of src.materials) dst.materials.push(m);
   for (const g of src.geometries) dst.geometries.push(g);
   for (const t of src.textures) dst.textures.push(t);
+  for (const e of src.lit) dst.lit.push(e);
 }
 
 /* --------------------------------------------------------------- textures */
@@ -359,6 +383,7 @@ export function buildGauge(
   });
   if (!faceTex) faceMat.color.setHex(0x1a1c24);
   parts.materials.push(faceMat);
+  addLit(parts, faceMat);
 
   const disc = new THREE.CircleGeometry(radius, 24);
   parts.geometries.push(disc);
