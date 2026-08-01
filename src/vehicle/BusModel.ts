@@ -1014,12 +1014,13 @@ export class BusModel implements VehicleModel {
 
     /* front header panel above the windscreen — carries the painted script */
     body.add(box(2.3, G.yRoofCrown - G.yWindscreenTop, 0.1, 0, (G.yWindscreenTop + G.yRoofCrown) * 0.5, z0 + 0.02));
-    /* And the destination-sign housing let into it. Raised: at
-     * `yWindscreenTop − 0.2` it hung 35 cm down into the glass, which reads
-     * fine from the street and puts an opaque black board across the top
-     * third of the driver's view. It still overlaps the screen — a guagua's
-     * route board always does — just by a route board's worth. */
-    matte.add(box(1.5, 0.3, 0.06, 0, G.yWindscreenTop - 0.04, z0 - 0.02));
+    /* And the destination-sign housing, let into the header rather than into
+     * the windscreen. At `yWindscreenTop − 0.2` it hung 35 cm down into the
+     * glass; that reads fine from the street and puts an opaque black board
+     * across the top third of the *driver's* view, which is the one place a
+     * route board must never be. Both positions are things real buses do; only
+     * one of them can be driven from. */
+    matte.add(box(1.5, 0.26, 0.06, 0, G.yWindscreenTop + 0.09, z0 - 0.02));
   }
 
   /** Red hood, chrome grille, twin round headlights, heavy bumper, mirrors. */
@@ -1207,8 +1208,13 @@ export class BusModel implements VehicleModel {
     seatDark.add(box(0.52, 0.02, SIDE_LEN - 0.6, 0, G.yFloor + 0.05, SIDE_MID));
 
     /* --- red vinyl benches, eleven rows a side --- */
+    /* The first row starts 1.05 m behind the door aperture, not 0.55 m. The
+     * driver's seat moved back 0.30 m (see `buildInterior`'s driver station)
+     * and at the old spacing the coachwork put a passenger's knees in the back
+     * of the driver's head — invisible through a window from the street,
+     * unmissable from the driver's seat looking over their shoulder. */
     const rows = 11;
-    const z0 = G.zDoorRear + 0.55;
+    const z0 = G.zDoorRear + 1.05;
     for (let i = 0; i < rows; i++) {
       const z = z0 + i * 0.78;
       if (z > SIDE_Z1 - 0.55) break;
@@ -1523,7 +1529,7 @@ export class BusModel implements VehicleModel {
     this.matSign.color.setHex(0xffffff);
     this.matSign.needsUpdate = true;
     const signGeo = new THREE.PlaneGeometry(1.42, 0.26);
-    signGeo.translate(0, G.yWindscreenTop - 0.2, G.zWindscreen - 0.06);
+    signGeo.translate(0, G.yWindscreenTop + 0.09, G.zWindscreen - 0.06);
     this.geometries.push(signGeo);
     const signMesh = new THREE.Mesh(signGeo, this.matSign);
     signMesh.name = 'bus_destinationSign';
@@ -1551,7 +1557,10 @@ export class BusModel implements VehicleModel {
 
   private buildSteeringWheel(matMatte: THREE.Material, matChrome: THREE.Material): void {
     /* left-hand drive, and almost flat — a bus wheel is nearly horizontal */
-    this.steeringWheel.position.set(-0.66, 1.32, G.zCowl + 0.36);
+    /* Raised from 1.32: with the driver's seat where it now is, the old height
+     * put the whole wheel 0.30 m below the eye and 0.49 m ahead, so from the
+     * seat it was a thin ellipse along the bottom edge of the frame. */
+    this.steeringWheel.position.set(-0.66, 1.42, G.zCowl + 0.36);
     this.steeringWheel.rotation.x = -1.32;
 
     const rim = new THREE.TorusGeometry(0.25, 0.026, 6, 20);
@@ -1583,7 +1592,7 @@ export class BusModel implements VehicleModel {
     }
 
     /* the column down to the floor */
-    const col = cyl(0.045, 0.045, 0.5, 8, -0.66, 1.06, G.zCowl + 0.5, 'y');
+    const col = cyl(0.045, 0.045, 0.6, 8, -0.66, 1.11, G.zCowl + 0.5, 'y');
     col.rotateX(0.3);
     this.geometries.push(col);
     this.chassis.add(new THREE.Mesh(col, matMatte));
@@ -1649,7 +1658,7 @@ export class BusModel implements VehicleModel {
      * in the game has, and the one that says "this thing weighs eight tonnes".
      */
     const pod = new THREE.Group();
-    pod.position.set(BUS_COCKPIT.podX, 1.34, G.zCowl + 0.12);
+    pod.position.set(BUS_COCKPIT.podX, 1.44, G.zCowl + 0.2);
     pod.rotation.x = -BUS_COCKPIT.podTilt;
     this.cockpit.add(pod);
 
@@ -1658,8 +1667,8 @@ export class BusModel implements VehicleModel {
      * bottom of the driver's sightline, so every centimetre of it is a
      * centimetre of road they cannot see; it is sized so the brow lands 12 cm
      * under the eye, which puts the horizon a clear 14° above it. */
-    podShell.add(box(0.74, 0.26, 0.2, 0, 0, -0.11));
-    podShell.add(box(0.8, 0.026, 0.06, 0, 0.145, 0.03, -0.3));
+    podShell.add(box(0.74, 0.2, 0.2, 0, 0, -0.11));
+    podShell.add(box(0.8, 0.026, 0.06, 0, 0.115, 0.03, -0.3));
     const podGeo = podShell.build();
     if (podGeo) {
       this.geometries.push(podGeo);
@@ -1738,7 +1747,7 @@ export class BusModel implements VehicleModel {
     });
     this.materials.push(meterMat);
     const meterPod = new THREE.Group();
-    meterPod.position.set(-0.26, 1.5, G.zCowl + 0.1);
+    meterPod.position.set(-0.26, 1.46, G.zCowl + 0.14);
     meterPod.rotation.set(-0.34, -0.34, 0);
     this.cockpit.add(meterPod);
     const meterCase = new THREE.BoxGeometry(0.25, 0.17, 0.12);
@@ -1749,10 +1758,19 @@ export class BusModel implements VehicleModel {
     meterFace.translate(0, 0, 0.002);
     this.geometries.push(meterFace);
     meterPod.add(new THREE.Mesh(meterFace, meterMat));
+    /* the bracket down to the dash, so it is bolted to something */
+    chromeShell.add(tube(-0.26, 1.4, G.zCowl + 0.16, -0.26, 1.3, G.zCowl + 0.16, 0.016, 6));
 
-    /* ---- windscreen surround: header, divider post, A-pillars ------------ */
+    /* ---- windscreen surround: header, divider post, A-pillars ------------
+     *
+     * The header trim is deep on purpose. The exterior model lets the
+     * destination board down into the top of the windscreen — which is exactly
+     * what a guagua does, and reads beautifully from the street — but from the
+     * driver's seat the back of that board is a mirrored `CHINCHORREO` written
+     * across the sky. This panel is the inside face of it. */
     const zWs = G.zWindscreen - 0.02;
     padShell.add(box(2.5, 0.13, 0.14, 0, G.yWindscreenTop - 0.03, zWs + 0.06));
+    padShell.add(box(2.34, 0.16, 0.05, 0, G.yWindscreenTop - 0.05, zWs + 0.04));
     steelShell.add(box(0.09, 0.72, 0.1, 0, 1.7, zWs + 0.04));
     steelShell.addMirrored(box(0.1, 0.74, 0.12, 1.19, 1.7, zWs + 0.08));
     /* Sun visor, right up under the header.
@@ -1801,7 +1819,10 @@ export class BusModel implements VehicleModel {
       const inner: Shell[] = [];
       for (let i = 0; i < groups; i++) inner.push(new Shell());
       let n = 0;
-      for (let z = G.zCowl + 0.5; z < G.zBodyRear - 0.3; z += 0.62) {
+      /* Starting at `zCowl + 0.5` put a bulb 0.58 m from the driver's eye,
+       * where a 0.10 m sphere is the size of a football. They start behind the
+       * driver's head instead, which is where the party is anyway. */
+      for (let z = G.zCowl + 1.5; z < G.zBodyRear - 0.3; z += 0.62) {
         for (const s of [-1, 1]) {
           const b = new THREE.SphereGeometry(0.05, 6, 4);
           b.translate(s * 1.06, G.yWindowTop - 0.09, z);

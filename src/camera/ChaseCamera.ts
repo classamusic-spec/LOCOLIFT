@@ -503,11 +503,18 @@ export class ChaseCamera implements System {
     }
 
     /* A view asked for by the UI wins over the persisted default, and is
-     * edge-consumed so it can never fight the player's own button press. */
+     * edge-consumed so it can never fight the player's own button press.
+     *
+     * `appliedView` is deliberately NOT written here. It records the last
+     * value of `settings.cameraView` this rig acted on, and nothing else —
+     * stamping the *request* into it made the very next frame's
+     * `applyViewSetting` see a difference between the stored default (still
+     * 'chase') and `appliedView` ('cockpit') and immediately switch back. The
+     * live symptom was a cockpit that flickered in for two frames and
+     * vanished, which is exactly as confusing to debug as it sounds. */
     const requested = cameraViewChannel.requested;
     if (requested !== null) {
       cameraViewChannel.requested = null;
-      this.appliedView = requested;
       if (!this.showcaseActive) this.setMode(requested);
     } else {
       this.applyViewSetting(ctx.settings, false);

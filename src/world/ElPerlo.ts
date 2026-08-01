@@ -45,6 +45,7 @@
  */
 import * as THREE from 'three';
 import { QUALITY_BUDGET } from '../core/Config';
+import { SHADOW_CASTER_CUT } from './LodGrid';
 import type { POI, QualityTier } from '../core/types';
 import { clamp, clamp01, lerp, smoothstep } from '../core/MathUtils';
 import { RNG } from '../core/RNG';
@@ -1216,6 +1217,12 @@ export class ElPerlo implements WorldLayer {
     const lod = this.options.lodDistance ?? 210;
     const detail = budget.propDetailDistance * 2.4;
 
+    /* The barrio is a dense stack of one- and two-storey shacks on a slope, so
+     * it is a heavy shadow caster for its footprint — measured at 40 k
+     * triangles into the sun's map from the wall road, where it is 200 m away
+     * behind the fort and every one of those shadows lands on itself. The
+     * near/far swap is unchanged; only the casting is cut. */
+    const shadowLimit = SHADOW_CASTER_CUT[this.quality] * 1.6;
     for (let i = 0; i < this.nearMeshes.length; i++) {
       const near = this.nearMeshes[i];
       const far = this.farMeshes[i];
@@ -1223,6 +1230,7 @@ export class ElPerlo implements WorldLayer {
       const d = s ? cameraPos.distanceTo(s.center) - s.radius : 0;
       const inRange = d < drawLimit;
       near.visible = inRange && d < lod;
+      near.castShadow = d < shadowLimit;
       if (far) far.visible = inRange && d >= lod;
     }
     for (const m of this.cutMeshes) {

@@ -73,12 +73,30 @@ const Y = (h: number): number => G.groundLocalY + h;
  * holding them when the camera is anywhere else.
  */
 const COCKPIT = {
-  eyeHeight: 1.91,
-  eyeZ: 1.06,
-  /** the fists, metres either side of centre and above the road */
-  handX: 0.16,
-  handH: 1.6,
-  handZ: 0.78,
+  /**
+   * The eye. Lower and further back than the coachman figure's own head, and
+   * both deliberately.
+   *
+   * At his head height (1.94) and seat position (1.09) *everything the driver
+   * owns* — hands, reins, splash board, meter — sat 42–48° below the sightline,
+   * i.e. entirely outside a 68° frame. All you could see was a horse and a
+   * road. That is anatomically honest and useless: a real coachman's hands are
+   * outside their central vision too, and they still know where they are.
+   * Dropping 8 cm and sitting 6 cm further back brings the hands to 20° down
+   * and the splash board to 33°, which puts the whole working end of the
+   * carriage along the bottom of the frame where a game wants it.
+   */
+  eyeHeight: 1.83,
+  eyeZ: 1.12,
+  /**
+   * The fists. These numbers are shared with the coachman figure's arms in
+   * `buildFigures` and must stay in sync: the reins anchor here in *every*
+   * camera, so if the figure's hands and these disagree, the chase view shows
+   * a pair of reins starting in mid-air next to a man holding nothing.
+   */
+  handX: 0.17,
+  handH: 1.66,
+  handZ: 0.66,
   /** metres of droop at the midpoint of a rein — leather, not wire */
   reinSag: 0.16,
   /** the meter's flag drop, dollars — a scenic ride, priced like one */
@@ -1677,31 +1695,40 @@ export class CarriageModel implements VehicleModel {
       thumb.rotateX(Math.PI / 2);
       thumb.translate(x - s * 0.012, Y(COCKPIT.handH + 0.035), COCKPIT.handZ - 0.038);
       fists.add(thumb);
-      /* forearm back toward the shoulder, and a guayabera cuff over it */
+      /* Forearm, running *down and outward* to the elbow.
+       *
+       * The first version sent it up and back toward the shoulder, which is
+       * anatomically where an arm goes and visually a disaster: the far end
+       * landed 14 cm from the lens, inside the near plane, so each arm was a
+       * fat cone that grew out of nothing and was sliced off by the near clip.
+       * Elbows-down-and-out is how you actually hold a pair of reins, and it
+       * takes the arms out through the bottom corners of the frame where they
+       * belong. */
       fists.add(
         taperTube(
           x,
-          Y(COCKPIT.handH + 0.012),
+          Y(COCKPIT.handH + 0.01),
           COCKPIT.handZ + 0.04,
-          x + s * 0.035,
-          Y(COCKPIT.handH + 0.16),
-          COCKPIT.handZ + 0.3,
-          0.043,
-          0.05,
-          6,
+          x + s * 0.14,
+          Y(COCKPIT.handH - 0.26),
+          COCKPIT.handZ + 0.48,
+          0.036,
+          0.044,
+          7,
         ),
       );
+      /* a guayabera cuff, two-thirds of the way to the elbow */
       sleeves.add(
         taperTube(
-          x + s * 0.03,
-          Y(COCKPIT.handH + 0.13),
-          COCKPIT.handZ + 0.24,
-          x + s * 0.045,
-          Y(COCKPIT.handH + 0.2),
+          x + s * 0.085,
+          Y(COCKPIT.handH - 0.14),
+          COCKPIT.handZ + 0.29,
+          x + s * 0.115,
+          Y(COCKPIT.handH - 0.21),
           COCKPIT.handZ + 0.4,
-          0.055,
-          0.062,
-          6,
+          0.047,
+          0.052,
+          7,
         ),
       );
     }
@@ -1722,9 +1749,9 @@ export class CarriageModel implements VehicleModel {
      * From outside it is a silhouette; from the box it is the thing your
      * knees are against, so it gets a leather face, a rolled top edge and the
      * brass rail the reins are looped over when the carriage is parked. */
-    leather.add(box(0.78, 0.44, 0.02, 0, Y(1.2), G.zDash + 0.06, 0.16));
-    leather.add(cyl(0.028, 0.028, 0.8, 8, 0, Y(1.42), G.zDash + 0.02, 'x'));
-    brass.addMirrored(cyl(0.014, 0.014, 0.05, 6, 0.38, Y(1.44), G.zDash - 0.02, 'x'));
+    leather.add(box(0.78, 0.46, 0.02, 0, Y(1.28), G.zDash + 0.06, 0.16));
+    leather.add(cyl(0.03, 0.03, 0.82, 8, 0, Y(1.52), G.zDash + 0.02, 'x'));
+    brass.addMirrored(cyl(0.015, 0.015, 0.05, 6, 0.39, Y(1.54), G.zDash - 0.02, 'x'));
     /* the footboard's forward lip, and a brass tread strip on it */
     leather.add(box(0.66, 0.03, 0.3, 0, Y(G.hBodyFloor + 0.18), G.zDash + 0.2, 0.42));
     brass.add(box(0.6, 0.008, 0.05, 0, Y(G.hBodyFloor + 0.235), G.zDash + 0.26, 0.42));
@@ -1743,8 +1770,8 @@ export class CarriageModel implements VehicleModel {
     });
     this.materials.push(meterMat);
     const meterPod = new THREE.Group();
-    meterPod.position.set(-0.24, Y(1.5), G.zDash + 0.02);
-    meterPod.rotation.set(-0.34, 0.2, 0);
+    meterPod.position.set(-0.4, Y(1.6), G.zDash + 0.02);
+    meterPod.rotation.set(-0.36, 0.34, 0);
     this.cockpit.add(meterPod);
     const meterCase = new THREE.BoxGeometry(0.19, 0.13, 0.09);
     meterCase.translate(0, 0, -0.045);
@@ -1755,7 +1782,7 @@ export class CarriageModel implements VehicleModel {
     this.geometries.push(meterGlass);
     meterPod.add(new THREE.Mesh(meterGlass, meterMat));
     /* the bracket down to the rail */
-    brass.add(taperTube(-0.24, Y(1.44), G.zDash - 0.01, -0.24, Y(1.4), G.zDash + 0.02, 0.011, 0.011, 5));
+    brass.add(taperTube(-0.4, Y(1.54), G.zDash - 0.01, -0.4, Y(1.5), G.zDash + 0.02, 0.011, 0.011, 5));
 
     /* ---- the box: cushion edge, back rail and the lamps' brass backs ----- */
     leather.addMirrored(box(0.03, 0.09, 0.4, 0.4, Y(G.hBox + 0.06), G.zBox));
@@ -1949,8 +1976,12 @@ export class CarriageModel implements VehicleModel {
     const head = new THREE.SphereGeometry(0.115, 12, 10);
     head.translate(0, Y(dy + 0.56), dz + 0.04);
     dLimbs.add(head);
-    /* arms forward, hands together on the reins */
-    dLimbs.addMirrored(taper(0.15, Y(dy + 0.36), dz + 0.02, 0.17, Y(dy + 0.22), dz - 0.28, 0.046, 0.04, 6));
+    /* arms forward, hands together on the reins — the far end of this taper is
+     * `COCKPIT.handX/handH/handZ`, and has to stay there: the reins are
+     * anchored to those numbers in every camera */
+    dLimbs.addMirrored(
+      taper(0.15, Y(dy + 0.36), dz + 0.02, COCKPIT.handX, Y(COCKPIT.handH), COCKPIT.handZ, 0.046, 0.04, 6),
+    );
     const dLimbGeo = dLimbs.build();
     if (dLimbGeo) {
       this.geometries.push(dLimbGeo);

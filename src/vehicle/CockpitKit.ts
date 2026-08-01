@@ -507,8 +507,8 @@ export function buildHands(
         ex,
         ey,
         ez,
-        tubeRadius * 1.3,
-        tubeRadius * 1.7,
+        tubeRadius * 1.05,
+        tubeRadius * 1.4,
         7,
       ),
     );
@@ -528,8 +528,8 @@ export function buildHands(
         wristX + (ex - wristX) * t1,
         -tubeRadius * 0.4 + (ey + tubeRadius * 0.4) * t1,
         tubeRadius * 1.2 + (ez - tubeRadius * 1.2) * t1,
-        tubeRadius * 1.72,
-        tubeRadius * 1.88,
+        tubeRadius * 1.42,
+        tubeRadius * 1.56,
         7,
       ),
     );
