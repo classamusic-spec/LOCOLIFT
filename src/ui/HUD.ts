@@ -170,8 +170,19 @@ export class HUD {
   private readonly timerNode: HTMLElement;
   private readonly timerWarn: FlagSlot;
   private readonly timerCrit: FlagSlot;
+  private readonly timerLabelEs: TextSlot;
+  private readonly timerLabelEn: TextSlot;
   private remaining = 0;
   private totalTime = 1;
+  /**
+   * Free roam has no shift clock, so while nobody is in the car the dial must
+   * not pretend to be counting anything down. See `setRoaming`.
+   */
+  private roaming = false;
+
+  /* roam prompt */
+  private readonly roamNode: HTMLElement;
+  private readonly roamName: TextSlot;
 
   /* fare */
   private readonly fareValue: TextSlot;
@@ -303,7 +314,11 @@ export class HUD {
     timer.setAttribute('role', 'timer');
     timer.setAttribute('aria-label', 'Time remaining');
     const timerLabel = el('div', 'll-timer__label');
-    timerLabel.append(el('span', 'll-lbl-es', 'TIEMPO'), el('span', 'll-lbl-en', 'Time'));
+    const timerLabelEs = el('span', 'll-lbl-es', 'TIEMPO');
+    const timerLabelEn = el('span', 'll-lbl-en', 'Time');
+    timerLabel.append(timerLabelEs, timerLabelEn);
+    this.timerLabelEs = new TextSlot(timerLabelEs);
+    this.timerLabelEn = new TextSlot(timerLabelEn);
     const timerRow = el('div', 'll-timer__row');
     const digits = el('span', 'll-timer__digits', '0');
     const tenths = el('span', 'll-timer__tenths', '.0');
@@ -334,7 +349,25 @@ export class HUD {
     this.destName = new TextSlot(destNameEl);
     this.destDist = new TextSlot(destDistEl);
 
-    tc.append(timer, dest);
+    /*
+     * The free-roam prompt. It occupies the same slot as the destination
+     * banner and borrows its classes wholesale, so it inherits the pill
+     * treatment without a line of new CSS; only one of the two is ever live.
+     */
+    const roam = el('div', 'll-dest ll-roam');
+    roam.setAttribute('role', 'status');
+    const roamIcon = el('span', 'll-dest__pin');
+    roamIcon.append(buildPinIcon());
+    const roamCol = el('div', 'll-dest__col');
+    const roamKicker = el('div', 'll-dest__kicker');
+    roamKicker.append(el('span', 'll-lbl-es', 'PASEO LIBRE'), el('span', 'll-lbl-en', 'Free roam'));
+    const roamNameEl = el('div', 'll-dest__name', '');
+    roamCol.append(roamKicker, roamNameEl);
+    roam.append(roamIcon, roamCol);
+    this.roamNode = roam;
+    this.roamName = new TextSlot(roamNameEl);
+
+    tc.append(timer, dest, roam);
 
     /* --------------------------------------------------------- top-right */
     const tr = el('div', 'll-hud__tr');
@@ -538,7 +571,17 @@ export class HUD {
   /** Score/fare target — the readout eases toward it rather than snapping. */
   setScore(value: number, snap = false): void {
     this.scoreTarget = value;
-    if (snap) this.scoreShown = value;
+    if (!snap) return;
+    this.scoreShown = value;
+    /*
+     * `update` only rewrites the readout while it is easing, so a snap that
+     * lands the shown value straight on the target would leave the *previous*
+     * run's number in the DOM until the player next earned a dollar — the
+     * first frame of every new shift read "$611" from the shift before it.
+     * Write it here.
+     */
+    this.fareValue.set(formatInt(value));
+    this.fareTicking.set(false);
   }
 
   setCombo(multiplier: number, windowSeconds?: number): void {
@@ -660,6 +703,53 @@ export class HUD {
     this.subNode.classList.remove('is-live');
   }
 
+  /**
+   * Free roam: nobody is in the car, so there is no deadline to show.
+   *
+   * The dial keeps its place in the layout — it is about to matter — but it
+   * stops claiming to be a countdown. With nothing banked it reads an em dash
+   * under "SIN CARRERA"; with time carried over from the last delivery it reads
+   * that number under "BONO", because that *is* honest: the carry decays while
+   * you look for the next fare and it is what the next fare's deadline is built
+   * from. The moment somebody gets in, `setRoaming(false)` hands the dial back
+   * to the ride and the label returns to "TIEMPO".
+   */
+  setRoaming(on: boolean, prompt: string | null = null): void {
+    this.roaming = on;
+    if (!on) {
+      this.timerLabelEs.set('TIEMPO');
+      this.timerLabelEn.set('Time');
+      this.timerNode.classList.remove('is-idle');
+    }
+    this.setRoamPrompt(on ? prompt : null);
+  }
+
+  get isRoaming(): boolean {
+    return this.roaming;
+  }
+
+  /** The "go find somebody" banner. `null` hides it. */
+  setRoamPrompt(text: string | null): void {
+    if (!text) {
+      this.roamNode.classList.remove('is-live');
+      this.roamNode.setAttribute('aria-hidden', 'true');
+      return;
+    }
+    const first = !this.roamNode.classList.contains('is-live');
+    this.roamName.set(text);
+    this.roamNode.classList.add('is-live');
+    this.roamNode.removeAttribute('aria-hidden');
+    if (first && !this.theme.flashSafe) {
+      this.roamNode.animate(
+        [
+          { transform: 'translate3d(0, -140%, 0)', opacity: 0 },
+          { transform: 'translate3d(0, 0, 0)', opacity: 1 },
+        ],
+        { duration: this.theme.duration(420), easing: this.theme.ease('back') },
+      );
+    }
+  }
+
   /** POI name in the destination banner. `null` hides it. */
   setDestination(name: string | null): void {
     if (!name) {
@@ -768,12 +858,30 @@ export class HUD {
     if (frame.running && this.countdownT < 0) {
       this.remaining = Math.max(0, this.remaining - dt);
     }
-    this.timerDigits.set(formatClock(this.remaining));
-    this.timerTenths.set(this.remaining < 60 ? formatTenths(this.remaining) : '');
-    this.timerBar.set(this.totalTime > 0 ? clamp01(this.remaining / this.totalTime) : 0);
-    const warn = this.remaining <= 15 && this.remaining > 0;
-    this.timerWarn.set(warn);
-    this.timerCrit.set(this.remaining <= 5 && this.remaining > 0);
+    if (this.roaming) {
+      /*
+       * No fare, no deadline. An empty dial reading "0.0" under "TIEMPO" is a
+       * lie the player reads as "you ran out"; the carry-over, when there is
+       * one, is labelled as what it is.
+       */
+      const carry = this.remaining > 0.05;
+      this.timerLabelEs.set(carry ? 'BONO' : 'SIN CARRERA');
+      this.timerLabelEn.set(carry ? 'Carry-over' : 'No fare');
+      this.timerNode.classList.toggle('is-idle', !carry);
+      this.timerDigits.set(carry ? formatClock(this.remaining) : '—');
+      this.timerTenths.set(carry && this.remaining < 60 ? formatTenths(this.remaining) : '');
+      this.timerBar.set(carry && this.totalTime > 0 ? clamp01(this.remaining / this.totalTime) : 0);
+      /* the red "you are about to fail" treatment belongs to a live fare only */
+      this.timerWarn.set(false);
+      this.timerCrit.set(false);
+    } else {
+      this.timerDigits.set(formatClock(this.remaining));
+      this.timerTenths.set(this.remaining < 60 ? formatTenths(this.remaining) : '');
+      this.timerBar.set(this.totalTime > 0 ? clamp01(this.remaining / this.totalTime) : 0);
+      const warn = this.remaining <= 15 && this.remaining > 0;
+      this.timerWarn.set(warn);
+      this.timerCrit.set(this.remaining <= 5 && this.remaining > 0);
+    }
 
     /* fare -------------------------------------------------------------- */
     if (this.scoreShown !== this.scoreTarget) {

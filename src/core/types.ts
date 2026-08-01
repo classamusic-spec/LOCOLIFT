@@ -75,6 +75,19 @@ export interface SettingsState {
   uiScale: number; // 0.75..1.5
   minimapRotates: boolean;
   showSpeedUnits: 'mph' | 'kmh';
+  /**
+   * The view the rig opens in, and the one the settings menu writes.
+   *
+   * Persisted because a first-person player is a first-person player: having
+   * to press `V` four times at the start of every shift is the kind of small
+   * tax that makes a view mode go unused. The camera adopts it only when the
+   * value *changes*, so cycling with `V` mid-shift does not fight it.
+   *
+   * A string union rather than an import of `CameraModeId` — this file is the
+   * dependency-free bottom of the tree and must not learn that a camera
+   * module exists. `camera/CameraModes.ts` narrows it back on the way in.
+   */
+  cameraView: 'chase' | 'close' | 'far' | 'cockpit' | 'bumper';
 }
 
 /* ---------------------------------------------------------------- context */

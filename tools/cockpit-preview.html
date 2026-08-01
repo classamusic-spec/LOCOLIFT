@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Loco Lift — cockpit preview</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0b1d2a;
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
+      }
+      #hud {
+        position: fixed;
+        left: 8px;
+        top: 8px;
+        font: 12px/1.4 ui-monospace, monospace;
+        color: #cfe;
+        background: rgba(0, 0, 0, 0.45);
+        padding: 6px 8px;
+        border-radius: 4px;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="gl"></canvas>
+    <div id="hud"></div>
+    <script type="module">
+      /*
+       * A one-vehicle preview of the driver's-seat geometry.
+       *
+       * The full game renders 1.2–1.5 M triangles of Old San Juan, which under
+       * SwiftShader on a shared four-core box is about a frame a second — far
+       * too slow to iterate on a dashboard with. This page loads exactly one
+       * vehicle mesh and nothing else, so a frame costs milliseconds and the
+       * interior can be looked at properly, at full resolution, from any angle.
+       *
+       * It is a geometry viewer, not a substitute for the real thing: lighting,
+       * post-processing and the camera rig are all the game's, not this page's.
+       * Integration is still verified by tools/cockpit-test.mjs.
+       *
+       *   /tools/cockpit-preview.html?v=jeep&steer=0.6&yaw=-30&pitch=-10
+       */
+      import * as THREE from '/node_modules/three/build/three.module.js';
+      import { JeepModel } from '/src/vehicle/JeepModel.ts';
+      import { BusModel } from '/src/vehicle/BusModel.ts';
+      import { CarriageModel } from '/src/vehicle/CarriageModel.ts';
+
+      const q = new URLSearchParams(location.search);
+      const which = q.get('v') ?? 'jeep';
+      const steer = Number(q.get('steer') ?? '0');
+      const yaw = (Number(q.get('yaw') ?? '0') * Math.PI) / 180;
+      const pitch = (Number(q.get('pitch') ?? '0') * Math.PI) / 180;
+      const fov = Number(q.get('fov') ?? '68');
+      const night = q.get('night') === '1';
+      const external = q.get('ext') === '1';
+
+      const canvas = document.getElementById('gl');
+      const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+      renderer.setPixelRatio(1);
+      renderer.setSize(window.innerWidth, window.innerHeight, false);
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = night ? 1.5 : 1.0;
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(night ? 0x0a1522 : 0x8fb6d8);
+
+      const hemi = new THREE.HemisphereLight(
+        night ? 0x28405e : 0xbfd8f0,
+        night ? 0x101018 : 0x6b6350,
+        night ? 0.5 : 1.5,
+      );
+      scene.add(hemi);
+      const sun = new THREE.DirectionalLight(0xfff0d8, night ? 0.25 : 2.2);
+      sun.position.set(-6, 9, -4);
+      scene.add(sun);
+      /* a warm bounce from the road, which is what actually lights a footwell */
+      const bounce = new THREE.DirectionalLight(0xffd9a8, night ? 0.15 : 0.55);
+      bounce.position.set(2, -4, 3);
+      scene.add(bounce);
+
+      const ground = new THREE.Mesh(
+        new THREE.PlaneGeometry(220, 220),
+        new THREE.MeshStandardMaterial({ color: 0x4a5d78, roughness: 0.95 }),
+      );
+      ground.rotation.x = -Math.PI / 2;
+      scene.add(ground);
+
+      /* a few blocks of stand-in façade so the windscreen has something in it */
+      const facade = new THREE.MeshStandardMaterial({ color: 0xe8dcc8, roughness: 0.9 });
+      for (let i = 0; i < 14; i++) {
+        const h = 7 + (i % 3) * 3;
+        for (const s of [-1, 1]) {
+          const b = new THREE.Mesh(new THREE.BoxGeometry(6, h, 9), facade);
+          b.position.set(s * 7.5, h / 2, -8 - i * 10);
+          scene.add(b);
+        }
+      }
+
+      const Model = which === 'bus' ? BusModel : which === 'carriage' ? CarriageModel : JeepModel;
+      const model = new Model('high');
+      scene.add(model.object3d);
+
+      /* rest pose: springs at static sag, wheels straight, cockpit shown */
+      for (let i = 0; i < 4; i++) model.setSuspension(i, 0.4);
+      model.setSteer(steer);
+      model.setChassisLean(0, 0, 0);
+      model.setHeadlights(night);
+      model.setCockpitVisible?.(1);
+      model.setInstruments?.(0.55, 0.42, 3);
+      model.tick(0.016, 12);
+      /* the ground plane sits at the model's own road height */
+      model.object3d.position.y = -groundLocalY(which);
+
+      function groundLocalY(id) {
+        /* mirrors each model's MODEL.groundLocalY without importing three sets
+         * of tuning constants into a debug page */
+        if (id === 'bus') return -1.02;
+        if (id === 'carriage') return -0.94;
+        return -0.6747;
+      }
+
+      const camera = new THREE.PerspectiveCamera(fov, 1, 0.3, 800);
+      const eye = new THREE.Vector3();
+
+      function place() {
+        if (external) {
+          camera.position.set(6.5, 3.2, 7.5);
+          camera.lookAt(0, 1.2, 0);
+          return;
+        }
+        if (model.getCockpitEye) model.getCockpitEye(eye);
+        else eye.set(0, 1, 0);
+        eye.applyMatrix4(model.object3d.matrix);
+        camera.position.copy(eye);
+        camera.rotation.set(pitch, yaw, 0, 'YXZ');
+      }
+
+      let t = 0;
+      function frame() {
+        t += 0.016;
+        model.tick(0.016, 12);
+        model.setInstruments?.(0.4 + 0.35 * Math.sin(t * 0.7), 0.55, 3);
+        model.object3d.updateMatrix();
+        place();
+        renderer.render(scene, camera);
+        requestAnimationFrame(frame);
+      }
+
+      function resize() {
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+      }
+      window.addEventListener('resize', resize);
+      resize();
+      frame();
+
+      document.getElementById('hud').textContent =
+        `${which}  steer=${steer}  yaw=${(yaw * 180) / Math.PI}°  pitch=${(pitch * 180) / Math.PI}°  fov=${fov}` +
+        (external ? '  [external]' : '');
+      window.__preview = { model, camera, scene, renderer };
+    </script>
+  </body>
+</html>

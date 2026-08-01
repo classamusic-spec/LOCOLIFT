@@ -27,8 +27,17 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { PALETTE } from '../core/Config';
-import { clamp, clamp01 } from '../core/MathUtils';
+import { clamp, clamp01, damp } from '../core/MathUtils';
 import type { QualityTier } from '../core/types';
+import {
+  MeterDisplay,
+  buildGauge,
+  buildHands,
+  createParts,
+  makeGaugeFace,
+  makeSwitchStrip,
+  needleAngle,
+} from './CockpitKit';
 import { MODEL, SUSPENSION, WHEEL_LAYOUT } from './VehicleTuning';
 
 /* ------------------------------------------------------------------ palette */
@@ -56,6 +65,37 @@ const PAINT = {
 } as const;
 
 const UP = /* @__PURE__ */ new THREE.Vector3(0, 1, 0);
+
+/**
+ * The driver's-seat geometry, in one block.
+ *
+ * `eye` is the number that matters most and the one that is easiest to get
+ * wrong. It is derived, not guessed: the seat squab's top face sits at
+ * y = 0.355 and a seated adult's eye is ~0.64 m above the cushion, which puts
+ * the eye at 1.0. The seat back stands at z = +0.26, so a head sits about
+ * 0.14 m ahead of it at z = +0.10. Left-hand drive, so x matches the steering
+ * column at −0.37.
+ *
+ * From there the rest checks out geometrically: the steering wheel's nearest
+ * rim point ends up 0.50 m away and the scuttle 0.63 m, both comfortably
+ * beyond `CONFIG.camera.near` (0.30 m), so nothing in the cabin can clip
+ * through the near plane however hard the suspension works.
+ */
+const COCKPIT = {
+  eye: /* @__PURE__ */ new THREE.Vector3(-0.37, 1.0, 0.1),
+  /** the binnacle sits on the column centreline */
+  podX: -0.37,
+  /** how far the instrument pod leans back, radians (≈26°, square to the eye) */
+  podTilt: 0.46,
+  /** how far the hands are carried round the rim before they stop, radians */
+  handLock: 1.0,
+  /** needle damping rate, 1/s — a hairspring, not a debug readout */
+  needleRate: 7.5,
+  /** the meter's flag drop, dollars */
+  fareFlag: 3.5,
+  /** and what it charges per metre — ≈$1.60 a kilometre, which is about right */
+  farePerMetre: 0.0016,
+} as const;
 
 /* ------------------------------------------------------- geometry utilities */
 
@@ -296,6 +336,25 @@ export class JeepModel {
   private readonly passenger = new THREE.Group();
   private readonly beams = new THREE.Group();
 
+  /* ------------------------------------------------------- driver's seat */
+  /**
+   * Everything that only exists to be looked at from the driver's seat. Built
+   * once, parked hidden; Three skips an invisible subtree wholesale, so the
+   * chase camera pays nothing at all for it.
+   */
+  private readonly cockpit = new THREE.Group();
+  /** hands, on their own node so they can lag the rim at full lock */
+  private readonly handRig = new THREE.Group();
+  private needleSpeed: THREE.Group | null = null;
+  private needleRpm: THREE.Group | null = null;
+  private meter: MeterDisplay | null = null;
+  private cockpitOn = false;
+  private needleSpeedAngle = 0;
+  private needleRpmAngle = 0;
+  /** metres driven, for the fare the meter is counting up */
+  private fareDistance = 0;
+  private fareClock = 0;
+
   /* live materials */
   private readonly matHeadlight: THREE.MeshStandardMaterial;
   private readonly matTaillight: THREE.MeshStandardMaterial;
@@ -440,6 +499,7 @@ export class JeepModel {
     this.buildSteeringWheel(matMatte, matChrome);
     this.buildPassenger();
     this.buildWheels(matRubber, matChrome);
+    this.buildCockpit();
 
     this.chassis.add(this.beams);
     this.setQuality(quality);
@@ -455,6 +515,14 @@ export class JeepModel {
       const mesh = o as THREE.Mesh;
       if (mesh.isMesh) mesh.castShadow = false;
     });
+    /* Nothing inside the cabin casts: it is only ever seen from a point that
+     * is itself inside the cabin, and a dashboard in the shadow atlas is pure
+     * cost. Undone here rather than in the builder because the traverse above
+     * stamps `castShadow` over the whole tree. */
+    this.cockpit.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (mesh.isMesh) mesh.castShadow = false;
+    });
   }
 
   /* ================================================== Vehicle-facing methods */
@@ -465,7 +533,14 @@ export class JeepModel {
     /* positive steer is a right turn, which is a negative rotation about +Y */
     this.wheelSteer[0].rotation.y = -a;
     this.wheelSteer[1].rotation.y = -a;
-    this.steeringWheel.rotation.z = -a * MODEL.steeringWheelRatio;
+    const wheelAngle = -a * MODEL.steeringWheelRatio;
+    this.steeringWheel.rotation.z = wheelAngle;
+    /* The hands follow the rim, but only so far. At full lock the wheel turns
+     * 121°, and a pair of hands carried that far round ends up upside down at
+     * the bottom of the rim, which reads as a bug rather than as steering. A
+     * real driver shuffles; clamping the hand node is the cheapest honest
+     * version of that, and it is invisible because the rim is a torus. */
+    this.handRig.rotation.z = clamp(wheelAngle, -COCKPIT.handLock, COCKPIT.handLock);
   }
 
   /** Advance every wheel by `dr` radians (positive = rolling forward). */
@@ -529,10 +604,42 @@ export class JeepModel {
     this.chassis.position.y = heave;
   }
 
+  /* ------------------------------------------------------ driver's seat */
+
+  /** Show/hide the interior. Called by `Vehicle` from the camera's blend. */
+  setCockpitVisible(amount: number): void {
+    const on = amount > 0.002;
+    if (on === this.cockpitOn) return;
+    this.cockpitOn = on;
+    this.cockpit.visible = on;
+  }
+
+  /**
+   * The driver's eye, in body-local metres.
+   *
+   * Pushed through the cosmetic chassis lean, because every part of the
+   * interior is a child of that group: reporting a raw body-space point would
+   * let the dashboard pitch up to 11° away from the eye on a hard corner and
+   * the whole cabin would visibly swim.
+   */
+  getCockpitEye(out: THREE.Vector3): THREE.Vector3 {
+    this.chassis.updateMatrix();
+    return out.copy(COCKPIT.eye).applyMatrix4(this.chassis.matrix);
+  }
+
+  /** Instrument needles. Free while the cockpit is hidden. */
+  setInstruments(rpmNorm: number, speedNorm: number, _gear: number): void {
+    if (!this.cockpitOn) return;
+    this.needleSpeedAngle = clamp01(speedNorm);
+    this.needleRpmAngle = clamp01(rpmNorm);
+  }
+
   /** Idle shake and sign shimmer. Cheap, and it stops the Jeep looking dead. */
   tick(dt: number, speed: number): void {
     this.idlePhase += dt * 34;
     this.signPhase += dt * 2.2;
+
+    if (this.cockpitOn) this.tickCockpit(dt, speed);
 
     const idle = clamp01(1 - speed / 6);
     const shake = Math.sin(this.idlePhase) * 0.0016 * idle;
@@ -551,6 +658,8 @@ export class JeepModel {
   }
 
   dispose(): void {
+    this.meter?.dispose();
+    this.meter = null;
     for (const g of this.geometries) g.dispose();
     for (const m of this.materials) m.dispose();
     for (const t of this.textures) t.dispose();
@@ -994,6 +1103,302 @@ export class JeepModel {
     }
 
     this.chassis.add(this.steeringWheel);
+  }
+
+  /* ==================================================== the driver's seat */
+
+  /**
+   * The Jeep's interior, from the driver's eye.
+   *
+   * The brief for this vehicle is different from the other two, and it is a
+   * gift: it has no roof, no doors above the waist and no back wall. There is
+   * nothing to build a "cabin" out of, so the view is defined by what frames
+   * it — the chrome cage overhead, the raked windscreen and its header rail,
+   * the exposed scuttle with a twin-pod binnacle bolted on top of it, teal door
+   * cards at elbow height, and open sky above and open bed behind. Everything
+   * here exists to sell that: it is a car you sit *on*, not in.
+   *
+   * Nine merged meshes, all hidden until the camera is in the seat.
+   */
+  private buildCockpit(): void {
+    this.cockpit.name = 'jeep_cockpit';
+    this.cockpit.visible = false;
+
+    const parts = createParts();
+    const vinyl = new THREE.MeshStandardMaterial({
+      color: 0x24242c,
+      metalness: 0.08,
+      roughness: 0.86,
+    });
+    const card = new THREE.MeshStandardMaterial({
+      color: PAINT.accent,
+      metalness: 0.06,
+      roughness: 0.62,
+    });
+    const alloy = new THREE.MeshStandardMaterial({
+      color: 0x9aa4b2,
+      metalness: 0.85,
+      roughness: 0.3,
+    });
+    this.materials.push(vinyl, card, alloy);
+
+    const dark = new Shell();
+    const trim = new Shell();
+    const metal = new Shell();
+
+    /* ---- scuttle: a padded top roll and a proper vertical fascia ---------
+     * The exterior model's dash is a plain box because from outside that is
+     * all you can see of it. From the seat it is 60 cm from your face, so it
+     * gets an edge, a face and a lip. */
+    /* z-extent stops at −0.46 on purpose: the wheel rim's lowest point is at
+     * z = −0.283 and it sweeps up to y = 0.72 by z = −0.46, so a roll that
+     * reached any further back would have the steering wheel buried in it. */
+    dark.add(box(1.5, 0.075, 0.26, 0, 0.672, -0.59));
+    dark.add(box(1.46, 0.2, 0.02, 0, 0.55, -0.412));
+    dark.add(box(1.46, 0.035, 0.09, 0, 0.452, -0.45, 0.5));
+
+    /* glovebox lid + latch, passenger side */
+    trim.add(box(0.42, 0.15, 0.02, 0.4, 0.55, -0.402));
+    metal.add(cyl(0.018, 0.018, 0.03, 8, 0.4, 0.55, -0.39, 'z'));
+
+    /* ---- twin-pod binnacle ---------------------------------------------
+     * A nacelle standing on the scuttle, leaning back at 26° so its faces are
+     * square to the eye. Everything inside it is authored in the pod's own
+     * frame, which is why the gauges need no individual aiming. */
+    const pod = new THREE.Group();
+    pod.position.set(COCKPIT.podX, 0.745, -0.575);
+    pod.rotation.x = -COCKPIT.podTilt;
+    this.cockpit.add(pod);
+
+    const podShell = new Shell();
+    podShell.add(box(0.54, 0.28, 0.17, 0, 0, -0.086));
+    /* the visor that keeps the sun off the dials */
+    podShell.add(box(0.58, 0.028, 0.15, 0, 0.152, 0.028, -0.34));
+    podShell.addMirrored(box(0.022, 0.19, 0.12, 0.276, 0.03, 0.012));
+    const podGeo = podShell.build();
+    if (podGeo) {
+      this.geometries.push(podGeo);
+      pod.add(new THREE.Mesh(podGeo, vinyl));
+    }
+
+    const speedFace = makeGaugeFace({
+      label: 'VELOCIDAD',
+      unit: 'MPH',
+      numerals: [0, 20, 40, 60, 80, 100, 120],
+      redlineAt: 0.86,
+      accent: '#f2b134',
+    });
+    const rpmFace = makeGaugeFace({
+      label: 'MOTOR',
+      unit: 'x1000 RPM',
+      numerals: [0, 1, 2, 3, 4, 5, 6, 7],
+      redlineAt: 0.78,
+      accent: '#2fa8a0',
+    });
+    const speedGauge = buildGauge(0.098, speedFace, 0xff5a4a, parts);
+    const rpmGauge = buildGauge(0.084, rpmFace, 0xffd166, parts);
+    speedGauge.group.position.set(-0.118, 0.012, 0.008);
+    rpmGauge.group.position.set(0.13, 0.006, 0.008);
+    pod.add(speedGauge.group, rpmGauge.group);
+    this.needleSpeed = speedGauge.needle;
+    this.needleRpm = rpmGauge.needle;
+
+    /* warning lamps between the pods — the little bank every 4x4 has */
+    const lampMat = new THREE.MeshStandardMaterial({
+      color: 0x1a1c22,
+      emissive: new THREE.Color(0xffb020),
+      emissiveIntensity: 0.9,
+      metalness: 0.1,
+      roughness: 0.5,
+    });
+    this.materials.push(lampMat);
+    const lamps = new Shell();
+    for (let i = 0; i < 3; i++) {
+      lamps.add(cyl(0.011, 0.011, 0.012, 6, 0.006, 0.058 - i * 0.045, 0.006, 'z'));
+    }
+    const lampGeo = lamps.build();
+    if (lampGeo) {
+      this.geometries.push(lampGeo);
+      pod.add(new THREE.Mesh(lampGeo, lampMat));
+    }
+
+    /* ---- the taxi meter -------------------------------------------------
+     * On a stalk off the centre of the scuttle, angled at the driver, because
+     * that is exactly where every meter in San Juan is bolted.
+     */
+    this.meter = new MeterDisplay();
+    if (this.meter.texture) this.textures.push(this.meter.texture);
+    const meterMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      map: this.meter.texture,
+      emissive: new THREE.Color(0xffffff),
+      emissiveMap: this.meter.texture,
+      emissiveIntensity: 0.55,
+      metalness: 0.1,
+      roughness: 0.55,
+    });
+    this.materials.push(meterMat);
+
+    const meterPod = new THREE.Group();
+    meterPod.position.set(0.16, 0.735, -0.5);
+    meterPod.rotation.set(-0.36, -0.34, 0);
+    this.cockpit.add(meterPod);
+    const meterShell = new Shell();
+    meterShell.add(box(0.2, 0.135, 0.1, 0, 0, -0.05));
+    const meterCase = meterShell.build();
+    if (meterCase) {
+      this.geometries.push(meterCase);
+      meterPod.add(new THREE.Mesh(meterCase, vinyl));
+    }
+    const meterFace = new THREE.PlaneGeometry(0.166, 0.104);
+    this.geometries.push(meterFace);
+    const meterMesh = new THREE.Mesh(meterFace, meterMat);
+    meterMesh.position.z = 0.001;
+    meterPod.add(meterMesh);
+    /* the stalk down to the scuttle */
+    metal.add(tube(0.16, 0.735, -0.55, 0.16, 0.63, -0.56, 0.014, 6));
+
+    /* ---- switch strip on the fascia ------------------------------------- */
+    const strip = makeSwitchStrip(['LUZ', 'AIRE', 'RADIO', 'AUX'], '#2fa8a0');
+    if (strip) {
+      this.textures.push(strip);
+      const stripMat = new THREE.MeshStandardMaterial({
+        color: 0xffffff,
+        map: strip,
+        emissive: new THREE.Color(0xffffff),
+        emissiveMap: strip,
+        emissiveIntensity: 0.28,
+        metalness: 0.15,
+        roughness: 0.6,
+      });
+      this.materials.push(stripMat);
+      const g = new THREE.PlaneGeometry(0.42, 0.079);
+      g.translate(0.02, 0.512, -0.4);
+      this.geometries.push(g);
+      this.cockpit.add(new THREE.Mesh(g, stripMat));
+    }
+
+    /* ---- door cards, both sides ---------------------------------------- */
+    const cardX = MODEL.halfWidth - 0.05;
+    trim.addMirrored(box(0.02, 0.44, 1.32, cardX, 0.34, 0.02));
+    dark.addMirrored(box(0.055, 0.07, 0.62, cardX - 0.02, 0.55, -0.08));
+    dark.addMirrored(box(0.05, 0.1, 0.34, cardX - 0.025, 0.2, -0.2));
+    metal.addMirrored(tube(cardX - 0.04, 0.46, -0.34, cardX - 0.04, 0.46, -0.1, 0.016, 6));
+
+    /* ---- the driver's own seat, in the lower periphery ------------------ */
+    dark.add(box(0.055, 0.36, 0.44, -0.6, 0.6, 0.12, -0.16));
+    dark.add(box(0.055, 0.36, 0.44, -0.14, 0.6, 0.12, -0.16));
+    /* the passenger's harness, so the empty seat still reads as a seat */
+    trim.add(box(0.05, 0.012, 0.5, 0.28, 0.72, 0.1, 0.5));
+    trim.add(box(0.05, 0.012, 0.5, 0.46, 0.72, 0.1, -0.5));
+
+    /* ---- pedals and the footwell ---------------------------------------- */
+    metal.add(box(0.07, 0.15, 0.02, -0.25, 0.19, -0.6, -0.5));
+    metal.add(box(0.1, 0.13, 0.02, -0.38, 0.21, -0.63, -0.35));
+    metal.add(box(0.09, 0.13, 0.02, -0.52, 0.21, -0.63, -0.35));
+    dark.add(box(0.62, 0.02, 0.3, -0.36, 0.09, -0.5));
+
+    /* ---- gear + transfer knobs ------------------------------------------ */
+    const knob = new THREE.SphereGeometry(0.038, 10, 8);
+    knob.translate(0.09, 0.46, 0.06);
+    dark.add(knob);
+    metal.add(tube(0.2, 0.22, 0.02, 0.22, 0.4, 0.08, 0.017, 6));
+    const knob2 = new THREE.SphereGeometry(0.03, 8, 6);
+    knob2.translate(0.22, 0.42, 0.08);
+    trim.add(knob2);
+
+    /* ---- rear-view mirror on the windscreen header ---------------------- */
+    metal.add(tube(0, MODEL.yWindscreenTop - 0.02, -0.19, 0, 0.955, -0.245, 0.014, 6));
+    dark.add(box(0.3, 0.085, 0.028, 0, 0.94, -0.25, 0.1));
+    const mirrorMat = new THREE.MeshStandardMaterial({
+      color: 0x8fa6b8,
+      metalness: 1,
+      roughness: 0.08,
+      envMapIntensity: 1.6,
+    });
+    this.materials.push(mirrorMat);
+    const glassG = new THREE.PlaneGeometry(0.27, 0.068);
+    glassG.rotateX(Math.PI + 0.1);
+    glassG.translate(0, 0.94, -0.236);
+    this.geometries.push(glassG);
+    this.cockpit.add(new THREE.Mesh(glassG, mirrorMat));
+
+    /* ---- hands ----------------------------------------------------------
+     * Parented to a node that copies the wheel's pose, not to the wheel
+     * itself, so `setSteer` can clamp how far round they travel. */
+    this.handRig.position.copy(this.steeringWheel.position);
+    this.handRig.rotation.x = this.steeringWheel.rotation.x;
+    this.handRig.add(buildHands(0.15, 0.022, parts, 0xb27a52, PAINT.cream));
+    this.cockpit.add(this.handRig);
+
+    /* ---- emit the merged shells ----------------------------------------- */
+    for (const [shell, mat, name] of [
+      [dark, vinyl, 'trim'],
+      [trim, card, 'panels'],
+      [metal, alloy, 'metal'],
+    ] as const) {
+      const geo = shell.build();
+      if (!geo) continue;
+      this.geometries.push(geo);
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.name = `jeep_cockpit_${name}`;
+      this.cockpit.add(mesh);
+    }
+
+    for (const m of parts.materials) this.materials.push(m);
+    for (const g of parts.geometries) this.geometries.push(g);
+    for (const t of parts.textures) this.textures.push(t);
+    if (speedFace) this.textures.push(speedFace);
+    if (rpmFace) this.textures.push(rpmFace);
+
+    /* the exterior wheel is shared with the chase view, so the only thing the
+     * cockpit adds to it is a rim marker — and that is what makes the steering
+     * unmistakable from the seat, where the spokes are half hidden by hands */
+    const marker = new THREE.BoxGeometry(0.05, 0.032, 0.03);
+    marker.translate(0, 0.152, 0);
+    this.geometries.push(marker);
+    const markerMat = new THREE.MeshStandardMaterial({
+      color: PAINT.stripe,
+      metalness: 0.1,
+      roughness: 0.5,
+    });
+    this.materials.push(markerMat);
+    this.steeringWheel.add(new THREE.Mesh(marker, markerMat));
+
+    this.chassis.add(this.cockpit);
+  }
+
+  /** Needle easing and the fare clock. Only runs while the seat is occupied. */
+  private tickCockpit(dt: number, speed: number): void {
+    /* Needles are damped, not snapped: a real instrument has a hairspring and
+     * a damping fluid, and a needle that tracks the simulation exactly looks
+     * like a debug readout. */
+    if (this.needleSpeed) {
+      this.needleSpeed.rotation.z = damp(
+        this.needleSpeed.rotation.z,
+        needleAngle(this.needleSpeedAngle),
+        COCKPIT.needleRate,
+        dt,
+      );
+    }
+    if (this.needleRpm) {
+      this.needleRpm.rotation.z = damp(
+        this.needleRpm.rotation.z,
+        needleAngle(this.needleRpmAngle),
+        COCKPIT.needleRate * 1.6,
+        dt,
+      );
+    }
+
+    this.fareDistance += Math.abs(speed) * dt;
+    this.fareClock += dt;
+    if (this.fareClock >= 0.25) {
+      this.fareClock = 0;
+      this.meter?.set(
+        COCKPIT.fareFlag + this.fareDistance * COCKPIT.farePerMetre,
+        this.passenger.visible,
+      );
+    }
   }
 
   /** A stylised fare riding in the back — hands on the grab rail, hat on. */

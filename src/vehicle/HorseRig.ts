@@ -621,6 +621,34 @@ export class HorseRig {
     return this.legs[i]?.grounded ?? false;
   }
 
+  /**
+   * Where the rein ring on the bit is, in rig-local space. `side` is +1 for
+   * the horse's right, −1 for its left.
+   *
+   * Every frame this is somewhere different: the head nods with the gait, the
+   * neck rises with the reach, the whole body pitches and bobs. Anything that
+   * has to *stay attached* to the bridle — the reins, most obviously — has to
+   * ask rather than assume, so the anchor is derived by walking the same node
+   * chain the mesh hangs off (body → neckLow → neckUp → head) rather than
+   * being re-derived from the gait parameters, which could disagree.
+   *
+   * The offsets match the brass rein rings in `buildHead`. `updateMatrix` is
+   * explicit because Three only composes a node's local matrix during a render
+   * traversal, and callers legitimately want this before one has happened.
+   */
+  bitAnchor(side: number, out: THREE.Vector3): THREE.Vector3 {
+    this.head.updateMatrix();
+    this.neckUp.updateMatrix();
+    this.neckLow.updateMatrix();
+    this.body.updateMatrix();
+    return out
+      .set(side >= 0 ? 0.088 : -0.088, -0.114, -0.362)
+      .applyMatrix4(this.head.matrix)
+      .applyMatrix4(this.neckUp.matrix)
+      .applyMatrix4(this.neckLow.matrix)
+      .applyMatrix4(this.body.matrix);
+  }
+
   /** How far the body sits above its rest height right now, metres. */
   get bodyLift(): number {
     return this.bob;

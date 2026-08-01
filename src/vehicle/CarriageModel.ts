@@ -49,11 +49,42 @@ import {
   CARRIAGE_PAINT as P,
   CARRIAGE_SUSPENSION as S,
 } from './CarriageTuning';
+import { MeterDisplay, ReinRibbon, createParts, taperTube } from './CockpitKit';
 import { HorseRig } from './HorseRig';
 import type { VehicleModel } from './VehicleTuning';
 
 /** metres above the road → local Y */
 const Y = (h: number): number => G.groundLocalY + h;
+
+/**
+ * The coachman's box, in one block.
+ *
+ * `eye` is the coachman's own head, taken straight from `buildFigures`: the
+ * box cushion is at `hBox = 1.28`, the figure's torso hangs off `hBox + 0.1`
+ * and its head sits 0.56 above that, i.e. 1.94 m over the road. The eye goes a
+ * hair below at 1.91 and a hair forward of the head's centre. It is a *high*
+ * seat — higher than the Jeep driver's by nearly a metre — and that is the
+ * whole character of the view: you look down on the traffic and along the
+ * horse's back.
+ *
+ * The hands are the coachman's, at the end of his own arms in the same file:
+ * `(±0.17, hBox + 0.32, zBox − 0.28)`. Keeping the two in sync matters,
+ * because the reins are anchored to these numbers and the figure has to be
+ * holding them when the camera is anywhere else.
+ */
+const COCKPIT = {
+  eyeHeight: 1.91,
+  eyeZ: 1.06,
+  /** the fists, metres either side of centre and above the road */
+  handX: 0.16,
+  handH: 1.6,
+  handZ: 0.78,
+  /** metres of droop at the midpoint of a rein — leather, not wire */
+  reinSag: 0.16,
+  /** the meter's flag drop, dollars — a scenic ride, priced like one */
+  fareFlag: 5.0,
+  farePerMetre: 0.0034,
+} as const;
 
 const UP = /* @__PURE__ */ new THREE.Vector3(0, 1, 0);
 const AXIS_Y = /* @__PURE__ */ new THREE.Vector3(0, 1, 0);
@@ -511,6 +542,23 @@ export class CarriageModel implements VehicleModel {
   private readonly driver = new THREE.Group();
   private readonly beams = new THREE.Group();
 
+  /* ------------------------------------------------------- driver's seat */
+  /** the box, seen from the box: built once, parked hidden */
+  private readonly cockpit = new THREE.Group();
+  /**
+   * The reins. NOT part of the cockpit group — they are correct and visible
+   * from every camera, and the static ones they replace were quietly wrong in
+   * the chase view too (baked into the shaft group, they swung away from the
+   * driver's hands the moment the turntable yawed).
+   */
+  private reins: ReinRibbon | null = null;
+  private meter: MeterDisplay | null = null;
+  private cockpitOn = false;
+  private fareDistance = 0;
+  private fareClock = 0;
+  private readonly reinHand = new THREE.Vector3();
+  private readonly reinBit = new THREE.Vector3();
+
   /* live materials */
   private readonly matLamp: THREE.MeshStandardMaterial;
   private readonly matLampRear: THREE.MeshStandardMaterial;
@@ -663,6 +711,8 @@ export class CarriageModel implements VehicleModel {
     this.horse = new HorseRig(quality);
     this.horseRoot.add(this.horse.object3d);
 
+    this.buildCockpit(matBrass, matLeather);
+
     this.chassis.add(this.beams);
     this.setQuality(quality);
 
@@ -674,6 +724,10 @@ export class CarriageModel implements VehicleModel {
       }
     });
     this.beams.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.isMesh) m.castShadow = false;
+    });
+    this.cockpit.traverse((o) => {
       const m = o as THREE.Mesh;
       if (m.isMesh) m.castShadow = false;
     });
@@ -752,6 +806,32 @@ export class CarriageModel implements VehicleModel {
     if (occupied) this.matPassenger.color.setHex(archetypeColor(archetypeId));
   }
 
+  /* ------------------------------------------------------ driver's seat */
+
+  /**
+   * Show the box's own furniture and, crucially, **hide the coachman**.
+   *
+   * At `interiorWeight` 1 the camera is inside his head; leaving him visible
+   * puts the inside of a skull across the whole frame. The swap is a single
+   * boolean because the two are mutually exclusive by construction — the
+   * cockpit's hands are authored at exactly the coordinates his are.
+   */
+  setCockpitVisible(amount: number): void {
+    const on = amount > 0.002;
+    if (on === this.cockpitOn) return;
+    this.cockpitOn = on;
+    this.cockpit.visible = on;
+    this.driver.visible = !on;
+  }
+
+  /** The coachman's eye, in body-local metres, through the cosmetic lean. */
+  getCockpitEye(out: THREE.Vector3): THREE.Vector3 {
+    this.chassis.updateMatrix();
+    return out
+      .set(0, Y(COCKPIT.eyeHeight), COCKPIT.eyeZ)
+      .applyMatrix4(this.chassis.matrix);
+  }
+
   /** Cosmetic body attitude layered over the rigid body's real motion. */
   setChassisLean(pitch: number, roll: number, heave: number): void {
     this.leanPitch = pitch;
@@ -815,6 +895,22 @@ export class CarriageModel implements VehicleModel {
       clamp((rearDelta - lift * 0.85) / shaftLen, -0.5, 0.5),
     );
 
+    /* --- the reins, re-solved from fists to bit rings ------------------ */
+    this.tickReins();
+
+    /* --- the taxímetro ------------------------------------------------- */
+    if (this.cockpitOn) {
+      this.fareDistance += Math.abs(speed) * dt;
+      this.fareClock += dt;
+      if (this.fareClock >= 0.25) {
+        this.fareClock = 0;
+        this.meter?.set(
+          COCKPIT.fareFlag + this.fareDistance * COCKPIT.farePerMetre,
+          this.passenger.visible,
+        );
+      }
+    }
+
     /* --- idle life: a standing carriage is never quite still ----------- */
     const idle = clamp01(1 - Math.abs(speed) / 4);
     if (idle > 0.001) {
@@ -835,6 +931,10 @@ export class CarriageModel implements VehicleModel {
 
   dispose(): void {
     this.horse.dispose();
+    this.reins?.dispose();
+    this.reins = null;
+    this.meter?.dispose();
+    this.meter = null;
     for (const g of this.geometries) g.dispose();
     for (const m of this.materials) m.dispose();
     for (const t of this.textures) t.dispose();
@@ -1531,6 +1631,202 @@ export class CarriageModel implements VehicleModel {
     yellow.addMirrored(box(0.016, 0.246, 0.012, 0.222, Y(1.08), G.zBodyRear + 0.004));
   }
 
+  /* ==================================================== the driver's seat */
+
+  /**
+   * The coachman's box, seen from the coachman's box.
+   *
+   * There is no dashboard here and no wheel: you are sitting a metre and a
+   * half up on a narrow buttoned cushion with a patent-leather splash board in
+   * front of your knees, a brass rein rail across it, and one dapple-grey Paso
+   * Fino between the shafts two metres ahead — moving, breathing, and swinging
+   * bodily out to the side when you steer, because the front axle is a
+   * turntable and the horse goes where it points.
+   *
+   * The reins are the interface. They run from your fists, over the splash
+   * board, along the shafts and up to the bit rings, and they are re-solved
+   * every frame in `tickReins` so they stay attached at both ends however far
+   * apart those ends get. That is the carriage's answer to "the steering wheel
+   * must turn": there is no wheel, and the reins do the job better.
+   *
+   * The coachman figure himself is *hidden* while this is shown — at
+   * `interiorWeight` 1 the camera is inside his skull.
+   */
+  private buildCockpit(matBrass: THREE.Material, matLeather: THREE.Material): void {
+    this.cockpit.name = 'carriage_cockpit';
+    this.cockpit.visible = false;
+
+    const parts = createParts();
+    const skin = this.mat(0xa9744f, 0, 0.82);
+    const cuff = this.mat(0xf1ece0, 0.02, 0.72);
+
+    const brass = new Shell();
+    const leather = new Shell();
+
+    /* ---- the driver's own hands, closed on the reins -------------------- */
+    const fists = new Shell();
+    const sleeves = new Shell();
+    for (const s of [-1, 1]) {
+      const x = s * COCKPIT.handX;
+      const fist = new THREE.SphereGeometry(0.056, 8, 6);
+      fist.scale(1, 0.86, 1.2);
+      fist.translate(x, Y(COCKPIT.handH), COCKPIT.handZ);
+      fists.add(fist);
+      /* the thumb along the top of the rein */
+      const thumb = new THREE.CapsuleGeometry(0.017, 0.05, 3, 5);
+      thumb.rotateX(Math.PI / 2);
+      thumb.translate(x - s * 0.012, Y(COCKPIT.handH + 0.035), COCKPIT.handZ - 0.038);
+      fists.add(thumb);
+      /* forearm back toward the shoulder, and a guayabera cuff over it */
+      fists.add(
+        taperTube(
+          x,
+          Y(COCKPIT.handH + 0.012),
+          COCKPIT.handZ + 0.04,
+          x + s * 0.035,
+          Y(COCKPIT.handH + 0.16),
+          COCKPIT.handZ + 0.3,
+          0.043,
+          0.05,
+          6,
+        ),
+      );
+      sleeves.add(
+        taperTube(
+          x + s * 0.03,
+          Y(COCKPIT.handH + 0.13),
+          COCKPIT.handZ + 0.24,
+          x + s * 0.045,
+          Y(COCKPIT.handH + 0.2),
+          COCKPIT.handZ + 0.4,
+          0.055,
+          0.062,
+          6,
+        ),
+      );
+    }
+    const fistGeo = fists.build();
+    if (fistGeo) {
+      this.geometries.push(fistGeo);
+      const m = new THREE.Mesh(fistGeo, skin);
+      m.name = 'carriage_cockpit_hands';
+      this.cockpit.add(m);
+    }
+    const sleeveGeo = sleeves.build();
+    if (sleeveGeo) {
+      this.geometries.push(sleeveGeo);
+      this.cockpit.add(new THREE.Mesh(sleeveGeo, cuff));
+    }
+
+    /* ---- the splash board, from the inside ------------------------------
+     * From outside it is a silhouette; from the box it is the thing your
+     * knees are against, so it gets a leather face, a rolled top edge and the
+     * brass rail the reins are looped over when the carriage is parked. */
+    leather.add(box(0.78, 0.44, 0.02, 0, Y(1.2), G.zDash + 0.06, 0.16));
+    leather.add(cyl(0.028, 0.028, 0.8, 8, 0, Y(1.42), G.zDash + 0.02, 'x'));
+    brass.addMirrored(cyl(0.014, 0.014, 0.05, 6, 0.38, Y(1.44), G.zDash - 0.02, 'x'));
+    /* the footboard's forward lip, and a brass tread strip on it */
+    leather.add(box(0.66, 0.03, 0.3, 0, Y(G.hBodyFloor + 0.18), G.zDash + 0.2, 0.42));
+    brass.add(box(0.6, 0.008, 0.05, 0, Y(G.hBodyFloor + 0.235), G.zDash + 0.26, 0.42));
+
+    /* ---- the brass taxímetro, clamped to the rein rail ------------------- */
+    this.meter = new MeterDisplay();
+    if (this.meter.texture) this.textures.push(this.meter.texture);
+    const meterMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      map: this.meter.texture,
+      emissive: new THREE.Color(0xffffff),
+      emissiveMap: this.meter.texture,
+      emissiveIntensity: 0.5,
+      metalness: 0.15,
+      roughness: 0.5,
+    });
+    this.materials.push(meterMat);
+    const meterPod = new THREE.Group();
+    meterPod.position.set(-0.24, Y(1.5), G.zDash + 0.02);
+    meterPod.rotation.set(-0.34, 0.2, 0);
+    this.cockpit.add(meterPod);
+    const meterCase = new THREE.BoxGeometry(0.19, 0.13, 0.09);
+    meterCase.translate(0, 0, -0.045);
+    this.geometries.push(meterCase);
+    meterPod.add(new THREE.Mesh(meterCase, matBrass));
+    const meterGlass = new THREE.PlaneGeometry(0.158, 0.099);
+    meterGlass.translate(0, 0, 0.002);
+    this.geometries.push(meterGlass);
+    meterPod.add(new THREE.Mesh(meterGlass, meterMat));
+    /* the bracket down to the rail */
+    brass.add(taperTube(-0.24, Y(1.44), G.zDash - 0.01, -0.24, Y(1.4), G.zDash + 0.02, 0.011, 0.011, 5));
+
+    /* ---- the box: cushion edge, back rail and the lamps' brass backs ----- */
+    leather.addMirrored(box(0.03, 0.09, 0.4, 0.4, Y(G.hBox + 0.06), G.zBox));
+    brass.addMirrored(cyl(0.05, 0.05, 0.03, 10, 0.44, Y(G.hLamp + 0.06), G.zBox - 0.36, 'x'));
+
+    const brassGeo = brass.build();
+    if (brassGeo) {
+      this.geometries.push(brassGeo);
+      this.cockpit.add(new THREE.Mesh(brassGeo, matBrass));
+    }
+    const leatherGeo = leather.build();
+    if (leatherGeo) {
+      this.geometries.push(leatherGeo);
+      this.cockpit.add(new THREE.Mesh(leatherGeo, matLeather));
+    }
+
+    for (const m of parts.materials) this.materials.push(m);
+    for (const g of parts.geometries) this.geometries.push(g);
+    for (const t of parts.textures) this.textures.push(t);
+
+    this.chassis.add(this.cockpit);
+
+    /* ---- the reins ------------------------------------------------------
+     * Under `object3d`, not `chassis`: one end is bolted to the leaning body
+     * and the other to a horse on a yawing turntable, so the only frame both
+     * can be expressed in without a per-frame matrix inverse is the rigid
+     * body's own. */
+    const reinMat = new THREE.MeshStandardMaterial({
+      color: P.leather,
+      metalness: 0.05,
+      roughness: 0.55,
+      side: THREE.DoubleSide,
+    });
+    this.materials.push(reinMat);
+    this.reins = new ReinRibbon(reinMat, 2, 12, 0.013);
+    this.object3d.add(this.reins.mesh);
+  }
+
+  /**
+   * Re-solve both reins from the driver's fists to the bit rings.
+   *
+   * Both endpoints are pushed into the rigid body's frame — the hands through
+   * the cosmetic lean, the bit rings through the turntable — which is what
+   * keeps the strap attached at both ends while the body rocks on its springs
+   * and the horse's head nods a hand's width every stride.
+   */
+  private tickReins(): void {
+    const reins = this.reins;
+    if (!reins) return;
+    this.chassis.updateMatrix();
+    this.harness.updateMatrix();
+    for (let i = 0; i < 2; i++) {
+      const side = i === 0 ? -1 : 1;
+      this.reinHand
+        .set(side * COCKPIT.handX, Y(COCKPIT.handH + 0.01), COCKPIT.handZ - 0.03)
+        .applyMatrix4(this.chassis.matrix);
+      this.horse.bitAnchor(side, this.reinBit);
+      this.reinBit.add(this.horseRoot.position).applyMatrix4(this.harness.matrix);
+      reins.update(
+        i,
+        this.reinHand.x,
+        this.reinHand.y,
+        this.reinHand.z,
+        this.reinBit.x,
+        this.reinBit.y,
+        this.reinBit.z,
+        COCKPIT.reinSag,
+      );
+    }
+  }
+
   /** The licence panel on the back of the body. */
   private buildPanel(): void {
     const tex = makePanelTexture();
@@ -1602,22 +1898,12 @@ export class CarriageModel implements VehicleModel {
       taper(0.3, 0.03, G.zHorse + 0.66 - G.zShaftTip, 0.29, 0.62 - G.hShaftTip, zSwing, 0.016, 0.016, 5),
     );
 
-    /* the reins, running back over the horse's back from the pad terrets to
-     * the driver's hands. This is the run you actually see from the chase
-     * camera; the bit end is hidden behind the neck. */
-    strapShell.addMirrored(
-      taper(
-        0.105,
-        1.4 - G.hShaftTip,
-        G.zHorse - 0.28 - G.zShaftTip,
-        0.17,
-        G.hBox + 0.16 - G.hShaftTip,
-        G.zBox - 0.28 - G.zShaftTip,
-        0.008,
-        0.008,
-        4,
-      ),
-    );
+    /* The reins used to be baked in here, as a pair of tapers from the pad
+     * terrets back to the box. They are not, any more, and they cannot be:
+     * this group pivots with the turntable, so a rein authored in it swung
+     * away from the driver's hands by more than a metre at full lock. They are
+     * solved every frame instead — see `ReinRibbon` and `tickReins`.
+     */
 
     this.emitTo(wood.build(), matYellow, 'shafts', this.shaftGroup);
     this.emitTo(strapShell.build(), matLeather, 'traces', this.shaftGroup);

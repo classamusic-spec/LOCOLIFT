@@ -40,6 +40,7 @@ import { QUALITY_BUDGET } from '../core/Config';
 import { clamp, clamp01, damp } from '../core/MathUtils';
 import type { GameContext, QualityTier, RoadGraph, SettingsState } from '../core/types';
 import type { MaterialLibrary } from '../world/Materials';
+import { LodField, bucketByCell, bucketFootprint } from '../world/LodGrid';
 import {
   POST_STATE,
   createLightingState,
@@ -129,6 +130,14 @@ const LAMP_BUDGET: Record<QualityTier, number> = { low: 0, medium: 220, high: 38
 
 /** §1.8 — lamps every 21 m, alternating sides. */
 const LAMP_SPACING = 21;
+
+/**
+ * Cell size for the lamp field's LOD grid, metres. Lamps follow the road graph,
+ * so a cell holds one junction's worth of street; 150 m keeps the live set to a
+ * handful of cells at `windowLightDistance` without paying a draw call per
+ * block.
+ */
+const LAMP_LOD_CELL = 150;
 
 /**
  * Candela for a street lantern. The reference's "4.0" predates three dropping
@@ -275,8 +284,18 @@ export class Lighting {
   private lampSites: LampSite[] = [];
   private lampGrid = new Map<number, number[]>();
   private lampCell = 48;
-  private lampPost: THREE.InstancedMesh | null = null;
-  private lampGlobe: THREE.InstancedMesh | null = null;
+  /**
+   * The instanced lamp field, **one pair of meshes per spatial cell**.
+   *
+   * A single district-wide pair was two draw calls, which is why it was built
+   * that way — but its bounding sphere covered the map, so 51 k triangles of
+   * cast-iron post were transformed from every viewpoint in the game, including
+   * from inside a courtyard with no lamp in frame. Cells make the sphere small
+   * enough for three to reject, and give `windowLightDistance` — until now a
+   * `QUALITY_BUDGET` knob nothing in the game read — something to govern.
+   */
+  private lampMeshes: THREE.InstancedMesh[] = [];
+  private lampLod = new LodField();
   private lampGlobeMat: THREE.MeshStandardMaterial | null = null;
   private lampLights: THREE.PointLight[] = [];
   private lampCandidates: number[] = [];
@@ -365,8 +384,8 @@ export class Lighting {
    */
   setLampsEnabled(on: boolean): void {
     this._lampsEnabled = on;
-    if (this.lampPost) this.lampPost.visible = on;
-    if (this.lampGlobe) this.lampGlobe.visible = on;
+    this.lampLod.setEnabled(() => true, on);
+    if (on) for (const m of this.lampMeshes) m.visible = true;
   }
 
   setTimeOfDay(hours: number): void {
@@ -734,37 +753,53 @@ export class Lighting {
     const globeGeo = new THREE.CylinderGeometry(0.155, 0.115, 0.72, 6, 1);
     globeGeo.translate(0, 4.62, 0);
 
-    this.lampPost = new THREE.InstancedMesh(postGeo, ironMat, count);
-    this.lampPost.name = 'fx/lampPosts';
-    this.lampPost.castShadow = false;
-    this.lampPost.receiveShadow = false;
-    this.lampPost.instanceMatrix.setUsage(THREE.StaticDrawUsage);
-
-    this.lampGlobe = new THREE.InstancedMesh(globeGeo, this.lampGlobeMat, count);
-    this.lampGlobe.name = 'fx/lampGlobes';
-    this.lampGlobe.castShadow = false;
-    this.lampGlobe.receiveShadow = false;
-    this.lampGlobe.instanceMatrix.setUsage(THREE.StaticDrawUsage);
-
     const m = new THREE.Matrix4();
     const q = new THREE.Quaternion();
     const scl = new THREE.Vector3(1, 1, 1);
     const pos = new THREE.Vector3();
-    for (let i = 0; i < count; i++) {
-      const s = this.lampSites[i];
-      pos.set(s.x, s.y, s.z);
-      // a touch of yaw variance so the hexagonal lanterns do not line up
-      q.setFromAxisAngle(UP, (i * 2.399963) % (Math.PI * 2));
-      m.compose(pos, q, scl);
-      this.lampPost.setMatrixAt(i, m);
-      this.lampGlobe.setMatrixAt(i, m);
-    }
-    this.lampPost.instanceMatrix.needsUpdate = true;
-    this.lampGlobe.instanceMatrix.needsUpdate = true;
-    this.lampPost.computeBoundingSphere();
-    this.lampGlobe.computeBoundingSphere();
 
-    this.group.add(this.lampPost, this.lampGlobe);
+    const cells = bucketByCell(this.lampSites, LAMP_LOD_CELL, (s) => s);
+    for (let c = 0; c < cells.length; c++) {
+      const cell = cells[c];
+      const n = cell.items.length;
+      // Post and lantern share the instance matrix but not the material, so
+      // they stay two meshes; each cell clones the geometry so a cell's
+      // instance buffer is its own.
+      const post = new THREE.InstancedMesh(c === 0 ? postGeo : postGeo.clone(), ironMat, n);
+      post.name = `fx/lampPosts/${c}`;
+      const globe = new THREE.InstancedMesh(
+        c === 0 ? globeGeo : globeGeo.clone(),
+        this.lampGlobeMat,
+        n,
+      );
+      globe.name = `fx/lampGlobes/${c}`;
+      for (const mesh of [post, globe]) {
+        mesh.castShadow = false;
+        mesh.receiveShadow = false;
+        mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+      }
+      for (let i = 0; i < n; i++) {
+        const s = cell.items[i];
+        pos.set(s.x, s.y, s.z);
+        // a touch of yaw variance so the hexagonal lanterns do not line up.
+        // Seeded off the site, not the array index, so cell order cannot
+        // change which way a given lantern faces.
+        q.setFromAxisAngle(UP, (s.x * 2.399963 + s.z * 1.61803) % (Math.PI * 2));
+        m.compose(pos, q, scl);
+        post.setMatrixAt(i, m);
+        globe.setMatrixAt(i, m);
+      }
+      post.instanceMatrix.needsUpdate = true;
+      globe.instanceMatrix.needsUpdate = true;
+      post.computeBoundingSphere();
+      globe.computeBoundingSphere();
+      const foot = bucketFootprint(cell, 5);
+      this.lampLod.add(post, foot.cx, foot.cz, foot.radius);
+      this.lampLod.add(globe, foot.cx, foot.cz, foot.radius);
+      this.lampMeshes.push(post, globe);
+      this.group.add(post, globe);
+    }
+    void count;
   }
 
   private buildLampPool(): void {
@@ -787,6 +822,14 @@ export class Lighting {
    */
   private updateLamps(camPos: THREE.Vector3): void {
     const level = this.lampLevelSmoothed;
+
+    /* Geometry LOD for the lamp field. `windowLightDistance` is the tier's own
+     * statement of how far a lit street is worth drawing (400 m on `high`), and
+     * a 4.6 m iron post past that is a couple of pixels of dark line. Nothing
+     * else in the game read this knob until now. */
+    if (this._lampsEnabled) {
+      this.lampLod.update(camPos, QUALITY_BUDGET[this.quality].windowLightDistance);
+    }
 
     if (this.lampGlobeMat) {
       // §4.3: the globe sits well above the bloom gate. It is what makes the
@@ -872,18 +915,13 @@ export class Lighting {
   }
 
   private rebuildLamps(): void {
-    if (this.lampPost) {
-      this.group.remove(this.lampPost);
-      this.lampPost.geometry.dispose();
-      this.lampPost.dispose();
-      this.lampPost = null;
+    for (const mesh of this.lampMeshes) {
+      this.group.remove(mesh);
+      mesh.geometry.dispose();
+      mesh.dispose();
     }
-    if (this.lampGlobe) {
-      this.group.remove(this.lampGlobe);
-      this.lampGlobe.geometry.dispose();
-      this.lampGlobe.dispose();
-      this.lampGlobe = null;
-    }
+    this.lampMeshes.length = 0;
+    this.lampLod.clear();
     // The pool size is deliberately NOT rebuilt: changing the live point-light
     // count forces every program in the scene to recompile.
     this.collectLampSites(LAMP_BUDGET[this.quality]);
@@ -896,16 +934,12 @@ export class Lighting {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    if (this.lampPost) {
-      this.lampPost.geometry.dispose();
-      this.lampPost.dispose();
-      this.lampPost = null;
+    for (const mesh of this.lampMeshes) {
+      mesh.geometry.dispose();
+      mesh.dispose();
     }
-    if (this.lampGlobe) {
-      this.lampGlobe.geometry.dispose();
-      this.lampGlobe.dispose();
-      this.lampGlobe = null;
-    }
+    this.lampMeshes.length = 0;
+    this.lampLod.clear();
     this.lampLights.length = 0;
     this.lampSites.length = 0;
     this.lampGrid.clear();

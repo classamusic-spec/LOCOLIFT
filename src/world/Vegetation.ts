@@ -34,6 +34,7 @@ import { RNG, valueNoise2D } from '../core/RNG';
 import { SEA_LEVEL } from './CityLayout';
 import { coastModel, sampleSpan, GeoBuilder, COAST_DENSITY } from './Coast';
 import type { CoastModel } from './Coast';
+import { LodField, bucketByCell, bucketFootprint } from './LodGrid';
 import type { CityLayout, WorldLayer, WorldOpts } from './WorldTypes';
 
 /* ------------------------------------------------------------------ tuning */
@@ -66,12 +67,49 @@ const ROYAL = {
  * layer. Trunk variety is cheap in triangles but costs a draw call each, so it
  * comes down on `low` too.
  */
-const TIER_DETAIL: Record<QualityTier, { trunkVariants: number; frondSegments: number }> = {
-  low: { trunkVariants: 3, frondSegments: 5 },
-  medium: { trunkVariants: 4, frondSegments: 7 },
-  high: { trunkVariants: 6, frondSegments: 9 },
-  ultra: { trunkVariants: 6, frondSegments: 11 },
+const TIER_DETAIL: Record<
+  QualityTier,
+  { trunkVariants: number; frondSegments: number; trunkRings: number }
+> = {
+  low: { trunkVariants: 3, frondSegments: 5, trunkRings: 7 },
+  medium: { trunkVariants: 4, frondSegments: 7, trunkRings: 9 },
+  high: { trunkVariants: 6, frondSegments: 9, trunkRings: 11 },
+  ultra: { trunkVariants: 6, frondSegments: 11, trunkRings: 13 },
 };
+
+/**
+ * Segments in the **far** frond. A frond is a V of two pinnae banks either side
+ * of a rachis; the segment count controls how finely the arch and the taper are
+ * sampled along it, and past {@link PALM_LOD_DISTANCE} the whole frond is a few
+ * pixels across, so three segments carry the same silhouette for a third of the
+ * triangles. The leaflet comb is in the alpha texture either way.
+ */
+const FROND_FAR_SEGMENTS = 3;
+
+/**
+ * Cell size for the planting grid, metres.
+ *
+ * Palms live on lines — the malecón, the dune, the dock apron — so a grid over
+ * them yields roughly one cell per cell-length of shoreline. Coarse on purpose:
+ * every extra cell is up to `trunkVariants` more draw calls, and the win here
+ * is frustum culling a whole stand, which a 240 m cell already delivers.
+ */
+const PALM_CELL = 240;
+
+/** Cell size for the understorey, which is denser and much cheaper per mesh. */
+const SHRUB_CELL = 180;
+
+/**
+ * Distance at which a stand of palms swaps to its far fronds, metres. Well past
+ * the far kerb of any street, and past the cell radius, so the swap happens to
+ * a stand that is already small in frame rather than to one the player is
+ * driving through.
+ */
+const PALM_LOD_DISTANCE = 170;
+
+/** Slack on a cell footprint: crown radius plus the wind shader's reach. */
+const PALM_SPREAD = 8;
+const SHRUB_SPREAD = 4;
 
 /* colours, all sRGB */
 const C = {
@@ -210,6 +248,18 @@ export class Vegetation implements WorldLayer {
   private materials: THREE.Material[] = [];
   private textures: THREE.Texture[] = [];
   private meshes: THREE.InstancedMesh[] = [];
+  /** palms and shade trees — silhouette, so they hold out to `drawDistance` */
+  private lodTall = new LodField();
+  /** dune tufts and flowering shrubs — sub-pixel long before the palms are */
+  private lodSmall = new LodField();
+  /** per-cell frond LOD pairs, swapped at {@link PALM_LOD_DISTANCE} */
+  private palmLod: Array<{
+    near: THREE.InstancedMesh;
+    far: THREE.InstancedMesh;
+    cx: number;
+    cz: number;
+    radius: number;
+  }> = [];
   private _stats = { palms: 0, shrubs: 0, triangles: 0, instances: 0 };
 
   constructor(quality: QualityTier, options: VegetationOptions = {}) {
@@ -420,76 +470,141 @@ export class Vegetation implements WorldLayer {
       const crownTilt: THREE.Quaternion[] = [];
       for (let v = 0; v < detail.trunkVariants; v++) {
         const vr = rng.fork(v * 7919 + (species === 'coconut' ? 11 : 29));
-        const built = buildTrunk(species, spec, vr);
+        const built = buildTrunk(species, spec, vr, detail.trunkRings);
         trunkGeos.push(built.geo);
         crowns.push(built.crown);
         crownTilt.push(built.tilt);
       }
 
-      const buckets: PalmSite[][] = trunkGeos.map(() => []);
-      for (const s of list) buckets[s.variant % detail.trunkVariants].push(s);
+      /* One `InstancedMesh` per (variant, cell) rather than per variant.
+       *
+       * A single mesh holding every royal palm in the district has a bounding
+       * sphere the size of the district, so three can never frustum-cull it —
+       * in the main pass or in the sun's shadow pass — and it is drawn in full
+       * from the fort, from Piñones, and from inside a courtyard with no palm
+       * in sight. Cells give each stand its own sphere. */
+      const cells = bucketByCell(list, PALM_CELL, (s) => s);
+      const nearFronds = buildFrond(detail.frondSegments);
+      const farFronds = buildFrond(FROND_FAR_SEGMENTS);
+      this.geometries.push(nearFronds, farFronds);
 
-      for (let v = 0; v < detail.trunkVariants; v++) {
-        const b = buckets[v];
-        if (b.length === 0) {
-          trunkGeos[v].dispose();
-          continue;
-        }
-        const mesh = new THREE.InstancedMesh(trunkGeos[v], trunkMat, b.length);
-        mesh.name = `veg/${species}Trunk${v}`;
-        applyPalmInstances(mesh, b, 0.55);
-        this.addInstanced(mesh, trunkGeos[v]);
-      }
+      for (let c = 0; c < cells.length; c++) {
+        const cell = cells[c];
+        const foot = bucketFootprint(cell, PALM_SPREAD);
 
-      /* --- fronds --- */
-      const frondGeo = buildFrond(detail.frondSegments);
-      const frondCount = list.reduce((n, s) => n + s.fronds, 0);
-      const fronds = new THREE.InstancedMesh(frondGeo, frondMat, frondCount);
-      fronds.name = `veg/${species}Fronds`;
-      const m = new THREE.Matrix4();
-      const q = new THREE.Quaternion();
-      const yawQ = new THREE.Quaternion();
-      const pos = new THREE.Vector3();
-      const scl = new THREE.Vector3();
-      const euler = new THREE.Euler();
-      const fPhase = new Float32Array(frondCount);
-      const fStiff = new Float32Array(frondCount);
-      let k = 0;
-      for (const s of list) {
-        const crown = crowns[s.variant % detail.trunkVariants];
-        const tilt = crownTilt[s.variant % detail.trunkVariants];
-        yawQ.setFromAxisAngle(UP, s.yaw);
-        pos.copy(crown).multiplyScalar(s.scale);
-        pos.applyAxisAngle(UP, s.yaw);
-        pos.add(new THREE.Vector3(s.x, s.y, s.z));
-        for (let f = 0; f < s.fronds; f++) {
-          const a = (f / s.fronds) * Math.PI * 2 + s.frondPhase;
-          // droop: the outer fronds hang, the newest ones stand up
-          const age = (f * 0.618033) % 1;
-          const droop = lerp(-0.16, 0.86, age) + s.droopBias;
-          // world = instance yaw * crown tilt * frond. The tilt is authored in
-          // the trunk's own space, so it has to be applied *inside* the yaw or
-          // every palm leans the same way regardless of which way it faces.
-          euler.set(droop, a, 0, 'YXZ');
-          q.setFromEuler(euler);
-          q.premultiply(tilt);
-          q.premultiply(yawQ);
-          const len = lerp(s.frondLen[0], s.frondLen[1], (f * 0.37) % 1) * s.scale;
-          // §1.9: a coconut frond is 4–5 m long and a little over a metre wide
-          scl.set(len * 0.2, len, len);
-          m.compose(pos, q, scl);
-          fronds.setMatrixAt(k, m);
-          // fronds are floppier than trunks, and every one gets its own phase
-          fPhase[k] = (s.phase + f * 0.11) % 1;
-          fStiff[k] = 0.75 + ((f * 0.29) % 1) * 0.55;
-          k++;
+        const byVariant: PalmSite[][] = trunkGeos.map(() => []);
+        for (const s of cell.items) byVariant[s.variant % detail.trunkVariants].push(s);
+
+        for (let v = 0; v < detail.trunkVariants; v++) {
+          const b = byVariant[v];
+          if (b.length === 0) continue;
+          // `applyPalmInstances` attaches per-instance wind to the geometry, so
+          // each cell's mesh needs its own copy of it.
+          const geo = trunkGeos[v].clone();
+          const mesh = new THREE.InstancedMesh(geo, trunkMat, b.length);
+          mesh.name = `veg/${species}Trunk${v}/${c}`;
+          applyPalmInstances(mesh, b, 0.55);
+          this.addInstanced(mesh, geo);
+          this.lodTall.add(mesh, foot.cx, foot.cz, foot.radius);
+        }
+
+        /* --- fronds, near and far --- */
+        const near = this.buildFrondMesh(
+          cell.items,
+          crowns,
+          crownTilt,
+          detail.trunkVariants,
+          nearFronds.clone(),
+          frondMat,
+          `veg/${species}Fronds/${c}`,
+        );
+        const far = this.buildFrondMesh(
+          cell.items,
+          crowns,
+          crownTilt,
+          detail.trunkVariants,
+          farFronds.clone(),
+          frondMat,
+          `veg/${species}Fronds/${c}/far`,
+        );
+        if (near && far) {
+          far.visible = false;
+          this.palmLod.push({ near, far, cx: foot.cx, cz: foot.cz, radius: foot.radius });
+          this.lodTall.add(near, foot.cx, foot.cz, foot.radius);
+          this.lodTall.add(far, foot.cx, foot.cz, foot.radius);
         }
       }
-      fronds.instanceMatrix.needsUpdate = true;
-      setInstanceWind(fronds, fPhase, fStiff);
-      this.addInstanced(fronds, frondGeo);
+      for (const g of trunkGeos) g.dispose();
       this._stats.palms += list.length;
     }
+  }
+
+  /**
+   * The crown of fronds for one stand of palms, at whichever frond geometry is
+   * handed in. Near and far LODs differ only in that geometry — same crown
+   * positions, same droop, same per-frond wind phase — so a swap moves nothing
+   * on screen except the number of segments the arch is sampled at.
+   */
+  private buildFrondMesh(
+    list: readonly PalmSite[],
+    crowns: readonly THREE.Vector3[],
+    crownTilt: readonly THREE.Quaternion[],
+    variants: number,
+    frondGeo: THREE.BufferGeometry,
+    frondMat: THREE.Material,
+    name: string,
+  ): THREE.InstancedMesh | null {
+    const frondCount = list.reduce((n, s) => n + s.fronds, 0);
+    if (frondCount === 0) {
+      frondGeo.dispose();
+      return null;
+    }
+    const fronds = new THREE.InstancedMesh(frondGeo, frondMat, frondCount);
+    fronds.name = name;
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const yawQ = new THREE.Quaternion();
+    const pos = new THREE.Vector3();
+    const base = new THREE.Vector3();
+    const scl = new THREE.Vector3();
+    const euler = new THREE.Euler();
+    const fPhase = new Float32Array(frondCount);
+    const fStiff = new Float32Array(frondCount);
+    let k = 0;
+    for (const s of list) {
+      const crown = crowns[s.variant % variants];
+      const tilt = crownTilt[s.variant % variants];
+      yawQ.setFromAxisAngle(UP, s.yaw);
+      pos.copy(crown).multiplyScalar(s.scale);
+      pos.applyAxisAngle(UP, s.yaw);
+      pos.add(base.set(s.x, s.y, s.z));
+      for (let f = 0; f < s.fronds; f++) {
+        const a = (f / s.fronds) * Math.PI * 2 + s.frondPhase;
+        // droop: the outer fronds hang, the newest ones stand up
+        const age = (f * 0.618033) % 1;
+        const droop = lerp(-0.16, 0.86, age) + s.droopBias;
+        // world = instance yaw * crown tilt * frond. The tilt is authored in
+        // the trunk's own space, so it has to be applied *inside* the yaw or
+        // every palm leans the same way regardless of which way it faces.
+        euler.set(droop, a, 0, 'YXZ');
+        q.setFromEuler(euler);
+        q.premultiply(tilt);
+        q.premultiply(yawQ);
+        const len = lerp(s.frondLen[0], s.frondLen[1], (f * 0.37) % 1) * s.scale;
+        // §1.9: a coconut frond is 4–5 m long and a little over a metre wide
+        scl.set(len * 0.2, len, len);
+        m.compose(pos, q, scl);
+        fronds.setMatrixAt(k, m);
+        // fronds are floppier than trunks, and every one gets its own phase
+        fPhase[k] = (s.phase + f * 0.11) % 1;
+        fStiff[k] = 0.75 + ((f * 0.29) % 1) * 0.55;
+        k++;
+      }
+    }
+    fronds.instanceMatrix.needsUpdate = true;
+    setInstanceWind(fronds, fPhase, fStiff);
+    this.addInstanced(fronds, frondGeo);
+    return fronds;
   }
 
   /* -------------------------------------------------------- understorey */
@@ -633,57 +748,78 @@ export class Vegetation implements WorldLayer {
 
     /* --- realise --- */
     const palette = [...C.bougainvillea, ...C.hibiscus];
+    /**
+     * One mesh per cell, so a stand of sea grape on the far beach can be
+     * frustum-culled instead of riding along in every frame and every shadow
+     * map. `tall` picks which cull distance the cell answers to: a sea almond
+     * is a landmark tree and holds to `drawDistance`, a dune tuft is 60 cm of
+     * grass and is gone long before that.
+     */
     const put = (
       list: Placement[],
       geo: THREE.BufferGeometry,
       mat: THREE.Material,
       name: string,
       stiff: number,
+      tall: boolean,
       bloom = false,
     ): void => {
       if (list.length === 0) {
         geo.dispose();
         return;
       }
-      const mesh = new THREE.InstancedMesh(geo, mat, list.length);
-      mesh.name = name;
-      const m = new THREE.Matrix4();
-      const q = new THREE.Quaternion();
-      const p = new THREE.Vector3();
-      const sc = new THREE.Vector3();
-      const col = new THREE.Color();
-      const phase = new Float32Array(list.length);
-      const stiffness = new Float32Array(list.length);
-      const bloomCol = bloom ? new Float32Array(list.length * 3) : null;
-      for (let i = 0; i < list.length; i++) {
-        const it = list[i];
-        p.set(it.x, it.y, it.z);
-        q.setFromAxisAngle(UP, it.yaw);
-        sc.setScalar(it.scale);
-        m.compose(p, q, sc);
-        mesh.setMatrixAt(i, m);
-        phase[i] = (i * 0.2718281 + it.x * 0.031) % 1;
-        stiffness[i] = stiff * (0.82 + ((i * 0.577) % 1) * 0.36);
-        if (bloomCol) {
-          col.setHex(palette[it.tint % palette.length], THREE.SRGBColorSpace);
-          bloomCol[i * 3] = col.r;
-          bloomCol[i * 3 + 1] = col.g;
-          bloomCol[i * 3 + 2] = col.b;
+      const cells = bucketByCell(list, SHRUB_CELL, (p) => p);
+      for (let c = 0; c < cells.length; c++) {
+        const cell = cells[c];
+        const items = cell.items;
+        // per-instance wind (and the bloom tint) live on the geometry, so a
+        // cell cannot share one with its neighbour
+        const g = cells.length === 1 ? geo : geo.clone();
+        const mesh = new THREE.InstancedMesh(g, mat, items.length);
+        mesh.name = `${name}/${c}`;
+        const m = new THREE.Matrix4();
+        const q = new THREE.Quaternion();
+        const p = new THREE.Vector3();
+        const sc = new THREE.Vector3();
+        const col = new THREE.Color();
+        const phase = new Float32Array(items.length);
+        const stiffness = new Float32Array(items.length);
+        const bloomCol = bloom ? new Float32Array(items.length * 3) : null;
+        for (let i = 0; i < items.length; i++) {
+          const it = items[i];
+          p.set(it.x, it.y, it.z);
+          q.setFromAxisAngle(UP, it.yaw);
+          sc.setScalar(it.scale);
+          m.compose(p, q, sc);
+          mesh.setMatrixAt(i, m);
+          // seeded off the world position, not the array index, so splitting
+          // the list into cells does not reshuffle which plant sways when
+          phase[i] = (it.x * 0.031 + it.z * 0.017) % 1;
+          stiffness[i] = stiff * (0.82 + ((it.x * 0.577 + it.z * 0.331) % 1) * 0.36);
+          if (bloomCol) {
+            col.setHex(palette[it.tint % palette.length], THREE.SRGBColorSpace);
+            bloomCol[i * 3] = col.r;
+            bloomCol[i * 3 + 1] = col.g;
+            bloomCol[i * 3 + 2] = col.b;
+          }
         }
+        mesh.instanceMatrix.needsUpdate = true;
+        setInstanceWind(mesh, phase, stiffness);
+        if (bloomCol) {
+          g.setAttribute('aBloom', new THREE.InstancedBufferAttribute(bloomCol, 3));
+        }
+        this.addInstanced(mesh, g);
+        const foot = bucketFootprint(cell, SHRUB_SPREAD);
+        (tall ? this.lodTall : this.lodSmall).add(mesh, foot.cx, foot.cz, foot.radius);
+        this._stats.shrubs += items.length;
       }
-      mesh.instanceMatrix.needsUpdate = true;
-      setInstanceWind(mesh, phase, stiffness);
-      if (bloomCol) {
-        geo.setAttribute('aBloom', new THREE.InstancedBufferAttribute(bloomCol, 3));
-      }
-      this.addInstanced(mesh, geo);
-      this._stats.shrubs += list.length;
+      if (cells.length !== 1) geo.dispose();
     };
 
-    put(seagrape, buildSeaGrape(rng.fork(7)), leafMat, 'veg/seagrape', 0.55);
-    put(dune, buildDuneTuft(rng.fork(19)), leafMat, 'veg/duneGrass', 1.1);
-    put(almondTrunk, buildAlmondTrunk(), woodMat, 'veg/almondTrunk', 0.18);
-    put(almondCanopy, buildAlmondCanopy(rng.fork(23)), leafMat, 'veg/almondCanopy', 0.5);
+    put(seagrape, buildSeaGrape(rng.fork(7)), leafMat, 'veg/seagrape', 0.55, true);
+    put(dune, buildDuneTuft(rng.fork(19)), leafMat, 'veg/duneGrass', 1.1, false);
+    put(almondTrunk, buildAlmondTrunk(), woodMat, 'veg/almondTrunk', 0.18, true);
+    put(almondCanopy, buildAlmondCanopy(rng.fork(23)), leafMat, 'veg/almondCanopy', 0.5, true);
 
     /* flowering shrubs get their own material so the bloom colour can ride on
      * instanceColor without fighting the wind rig's phase channel */
@@ -735,7 +871,7 @@ export class Vegetation implements WorldLayer {
       };
       flowerMat.customProgramCacheKey = () => 'loco/veg-flower-v1';
       this.materials.push(flowerMat);
-      put(flowers, buildFloweringShrub(rng.fork(31)), flowerMat, 'veg/flowers', 0.9, true);
+      put(flowers, buildFloweringShrub(rng.fork(31)), flowerMat, 'veg/flowers', 0.9, false, true);
     }
   }
 
@@ -756,8 +892,37 @@ export class Vegetation implements WorldLayer {
 
   /* ------------------------------------------------------------- runtime */
 
-  update(_cameraPos: THREE.Vector3, dt: number): void {
+  update(cameraPos: THREE.Vector3, dt: number): void {
     this.uniforms.uTime.value += dt;
+
+    const budget = QUALITY_BUDGET[this.quality];
+    /* Palms are the skyline of a Caribbean seafront, so they answer to
+     * `drawDistance` and not to the prop cut — thinning them out is exactly the
+     * kind of "cheaper but worse" the budget must not buy. What the grid does
+     * buy is that a stand behind the camera, or across the bay, is no longer
+     * transformed and no longer re-submitted into the shadow map. */
+    this.lodTall.update(cameraPos, budget.drawDistance);
+    // Dune tufts and bougainvillea are 0.6–1.4 m; past a couple of hundred
+    // metres they are below a pixel and read as noise on the sand either way.
+    this.lodSmall.update(cameraPos, Math.max(240, budget.propDetailDistance * 1.6));
+
+    /* Frond LOD. Same crowns, same droop, same wind — a third of the segments.
+     * Swapped per stand rather than per palm so the change is one event at the
+     * far end of the street instead of a shimmer of individual palms. */
+    const cx = cameraPos.x;
+    const cz = cameraPos.z;
+    for (const p of this.palmLod) {
+      const dx = p.cx - cx;
+      const dz = p.cz - cz;
+      const d = Math.sqrt(dx * dx + dz * dz) - p.radius;
+      const useNear = d < PALM_LOD_DISTANCE;
+      // `lodTall` has already decided whether the stand is drawn at all; this
+      // only picks which of the pair answers for it.
+      if (p.near.visible || p.far.visible) {
+        p.near.visible = useNear;
+        p.far.visible = !useNear;
+      }
+    }
   }
 
   onQualityChange(tier: QualityTier): void {
@@ -765,10 +930,11 @@ export class Vegetation implements WorldLayer {
     const d = QUALITY_BUDGET[tier].propDetailDistance;
     // the understorey is the first thing to go on a weak machine; the palm
     // silhouette is the whole point and always stays
-    for (const m of this.meshes) {
-      if (m.name.startsWith('veg/dune') || m.name === 'veg/flowers') m.visible = d >= 100;
-      else if (m.name === 'veg/seagrape') m.visible = d >= 80;
-    }
+    this.lodSmall.setEnabled(
+      (m) => m.name.startsWith('veg/dune') || m.name.startsWith('veg/flowers'),
+      d >= 100,
+    );
+    this.lodTall.setEnabled((m) => m.name.startsWith('veg/seagrape'), d >= 80);
   }
 
   stats(): Record<string, number> {
@@ -782,6 +948,9 @@ export class Vegetation implements WorldLayer {
   }
 
   dispose(): void {
+    this.lodTall.clear();
+    this.lodSmall.clear();
+    this.palmLod.length = 0;
     for (const g of this.geometries) g.dispose();
     this.geometries.length = 0;
     for (const m of this.materials) m.dispose();
@@ -871,12 +1040,18 @@ function buildTrunk(
   species: PalmSpecies,
   spec: typeof COCONUT | typeof ROYAL,
   rng: RNG,
+  ringCount = 11,
 ): { geo: THREE.BufferGeometry; crown: THREE.Vector3; tilt: THREE.Quaternion } {
   const gb = new GeoBuilder().enableAux();
   const height = rng.range(spec.height[0], spec.height[1]);
   const lean = (rng.range(spec.lean[0], spec.lean[1]) * Math.PI) / 180 * (rng.bool() ? 1 : -1);
   const sides = 8;
-  const rings = 16;
+  /* Rings only sample the *lean*, which is a single smooth quarter-sine over
+   * 14 m — the leaf-scar wobble below is `sin( t * rings * 2π )` evaluated at
+   * `t = r / rings`, i.e. `sin( r * 2π )`, which is exactly zero at every ring
+   * the sweep actually places. It has never contributed a vertex of relief, so
+   * the ring count is free to follow the tier. */
+  const rings = ringCount;
   const sway = rng.range(0.35, 0.9);
   const trunkCol = species === 'coconut' ? C.trunkCoconut : C.trunkRoyal;
 

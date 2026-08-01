@@ -122,6 +122,9 @@ function sanitize(s: SettingsState): SettingsState {
       : 'none',
     language: (['both', 'es', 'en'] as const).includes(s.language) ? s.language : 'both',
     showSpeedUnits: s.showSpeedUnits === 'kmh' ? 'kmh' : 'mph',
+    cameraView: (['chase', 'close', 'far', 'cockpit', 'bumper'] as const).includes(s.cameraView)
+      ? s.cameraView
+      : 'chase',
   };
 }
 

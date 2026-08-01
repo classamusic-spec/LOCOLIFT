@@ -268,6 +268,15 @@ export class GameDirector implements System {
     return this.progression;
   }
 
+  /**
+   * How many of the cast have advanced past their base arc stage. `-1` when no
+   * relationship ledger is wired — which is how the harness tells "no arcs yet"
+   * apart from "arcs are not plugged in".
+   */
+  get arcStages(): number {
+    return this.relationships ? this.relationships.stageEntries().length : -1;
+  }
+
   /* ------------------------------------------------------------ lifecycle */
 
   init(_ctx: GameContext): void {
@@ -340,6 +349,16 @@ export class GameDirector implements System {
 
   get isLive(): boolean {
     return this.live;
+  }
+
+  /**
+   * True while the chinchorreo is the active controller. `currentMode` cannot
+   * answer this — the party bus reports as `'story'` because `GameMode` has no
+   * `'party'` member — so anything that needs to tell a real chinchorreo apart
+   * from the arcade fallback has to ask here.
+   */
+  get isPartyRun(): boolean {
+    return this.inParty;
   }
 
   /** Seconds left in the active mode, or Infinity in free ride. */

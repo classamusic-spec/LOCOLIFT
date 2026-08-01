@@ -62,6 +62,44 @@ export const PIVOT = {
 
   /** while airborne the filter opens right up — a jump arc is signal, not noise */
   yFilterRateAir: 22.0,
+
+  /**
+   * `yFilterRate` is multiplied by this at `interiorWeight` 1.
+   *
+   * The low-pass exists because an external camera must not reproduce
+   * suspension chatter. An *interior* camera has the opposite problem: the
+   * dashboard is rigidly bolted 60 cm in front of the eye, so any lag between
+   * the eye's world Y and the chassis's shows up as the whole dash bobbing
+   * inside the frame — far more obvious, and far worse, than the chatter the
+   * filter was put there to remove. Rate 9 → 32 takes the time constant from
+   * 111 ms to 31 ms: fast enough that the dash sits still, slow enough that
+   * the sharpest single-frame spikes are still clipped.
+   */
+  interiorRateMultiplier: 3.6,
+};
+
+/**
+ * Interior (cockpit) rig specifics — the numbers that only mean anything when
+ * `CameraModeParams.interiorWeight` and `tiltAim` are non-zero.
+ */
+export const INTERIOR = {
+  /**
+   * How fast the head's borrowed chassis pitch/roll eases toward the chassis's
+   * true attitude, 1/s. The chassis quaternion is the *physics body's*, which
+   * bounces on every cobble; damping it here is the driver's neck. Fast enough
+   * (90 ms) that a kerb strike still punches.
+   */
+  tiltRate: 11.0,
+  /** clamp on borrowed pitch, radians (≈17°) — a backflip must not spin the head */
+  maxPitch: 0.3,
+  /** clamp on borrowed roll, radians (≈20°) */
+  maxRoll: 0.35,
+  /**
+   * Borrowed tilt is faded out with the airborne blend. Mid-flip the chassis
+   * attitude is meaningless to a driver's inner ear and following it is the
+   * single most nauseating thing the rig could do.
+   */
+  airFade: 1.0,
 };
 
 /** Spring-damper follow rates. See the note at the top of the file. */

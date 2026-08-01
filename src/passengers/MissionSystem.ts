@@ -581,6 +581,19 @@ export class MissionSystem implements System {
 
   /* ----------------------------------------------------------- inspection */
 
+  /**
+   * The figure and beacon pools, so another mode that also builds people (the
+   * chinchorreo) can share the cached geometry instead of building its own.
+   * The borrower must not dispose them — this system owns them.
+   */
+  get modelPool(): PassengerModelPool {
+    return this.models;
+  }
+
+  get beaconPool(): BeaconPool {
+    return this.beacons;
+  }
+
   get faresCompleted(): number {
     return this.deliveries;
   }
@@ -1059,7 +1072,17 @@ export class MissionSystem implements System {
 
       if (!this.active && p.canPickUp(vx, vz, speed)) {
         this.waiting.splice(i, 1);
-        this.onScreenArchetypes.delete(p.archetype.id);
+        /*
+         * Deliberately *not* released from `onScreenArchetypes` here. The only
+         * handle the UI gets on a person is their archetype id — every
+         * passenger event carries that and nothing else — so a second Kique on
+         * the kerb while the first one is in the back seat makes the two
+         * indistinguishable, and his kerbside twin timing out tears down the
+         * rider's card, banner and arrow. Keep the id reserved for as long as
+         * he is on screen at all — it is released wherever the ride ends
+         * (`completeFare`, `failFare`, `failMissionByCrash`). There are 18
+         * archetypes and at most 9 people out at once, so the pool holds.
+         */
         this.beginFare(p);
       }
     }
@@ -1463,6 +1486,8 @@ export class MissionSystem implements System {
     p.despawn();
     this.vehicle.setSeatVisual(false);
     this.active = null;
+    /* held from pickup so no kerbside twin could share their id — see above */
+    this.onScreenArchetypes.delete(p.archetype.id);
     this.deliveries++;
     this.sinceSpecial++;
     this.sinceCart++;
@@ -1495,6 +1520,7 @@ export class MissionSystem implements System {
     p.despawn();
     this.vehicle.setSeatVisual(false);
     this.active = null;
+    this.onScreenArchetypes.delete(p.archetype.id);
     this.failures++;
 
     this.bus.emit('passenger:bail', { archetypeId: p.archetype.id, reason });
@@ -1522,6 +1548,7 @@ export class MissionSystem implements System {
     p.despawn();
     this.vehicle.setSeatVisual(false);
     this.active = null;
+    this.onScreenArchetypes.delete(p.archetype.id);
     this.failures++;
 
     this.bus.emit('passenger:bail', { archetypeId: p.archetype.id, reason: 'terrified' });

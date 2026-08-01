@@ -32,7 +32,10 @@ import { UISystem } from './ui/UISystem';
 import { MissionSystem } from './passengers/MissionSystem';
 import { ComboSystem } from './scoring/ComboSystem';
 import { ScoreSystem } from './scoring/ScoreSystem';
-import { GameDirector } from './states/GameDirector';
+import { Progression } from './scoring/Progression';
+import { Relationships } from './scoring/Relationships';
+import { GameDirector, type EntryMode } from './states/GameDirector';
+import { PartyBusMode } from './states/PartyBusMode';
 import { RenderPipeline } from './fx/RenderPipeline'; // LOCOFX-TEMP-WIRING
 import { installShaderGuard } from './fx/ShaderGuard';
 
@@ -59,7 +62,68 @@ export interface LocoTestHook {
   ready: boolean;
   showTitle(): void;
   startArcade(): void;
+  /** Open the untimed city — the same call `openingMove()` makes at boot. */
+  startFreeRoam(): void;
+  /** The chinchorreo. False when no bus mode is wired. */
+  startParty(): boolean;
   pause(): void;
+  resume(): void;
+  /** `'boot' | 'title' | 'playing' | 'paused' | …` */
+  state(): string;
+  /** The active `GameMode`. */
+  mode(): string;
+  /**
+   * Everything the free-roam loop is doing right now: whether a fare is
+   * aboard, what the HUD dial reads, and what the ride's own deadline is.
+   */
+  roam(): {
+    state: string;
+    mode: string;
+    live: boolean;
+    /** seconds on the HUD dial, read from the HUD itself */
+    hudClock: number;
+    /** free roam's mirror of the same number */
+    clock: number;
+    /** true only while somebody is in the car */
+    fareActive: boolean;
+    hasPassenger: boolean;
+    rideSecondsLeft: number;
+    rideAllowance: number;
+    accepted: number;
+    banked: number;
+    completed: number;
+    failed: number;
+    /** discovery mode: how many people the street is allowed to hold */
+    waitingBudget: number;
+    /** discovery mode: how much longer than authored they wait */
+    waitPatience: number;
+    /** what the timer chip is actually rendering */
+    hudDigits: string;
+    hudLabel: string;
+    /** what the TARIFA chip is actually rendering */
+    hudFare: string;
+    /** the roam prompt banner, '' when hidden */
+    hudPrompt: string;
+  };
+  /** Where the waiting fares are standing, nearest first. */
+  waitingFares(): Array<{ x: number; z: number; d: number }>;
+  /** Where the fare aboard is being taken, or null. */
+  destination(): { id: string; name: string; x: number; z: number } | null;
+  /** Chinchorreo state, so the party bus can be proven to actually run. */
+  party(): {
+    wired: boolean;
+    /** true only when the chinchorreo itself is the active controller */
+    isPartyRun: boolean;
+    running: boolean;
+    phase: string;
+    stops: number;
+    aboard: number;
+    collected: number;
+    hype: number;
+    timeLeft: number;
+    /** the stop the arrow is pointing at, or null */
+    stop: { id: string; name: string; x: number; z: number } | null;
+  };
   setInput(partial: Partial<InputState>): void;
   clearInput(): void;
   setTimeOfDay(h: number): void;
@@ -67,6 +131,8 @@ export interface LocoTestHook {
   teleport(x: number, y: number, z: number, heading?: number): void;
   perfSample(ms: number): Promise<Record<string, number>>;
   stats(): Record<string, number>;
+  /** Ground height under a point, so a scripted teleport lands on the street. */
+  groundY(x: number, z: number): number;
   /** Named places, so QA can navigate by name instead of guessing coordinates. */
   places(): Array<{ id: string; kind: string; x: number; y: number; z: number }>;
   bounds(): { minX: number; maxX: number; minZ: number; maxZ: number };
@@ -143,7 +209,18 @@ async function boot(): Promise<void> {
   if (!localStorage.getItem('locolift.settings.v1')) {
     settingsStore.setQuality(settingsStore.autoDetectQuality(engine.renderer));
   }
-  settingsStore.subscribe((s) => engine.applySettings(s));
+  // `Engine.applySettings` already calls `onQualityChange` on every registered
+  // System directly, but the *event* had no publisher at all — so the HUD's
+  // "Calidad: MEDIUM" toast could never fire. Emit it on a real tier change
+  // only; the audio system's listener re-applies the same idempotent trims.
+  let lastTier = settingsStore.current.quality;
+  settingsStore.subscribe((s) => {
+    engine.applySettings(s);
+    if (s.quality !== lastTier) {
+      lastTier = s.quality;
+      engine.bus.emit('game:quality', { tier: s.quality });
+    }
+  });
 
   const input = new Input();
   engine.setInput(input.state);
@@ -215,6 +292,33 @@ async function boot(): Promise<void> {
     rng: new RNG(CONFIG.worldSeed ^ 0xfa2e),
     quality: settingsStore.current.quality,
   });
+  // Rank, rep, unlocks and the daily rotation; and the per-person arc ledger.
+  // Both are Systems: they subscribe in `init()` and are disposed with the
+  // engine, so they must be registered below *before* `initSystems()`.
+  const progression = new Progression({ bus: engine.bus, save });
+  const relationships = new Relationships({ bus: engine.bus, save });
+
+  // The chinchorreo. It is a `ShiftController`, not a System — the director
+  // ticks it — so it is handed over rather than registered on the engine. It
+  // shares the mission system's figure/beacon pools so the geometry is built
+  // once, and therefore must not outlive them (it does not own them).
+  const partyBus = new PartyBusMode({
+    bus: engine.bus,
+    world,
+    vehicle,
+    scene: engine.scene,
+    combo,
+    rng: new RNG(CONFIG.worldSeed ^ 0xb115),
+    quality: settingsStore.current.quality,
+    models: missions.modelPool,
+    beacons: missions.beaconPool,
+  });
+
+  // `?entry=title` restores the old menu-first boot for captures and QA;
+  // `?entry=arcade` drops straight into a timed shift. The game's front door
+  // is free roam.
+  const entry = parseEntry(new URLSearchParams(location.search).get('entry'));
+
   const director = new GameDirector({
     bus: engine.bus,
     missions,
@@ -224,6 +328,10 @@ async function boot(): Promise<void> {
     save,
     vehicle,
     world,
+    progression,
+    relationships,
+    partyBus,
+    entry,
   });
   director.onPauseChanged = (paused) => {
     engine.paused = paused;
@@ -261,6 +369,9 @@ async function boot(): Promise<void> {
   engine.add(combo);
   engine.add(missions);
   engine.add(score);
+  // No per-frame work; registered so they subscribe once and dispose cleanly.
+  engine.add(progression);
+  engine.add(relationships);
   // Before the UI: the director's marker/patience pump must land the same frame.
   engine.add(director);
   engine.add(camera);
@@ -293,13 +404,35 @@ async function boot(): Promise<void> {
   // game permanently behind an opaque overlay — indistinguishable from a black
   // screen. Hide it here too, as soon as the loop is genuinely up.
   hideBootSplash();
-  camera.snapToTarget();
   engine.timeOfDay = 15.5;
+
+  // The opening move. It has to happen *after* `initSystems()`: the UI
+  // subscribes to `game:state` in its own `init`, and `UISystem.init` also
+  // forces itself to `'title'`. Transitioning before that point would be
+  // overwritten and the player would be left staring at the menu.
+  const opened = director.openingMove();
+  console.info(`[boot] entry=${entry} -> ${opened}`);
+
+  // After the opening move: a run respawns the Jeep at the world spawn, and
+  // the chase camera must not interpolate across that jump.
+  camera.snapToTarget();
   engine.start();
 
   clearTimeout(watchdog);
-  installTestHook(engine, input, world, vehicle, camera, save, audio, director);
+  installTestHook(engine, input, world, vehicle, camera, save, audio, director, missions, ui);
   hideBootSplash();
+}
+
+/** `?entry=` → an `EntryMode`. Anything unrecognised opens on free roam. */
+function parseEntry(raw: string | null): EntryMode {
+  switch (raw) {
+    case 'title':
+    case 'arcade':
+    case 'freeRoam':
+      return raw;
+    default:
+      return 'freeRoam';
+  }
 }
 
 function installTestHook(
@@ -311,7 +444,10 @@ function installTestHook(
   save: SaveSystem,
   audio: AudioSystem,
   director: GameDirector,
+  missions: MissionSystem,
+  ui: UISystem,
 ): void {
+  const text = (sel: string): string => document.querySelector(sel)?.textContent ?? '';
   const hook: LocoTestHook = {
     ready: true,
     showTitle() {
@@ -324,9 +460,98 @@ function installTestHook(
       void audio.unlock();
       director.startMode('arcade');
     },
+    startFreeRoam() {
+      camera.setShowcase(false);
+      camera.snapToTarget();
+      void audio.unlock();
+      director.startFreeRoam();
+    },
+    startParty() {
+      camera.setShowcase(false);
+      camera.snapToTarget();
+      void audio.unlock();
+      return director.startPartyBus();
+    },
     pause() {
       if (director.currentState === 'paused') director.resume();
       else director.pause();
+    },
+    resume() {
+      director.resume();
+    },
+    state() {
+      return director.currentState;
+    },
+    mode() {
+      return director.currentMode;
+    },
+    roam() {
+      const free = director.freeRide;
+      return {
+        state: director.currentState,
+        mode: director.currentMode,
+        live: director.isLive,
+        hudClock: Number(ui.hud.timeRemaining.toFixed(2)),
+        clock: Number(free.clockSeconds.toFixed(2)),
+        fareActive: free.fareActive,
+        hasPassenger: missions.hasPassenger,
+        rideSecondsLeft: Number(missions.rideSecondsLeft.toFixed(2)),
+        rideAllowance: Number(missions.rideAllowance.toFixed(2)),
+        accepted: free.faresAccepted,
+        banked: free.faresBanked,
+        completed: missions.faresCompleted,
+        failed: missions.faresFailed,
+        waitingBudget: missions.waitingBudget,
+        waitPatience: Number(missions.waitPatience.toFixed(2)),
+        hudDigits: text('.ll-timer__digits') + text('.ll-timer__tenths'),
+        hudLabel: text('.ll-timer__label .ll-lbl-es'),
+        hudFare: text('.ll-fare__value'),
+        hudPrompt: text('.ll-roam.is-live .ll-dest__name'),
+      };
+    },
+    waitingFares() {
+      const px = vehicle.position.x;
+      const pz = vehicle.position.z;
+      return missions.waitingMarkers
+        .map((m) => ({
+          x: Number(m.x.toFixed(2)),
+          z: Number(m.z.toFixed(2)),
+          d: Number(Math.hypot(m.x - px, m.z - pz).toFixed(2)),
+        }))
+        .sort((a, b) => a.d - b.d);
+    },
+    party() {
+      const p = director.partyBus;
+      const stop = p?.currentStop ?? null;
+      return {
+        wired: p !== null,
+        isPartyRun: director.isPartyRun,
+        running: director.currentState === 'playing' && director.isLive && p !== null && !p.finished,
+        phase: p ? p.currentPhase : 'none',
+        stops: p ? p.stopCount : 0,
+        aboard: p ? p.aboardCount : 0,
+        collected: p ? p.collectedCount : 0,
+        hype: p ? Number(p.crowdHype.toFixed(3)) : 0,
+        timeLeft: p ? Number(p.timeRemaining.toFixed(2)) : 0,
+        stop: stop
+          ? {
+              id: stop.id,
+              name: stop.name,
+              x: Number(stop.pos.x.toFixed(2)),
+              z: Number(stop.pos.z.toFixed(2)),
+            }
+          : null,
+      };
+    },
+    destination() {
+      const poi = missions.activeDestination;
+      if (!poi) return null;
+      return {
+        id: poi.id,
+        name: poi.name,
+        x: Number(poi.pos.x.toFixed(2)),
+        z: Number(poi.pos.z.toFixed(2)),
+      };
     },
     setInput(partial) {
       input.setOverride({ ...(input.state as InputState), ...partial });
@@ -348,6 +573,9 @@ function installTestHook(
     async perfSample(ms) {
       const s = await engine.perfSample(ms);
       return { ...s };
+    },
+    groundY(x, z) {
+      return Number(world.groundHeight(x, z).toFixed(3));
     },
     places() {
       return world.pois.map((q) => ({
@@ -409,6 +637,11 @@ function installTestHook(
         camDistance: Number(camera.distance.toFixed(2)),
         camFov: Number(camera.fov.toFixed(1)),
         bank: save.current.bank,
+        rep: director.progress?.reputation ?? -1,
+        rank: director.progress?.rank ?? -1,
+        repThisShift: director.progress?.repThisShift ?? -1,
+        metPassengers: save.current.metPassengers.length,
+        arcStages: director.arcStages,
       };
     },
   };

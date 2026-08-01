@@ -38,6 +38,15 @@ import { PALETTE } from '../core/Config';
 import { clamp, clamp01, damp } from '../core/MathUtils';
 import type { QualityTier } from '../core/types';
 import { BUS_FESTOON_COLORS, BUS_GEO, BUS_PAINT, BUS_SUSPENSION, BUS_WHEEL_LAYOUT } from './BusTuning';
+import {
+  MeterDisplay,
+  buildGauge,
+  buildHands,
+  createParts,
+  makeGaugeFace,
+  makeSwitchStrip,
+  needleAngle,
+} from './CockpitKit';
 import type { BeatSource, VehicleModel } from './VehicleTuning';
 
 const UP = /* @__PURE__ */ new THREE.Vector3(0, 1, 0);
@@ -299,6 +308,33 @@ const ARCH_F1 = G.zFrontAxle + G.archRadius;
 const ARCH_R0 = G.zRearAxle - G.archRadius;
 const ARCH_R1 = G.zRearAxle + G.archRadius;
 
+/**
+ * The driver's station, in one block.
+ *
+ * `eye` is derived, not guessed. The driver's cushion top sits at
+ * `yFloor + 0.60 = 0.92`, and a seated adult's eye is ~0.78 m above it in a
+ * bus's upright seating position — hence y = 1.70, which lands the eye 0.32 m
+ * above the wheel's hub and 0.19 m above the fascia's crash roll, i.e. looking
+ * *over* the dash rather than through it. z = −3.55 sits a head's depth ahead
+ * of the seat back at −3.62, which puts the nearest point of that enormous
+ * 0.5 m wheel 0.47 m away — comfortably outside `CONFIG.camera.near`. x
+ * matches the steering column at −0.66: a school bus is left-hand drive with
+ * the door on the opposite side, which is why the aisle opens to your right.
+ */
+const BUS_COCKPIT = {
+  eye: /* @__PURE__ */ new THREE.Vector3(-0.66, 1.7, -3.55),
+  /** the cluster sits on the column centreline */
+  podX: -0.66,
+  /** how far the cluster leans back, radians (≈22°) */
+  podTilt: 0.38,
+  /** how far the hands travel round the rim before they stop, radians */
+  handLock: 1.05,
+  needleRate: 6.5,
+  /** the meter's flag drop, dollars — a bus fare, so lower than the Jeep's */
+  fareFlag: 2.0,
+  farePerMetre: 0.0011,
+} as const;
+
 export class BusModel implements VehicleModel {
   /** root; Vehicle copies the rigid body transform onto this every frame */
   readonly object3d = new THREE.Group();
@@ -317,6 +353,21 @@ export class BusModel implements VehicleModel {
   private readonly beams = new THREE.Group();
   /** door glazing, accumulated by buildDoor and merged by buildGlass */
   private readonly doorGlass = new Shell();
+
+  /* ------------------------------------------------------- driver's seat */
+  /** built once, parked hidden — Three skips an invisible subtree wholesale */
+  private readonly cockpit = new THREE.Group();
+  /** hands, on their own node so they can lag the rim at full lock */
+  private readonly handRig = new THREE.Group();
+  private needleSpeed: THREE.Group | null = null;
+  private needleRpm: THREE.Group | null = null;
+  private needleAir: THREE.Group | null = null;
+  private meter: MeterDisplay | null = null;
+  private cockpitOn = false;
+  private targetSpeedNeedle = 0;
+  private targetRpmNeedle = 0;
+  private fareDistance = 0;
+  private fareClock = 0;
 
   /* live materials — every one of these is animated */
   private readonly matHeadlight: THREE.MeshStandardMaterial;
@@ -488,6 +539,7 @@ export class BusModel implements VehicleModel {
     this.buildCrowd();
     this.buildPassenger();
     this.buildWheels(matRubber, matChrome, matSteel);
+    this.buildCockpit(matMatte, matChrome);
 
     this.chassis.add(this.beams);
     this.setQuality(quality);
@@ -503,6 +555,12 @@ export class BusModel implements VehicleModel {
       const mesh = o as THREE.Mesh;
       if (mesh.isMesh) mesh.castShadow = false;
     });
+    /* the cabin is only ever seen from inside the cabin; a dashboard in the
+     * shadow atlas is pure cost */
+    this.cockpit.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (mesh.isMesh) mesh.castShadow = false;
+    });
   }
 
   /* ================================================== Vehicle-facing methods */
@@ -512,7 +570,39 @@ export class BusModel implements VehicleModel {
     /* positive steer is a right turn, which is a negative rotation about +Y */
     this.wheelSteer[0].rotation.y = -a;
     this.wheelSteer[1].rotation.y = -a;
-    this.steeringWheel.rotation.z = -a * G.steeringWheelRatio;
+    const wheelAngle = -a * G.steeringWheelRatio;
+    this.steeringWheel.rotation.z = wheelAngle;
+    /* The hands stop travelling before the rim does. A bus box is 4.2:1, so
+     * full lock is 159° of wheel — far enough to carry a pair of hands right
+     * round to the bottom of the rim if they were simply parented to it. */
+    this.handRig.rotation.z = clamp(wheelAngle, -BUS_COCKPIT.handLock, BUS_COCKPIT.handLock);
+  }
+
+  /* ------------------------------------------------------ driver's seat */
+
+  setCockpitVisible(amount: number): void {
+    const on = amount > 0.002;
+    if (on === this.cockpitOn) return;
+    this.cockpitOn = on;
+    this.cockpit.visible = on;
+  }
+
+  /**
+   * The driver's eye, in body-local metres, through the cosmetic chassis lean.
+   *
+   * The bus's lean is applied to `chassis` by `tick`, not by `setChassisLean`
+   * (the air-brake squat has to be added in first), so this reads the group's
+   * live transform rather than recomposing it.
+   */
+  getCockpitEye(out: THREE.Vector3): THREE.Vector3 {
+    this.chassis.updateMatrix();
+    return out.copy(BUS_COCKPIT.eye).applyMatrix4(this.chassis.matrix);
+  }
+
+  setInstruments(rpmNorm: number, speedNorm: number, _gear: number): void {
+    if (!this.cockpitOn) return;
+    this.targetSpeedNeedle = clamp01(speedNorm);
+    this.targetRpmNeedle = clamp01(rpmNorm);
   }
 
   setWheelSpin(i: number, radians: number): void {
@@ -593,6 +683,8 @@ export class BusModel implements VehicleModel {
   tick(dt: number, speed: number): void {
     this.idlePhase += dt * 26;
 
+    if (this.cockpitOn) this.tickCockpit(dt, speed);
+
     /* ---- resolve the beat ---- */
     let phase: number;
     if (this.beatSource) {
@@ -671,6 +763,8 @@ export class BusModel implements VehicleModel {
   }
 
   dispose(): void {
+    this.meter?.dispose();
+    this.meter = null;
     for (const g of this.geometries) g.dispose();
     for (const m of this.materials) m.dispose();
     for (const t of this.textures) t.dispose();
@@ -1465,6 +1559,293 @@ export class BusModel implements VehicleModel {
     this.chassis.add(new THREE.Mesh(col, matMatte));
 
     this.chassis.add(this.steeringWheel);
+  }
+
+  /* ==================================================== the driver's seat */
+
+  /**
+   * The bus's driver's station.
+   *
+   * A school bus cab is a specific, recognisable place and almost none of it
+   * looks like a car: the driver sits above and ahead of the front axle behind
+   * a near-vertical two-piece windscreen, with a flat steel fascia, a huge
+   * thin-rimmed wheel almost in their lap, the engine doghouse filling the
+   * space where a passenger footwell would be, and the whole eleven metres of
+   * party running away behind their right shoulder down the aisle. That last
+   * part is the point of the view — the chinchorreo is *behind* you, lit, and
+   * the mirror is angled at it.
+   *
+   * Ten merged meshes plus the shared gauge/meter/hand kit, all hidden until
+   * the camera is in the seat.
+   */
+  private buildCockpit(matMatte: THREE.Material, matChrome: THREE.Material): void {
+    this.cockpit.name = 'bus_cockpit';
+    this.cockpit.visible = false;
+
+    const parts = createParts();
+    const fascia = this.mat(0x2c2f38, 0.25, 0.72);
+    const pad = this.mat(0x191b21, 0.05, 0.9);
+    const doghouse = this.mat(BUS_PAINT.bodyDark, 0.1, 0.62);
+
+    const steelShell = new Shell();
+    const padShell = new Shell();
+    const chromeShell = new Shell();
+    const houseShell = new Shell();
+
+    const zDash = G.zCowl + 0.12; // -4.18, matching the exterior dash box
+    const yDash = 1.38;
+
+    /* ---- fascia: a full-width steel panel with a padded crash roll ------- */
+    steelShell.add(box(2.32, 0.5, 0.06, -0.1, yDash - 0.06, zDash - 0.14));
+    padShell.add(box(2.4, 0.09, 0.4, -0.1, yDash + 0.19, zDash + 0.02));
+    /* the kick panel down to the floor, so the fascia is not floating */
+    steelShell.add(box(2.32, 0.72, 0.05, -0.1, 0.95, zDash - 0.1));
+
+    /* ---- the doghouse: the engine cover a school bus driver sits beside -- */
+    houseShell.add(box(0.86, 1.0, 1.0, 0.66, G.yFloor + 0.5, G.zCowl + 0.86));
+    houseShell.add(box(0.92, 0.06, 1.06, 0.66, G.yFloor + 1.02, G.zCowl + 0.86));
+    chromeShell.add(box(0.9, 0.03, 0.05, 0.66, G.yFloor + 1.06, G.zCowl + 0.35));
+
+    /* ---- instrument cluster ---------------------------------------------
+     * A rectangular binnacle leaning back at 22°, carrying the big speedo,
+     * a tacho and a pair of air-pressure dials — the gauge no other vehicle
+     * in the game has, and the one that says "this thing weighs eight tonnes".
+     */
+    const pod = new THREE.Group();
+    pod.position.set(BUS_COCKPIT.podX, yDash + 0.14, zDash + 0.16);
+    pod.rotation.x = -BUS_COCKPIT.podTilt;
+    this.cockpit.add(pod);
+
+    const podShell = new Shell();
+    podShell.add(box(0.86, 0.4, 0.2, 0, 0, -0.1));
+    podShell.add(box(0.92, 0.03, 0.2, 0, 0.216, 0.052, -0.3));
+    const podGeo = podShell.build();
+    if (podGeo) {
+      this.geometries.push(podGeo);
+      pod.add(new THREE.Mesh(podGeo, pad));
+    }
+
+    const speedFace = makeGaugeFace({
+      label: 'VELOCIDAD',
+      unit: 'MPH',
+      numerals: [0, 10, 20, 30, 40, 50, 60, 70],
+      redlineAt: 0.88,
+      accent: '#f5b81c',
+    });
+    const rpmFace = makeGaugeFace({
+      label: 'DIESEL',
+      unit: 'x1000 RPM',
+      numerals: [0, 1, 2, 3, 4],
+      redlineAt: 0.8,
+      accent: '#d0261f',
+    });
+    const airFace = makeGaugeFace({
+      label: 'AIRE',
+      unit: 'PSI',
+      numerals: [0, 40, 80, 120],
+      accent: '#8bc34a',
+      face: '#141a16',
+    });
+    const speedGauge = buildGauge(0.14, speedFace, 0xff5a4a, parts);
+    const rpmGauge = buildGauge(0.1, rpmFace, 0xffd166, parts);
+    const airGauge = buildGauge(0.074, airFace, 0x8bc34a, parts);
+    speedGauge.group.position.set(-0.19, 0.0, 0.01);
+    rpmGauge.group.position.set(0.06, 0.03, 0.01);
+    airGauge.group.position.set(0.27, -0.06, 0.01);
+    pod.add(speedGauge.group, rpmGauge.group, airGauge.group);
+    this.needleSpeed = speedGauge.needle;
+    this.needleRpm = rpmGauge.needle;
+    this.needleAir = airGauge.needle;
+    /* the air gauge sits where a charged reservoir would put it and stays */
+    this.needleAir.rotation.z = needleAngle(0.78);
+
+    /* ---- switch bank + the door lever ------------------------------------ */
+    const strip = makeSwitchStrip(['LUCES', 'PUERTA', 'AIRE', 'RADIO', 'FIESTA'], '#ff3fa4');
+    if (strip) {
+      this.textures.push(strip);
+      const stripMat = new THREE.MeshStandardMaterial({
+        color: 0xffffff,
+        map: strip,
+        emissive: new THREE.Color(0xffffff),
+        emissiveMap: strip,
+        emissiveIntensity: 0.32,
+        metalness: 0.2,
+        roughness: 0.6,
+      });
+      this.materials.push(stripMat);
+      const g = new THREE.PlaneGeometry(0.62, 0.116);
+      g.rotateX(-0.35);
+      g.translate(0.24, yDash + 0.02, zDash + 0.14);
+      this.geometries.push(g);
+      this.cockpit.add(new THREE.Mesh(g, stripMat));
+    }
+    /* the long chromed door lever, the most bus-specific control there is */
+    chromeShell.add(tube(0.2, yDash - 0.16, zDash + 0.2, 0.46, yDash + 0.34, zDash + 0.52, 0.02, 6));
+    chromeShell.add(cyl(0.035, 0.035, 0.07, 8, 0.47, yDash + 0.37, zDash + 0.55, 'y'));
+
+    /* ---- the taxi meter, on the fascia by the driver's right hand -------- */
+    this.meter = new MeterDisplay();
+    if (this.meter.texture) this.textures.push(this.meter.texture);
+    const meterMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      map: this.meter.texture,
+      emissive: new THREE.Color(0xffffff),
+      emissiveMap: this.meter.texture,
+      emissiveIntensity: 0.6,
+      metalness: 0.1,
+      roughness: 0.55,
+    });
+    this.materials.push(meterMat);
+    const meterPod = new THREE.Group();
+    meterPod.position.set(0.14, yDash + 0.4, zDash + 0.3);
+    meterPod.rotation.set(-0.3, -0.42, 0);
+    this.cockpit.add(meterPod);
+    const meterCase = new THREE.BoxGeometry(0.28, 0.19, 0.12);
+    meterCase.translate(0, 0, -0.06);
+    this.geometries.push(meterCase);
+    meterPod.add(new THREE.Mesh(meterCase, pad));
+    const meterFace = new THREE.PlaneGeometry(0.238, 0.149);
+    meterFace.translate(0, 0, 0.002);
+    this.geometries.push(meterFace);
+    meterPod.add(new THREE.Mesh(meterFace, meterMat));
+
+    /* ---- windscreen surround: header, divider post, A-pillars ------------ */
+    const zWs = G.zWindscreen - 0.02;
+    padShell.add(box(2.5, 0.13, 0.14, 0, G.yWindscreenTop - 0.03, zWs + 0.06));
+    steelShell.add(box(0.09, 0.72, 0.1, 0, 1.7, zWs + 0.04));
+    steelShell.addMirrored(box(0.1, 0.74, 0.12, 1.19, 1.7, zWs + 0.08));
+    /* sun visor, folded down over the driver's half */
+    padShell.add(box(1.06, 0.02, 0.24, -0.58, G.yWindscreenTop - 0.14, zWs + 0.16, -0.5));
+
+    /* ---- the interior mirror, angled back down the aisle ----------------- */
+    chromeShell.add(tube(-0.12, G.yWindscreenTop - 0.09, zWs + 0.1, -0.12, 1.88, zWs + 0.3, 0.018, 6));
+    padShell.add(box(0.6, 0.15, 0.04, -0.12, 1.86, zWs + 0.32, 0.24, 0.2, 0));
+    const mirrorMat = new THREE.MeshStandardMaterial({
+      color: 0x93a9bb,
+      metalness: 1,
+      roughness: 0.07,
+      envMapIntensity: 1.8,
+    });
+    this.materials.push(mirrorMat);
+    const mirrorGlass = new THREE.PlaneGeometry(0.56, 0.13);
+    mirrorGlass.rotateY(Math.PI + 0.2);
+    mirrorGlass.rotateX(-0.24);
+    mirrorGlass.translate(-0.12, 1.86, zWs + 0.35);
+    this.geometries.push(mirrorGlass);
+    this.cockpit.add(new THREE.Mesh(mirrorGlass, mirrorMat));
+
+    /* ---- pedals and the floor plate -------------------------------------- */
+    steelShell.add(box(0.16, 0.28, 0.04, -0.5, G.yFloor + 0.24, zDash + 0.3, -0.42));
+    steelShell.add(box(0.2, 0.24, 0.04, -0.84, G.yFloor + 0.26, zDash + 0.28, -0.35));
+    padShell.add(box(1.0, 0.03, 0.5, -0.7, G.yFloor + 0.03, zDash + 0.42));
+
+    /* ---- the driver's own seat, in the lower periphery ------------------- */
+    padShell.add(box(0.07, 0.4, 0.5, -1.12, 1.2, G.zCowl + 0.6, -0.1));
+    padShell.add(box(0.07, 0.4, 0.5, -0.2, 1.2, G.zCowl + 0.6, -0.1));
+
+    /* ---- interior festoons: the party, seen from the driver's seat -------
+     * The exterior strings run outside the body where the street can see
+     * them; from the cab you would see nothing at all. These run inside, down
+     * both sides of the ceiling, and share the exterior strings' materials —
+     * so they chase on exactly the same beat with no extra state. */
+    const groups = this.festoon.length;
+    if (groups > 0) {
+      const inner: Shell[] = [];
+      for (let i = 0; i < groups; i++) inner.push(new Shell());
+      let n = 0;
+      for (let z = G.zCowl + 0.5; z < G.zBodyRear - 0.3; z += 0.62) {
+        for (const s of [-1, 1]) {
+          const b = new THREE.SphereGeometry(0.05, 6, 4);
+          b.translate(s * 1.06, G.yWindowTop - 0.09, z);
+          inner[n % groups].add(b);
+          n++;
+        }
+      }
+      for (let i = 0; i < groups; i++) {
+        const geo = inner[i].build();
+        if (!geo) continue;
+        this.geometries.push(geo);
+        const m = new THREE.Mesh(geo, this.festoon[i]);
+        m.name = `bus_cockpitFestoon${i}`;
+        this.cockpit.add(m);
+      }
+    }
+
+    /* ---- hands ----------------------------------------------------------- */
+    this.handRig.position.copy(this.steeringWheel.position);
+    this.handRig.rotation.x = this.steeringWheel.rotation.x;
+    this.handRig.add(buildHands(0.25, 0.026, parts, 0xb27a52, 0xf5f0e6));
+    this.cockpit.add(this.handRig);
+
+    /* a rim marker, so the wheel's rotation is unmistakable from the seat */
+    const marker = new THREE.BoxGeometry(0.07, 0.038, 0.034);
+    marker.translate(0, 0.252, 0);
+    this.geometries.push(marker);
+    const markerMat = this.mat(BUS_PAINT.red, 0.1, 0.5);
+    this.steeringWheel.add(new THREE.Mesh(marker, markerMat));
+
+    /* ---- emit ------------------------------------------------------------ */
+    for (const [shell, mat, name] of [
+      [steelShell, fascia, 'fascia'],
+      [padShell, pad, 'pad'],
+      [chromeShell, matChrome, 'chrome'],
+      [houseShell, doghouse, 'doghouse'],
+    ] as const) {
+      const geo = shell.build();
+      if (!geo) continue;
+      this.geometries.push(geo);
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.name = `bus_cockpit_${name}`;
+      this.cockpit.add(mesh);
+    }
+
+    for (const m of parts.materials) this.materials.push(m);
+    for (const g of parts.geometries) this.geometries.push(g);
+    for (const t of parts.textures) this.textures.push(t);
+    for (const t of [speedFace, rpmFace, airFace]) if (t) this.textures.push(t);
+    void matMatte;
+
+    this.chassis.add(this.cockpit);
+  }
+
+  /** Needle easing and the fare clock. Only runs while the seat is occupied. */
+  private tickCockpit(dt: number, speed: number): void {
+    if (this.needleSpeed) {
+      this.needleSpeed.rotation.z = damp(
+        this.needleSpeed.rotation.z,
+        needleAngle(this.targetSpeedNeedle),
+        BUS_COCKPIT.needleRate,
+        dt,
+      );
+    }
+    if (this.needleRpm) {
+      this.needleRpm.rotation.z = damp(
+        this.needleRpm.rotation.z,
+        needleAngle(this.targetRpmNeedle),
+        BUS_COCKPIT.needleRate * 1.6,
+        dt,
+      );
+    }
+    /* the air gauge bleeds down under braking and recharges — a bus tell */
+    if (this.needleAir) {
+      const charge = 0.62 + 0.24 * (1 - this.airBrakeVisual);
+      this.needleAir.rotation.z = damp(
+        this.needleAir.rotation.z,
+        needleAngle(charge),
+        2.2,
+        dt,
+      );
+    }
+
+    this.fareDistance += Math.abs(speed) * dt;
+    this.fareClock += dt;
+    if (this.fareClock >= 0.25) {
+      this.fareClock = 0;
+      this.meter?.set(
+        BUS_COCKPIT.fareFlag + this.fareDistance * BUS_COCKPIT.farePerMetre,
+        this.passenger.visible,
+      );
+    }
   }
 
   /**

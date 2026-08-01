@@ -188,6 +188,18 @@ export class FreeRide implements ShiftController {
      */
     this.bus.emit('shift:start', { mode: this.mode, duration: Math.max(0.001, this.displaySeconds) });
     this.bus.emit('audio:music', { intensity: this.calmIntensity });
+
+    /*
+     * This is the game's front door, and the verb is not obvious from a HUD
+     * with nothing running on it. Say it once, plainly: the street is open, go
+     * and find somebody. The HUD's own prompt keeps saying it afterwards.
+     */
+    this.bus.emit('ui:notice', { text: 'PASEO LIBRE', big: true });
+    this.bus.emit('ui:toast', {
+      text: 'Busca a alguien en la calle y párate a su lado. El reloj arranca cuando suban.',
+      icon: 'pin',
+      ms: 6000,
+    });
   }
 
   setRunning(on: boolean): void {

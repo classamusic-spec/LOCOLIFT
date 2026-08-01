@@ -71,6 +71,8 @@ export interface UIWorldSource {
 
 export type UIAction =
   | { kind: 'startMode'; mode: GameMode }
+  /** the chinchorreo, which has no `GameMode` of its own */
+  | { kind: 'startParty' }
   | { kind: 'resume' }
   | { kind: 'restart' }
   | { kind: 'quitToTitle' }
@@ -104,6 +106,10 @@ const PAD_REPEAT = 0.14;
 
 const COMBO_WINDOW = 4.0;
 const HAIL_TTL = 45;
+
+/** What the top-centre banner says while free roam has nobody in the car. */
+const ROAM_PROMPT_FIRST = 'Busca a alguien en la calle';
+const ROAM_PROMPT_NEXT = 'Busca al próximo pasajero';
 
 interface HailMarker {
   x: number;
@@ -181,6 +187,15 @@ export class UISystem implements System {
   private readonly destPos = new THREE.Vector3();
   private hasDest = false;
   private wrongWayTimer = 0;
+
+  /**
+   * True while the active mode is the untimed one *and* the car is empty. The
+   * HUD dial is told to stop pretending to count anything down; see
+   * `HUD.setRoaming`.
+   */
+  private roaming = false;
+  /** first fare of the session gets the friendlier prompt */
+  private roamPickups = 0;
 
   private archetypes = new Map<string, PassengerArchetype>();
   private activeArchetype: string | null = null;
@@ -343,6 +358,10 @@ export class UISystem implements System {
     switch (id) {
       case 'title':
       case 'modeSelect':
+        /* gameplay toasts have no business bleeding onto the menu */
+        this.toasts.clear();
+        this.hud.setRoaming(false);
+        this.roaming = false;
         this.title.openPanel('none');
         this.title.mount(this.root);
         this.title.refresh();
@@ -398,6 +417,23 @@ export class UISystem implements System {
   /** Start the 3 · 2 · 1 · ¡DALE! sequence. */
   showCountdown(): void {
     this.hud.startCountdown();
+  }
+
+  /**
+   * Re-derive whether the dial is showing a real deadline.
+   *
+   * Free roam is the only mode where the HUD can be mounted with no clock
+   * behind it, so it is the only mode that ever sets this. Everything else
+   * leaves the timer alone.
+   */
+  private refreshRoaming(aboard: boolean): void {
+    const roaming = this.mode === 'freeRide' && !aboard;
+    if (roaming === this.roaming && !roaming) return;
+    this.roaming = roaming;
+    this.hud.setRoaming(
+      roaming,
+      this.roamPickups === 0 ? ROAM_PROMPT_FIRST : ROAM_PROMPT_NEXT,
+    );
   }
 
   private unmountAll(): void {
@@ -618,6 +654,8 @@ export class UISystem implements System {
       this.hasDest = false;
       this.minimap.clearDestination();
       this.toasts.clear();
+      this.roamPickups = 0;
+      this.refreshRoaming(false);
       this.hud.startCountdown();
     });
 
@@ -638,6 +676,8 @@ export class UISystem implements System {
       this.arrow.setTarget(null);
       this.hasDest = false;
       this.minimap.clearDestination();
+      this.hud.setRoaming(false);
+      this.roaming = false;
     });
 
     /* --- score / combo -------------------------------------------------- */
@@ -698,6 +738,8 @@ export class UISystem implements System {
         fareEstimate: p.fareEstimate,
       });
       this.hud.setPatience(1);
+      this.roamPickups++;
+      this.refreshRoaming(true);
       this.dropNearestHail();
       this.setDestinationById(p.destinationId);
       this.hud.flash('pickup');
@@ -725,17 +767,32 @@ export class UISystem implements System {
       this.hasDest = false;
       this.minimap.clearDestination();
       this.activeArchetype = null;
+      this.refreshRoaming(false);
       this.toasts.push(`${p.result.grade} · $${Math.round(p.result.total)}`, 'money', 2400);
     });
 
     on('passenger:bail', (p) => {
       const a = this.archetypes.get(p.archetypeId);
+      /*
+       * This fires for two different things: the rider giving up, and somebody
+       * *waiting on the kerb* giving up. Free roam keeps eight people standing
+       * around for minutes at a time, so the second one happens constantly —
+       * and tearing the ride HUD down for it would blank the card, banner,
+       * arrow and minimap pin of the passenger still sitting in the car.
+       * `MissionSystem` reserves the rider's archetype id for as long as they
+       * are aboard, so this comparison is exact.
+       */
+      if (this.activeArchetype !== null && p.archetypeId !== this.activeArchetype) {
+        this.toasts.push(`${a?.name ?? 'El pasajero'} se cansó de esperar`, 'warn', 2200);
+        return;
+      }
       this.hud.setPassenger(null);
       this.hud.setDestination(null);
       this.arrow.setTarget(null);
       this.hasDest = false;
       this.minimap.clearDestination();
       this.activeArchetype = null;
+      this.refreshRoaming(false);
       this.toasts.push(
         p.reason === 'timeout'
           ? `${a?.name ?? 'El pasajero'} se cansó de esperar`
@@ -848,6 +905,7 @@ export class UISystem implements System {
       this.mode = mode;
       this.dispatch({ kind: 'startMode', mode });
     };
+    this.title.onStartParty = (): void => this.dispatch({ kind: 'startParty' });
     this.title.onOpenSettings = (): void => this.dispatch({ kind: 'openSettings' });
     this.title.onOpenGarage = (): void => this.dispatch({ kind: 'openGarage' });
     this.title.onOpenCredits = (): void => this.dispatch({ kind: 'openCredits' });
@@ -874,6 +932,9 @@ export class UISystem implements System {
     switch (action.kind) {
       case 'startMode':
         bus?.emit('game:mode', { mode: action.mode });
+        this.go('playing');
+        break;
+      case 'startParty':
         this.go('playing');
         break;
       case 'resume':

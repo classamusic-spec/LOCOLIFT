@@ -49,6 +49,30 @@ import type { CityLayout, WorldLayer, WorldOpts } from './WorldTypes';
 
 export type WeatherKind = SkyWeather;
 
+/** One row of the dev triangle census — see {@link World.installCensusHook}. */
+interface CensusRow {
+  group: string;
+  /** meshes the main pass will submit */
+  drawn: number;
+  /** triangles those meshes carry (instance count folded in) */
+  triangles: number;
+  /** triangles the same group re-submits into the sun's shadow map */
+  shadow: number;
+  /** triangles skipped because a `visible` flag is false — i.e. LOD works */
+  hidden: number;
+  /** triangles skipped by frustum culling */
+  culled: number;
+  /** world-space centre and half-extent of the group, for picking viewpoints */
+  box: [number, number, number, number, number, number];
+}
+
+/** Triangles a mesh submits, instance count folded in. */
+function meshTris(m: THREE.Mesh & { count?: number; isInstancedMesh?: boolean }): number {
+  const g = m.geometry;
+  const t = g.index ? g.index.count / 3 : (g.getAttribute('position')?.count ?? 0) / 3;
+  return m.isInstancedMesh ? t * (m.count ?? 0) : t;
+}
+
 /** Canonical hours the two "weather" shorthands jump the clock to (§4.2). */
 const SUNSET_HOUR = 18.25;
 const NIGHT_HOUR = 22.0;
@@ -89,6 +113,8 @@ export class World implements System, WorldAPI {
   private lotGrid = new Map<number, number[]>();
 
   private poiMap = new Map<string, POI>();
+  /** last camera the world was updated against — the dev census reads it */
+  private lastCamera: THREE.Camera | null = null;
   private layers: WorldLayer[] = [];
   private pending: Array<Promise<void>> = [];
   private unsubs: Array<() => void> = [];
@@ -167,6 +193,8 @@ export class World implements System, WorldAPI {
 
     this.lighting.focusOn(layout.spawn.pos);
     this.setTimeOfDay(12);
+
+    if (import.meta.env.DEV) this.installCensusHook();
   }
 
   /** Generate the district, build the ground and light it. */
@@ -260,6 +288,163 @@ export class World implements System, WorldAPI {
     }
   }
 
+  /**
+   * Per-group triangle census for the *current* camera, dev builds only.
+   *
+   * `window.__loco.sceneBreakdown()` counts everything that exists; this counts
+   * what the main pass will actually submit — visibility flags and frustum
+   * culling applied exactly the way `WebGLRenderer.projectObject` applies them.
+   * That difference is the whole LOD story: a layer can hold 300k triangles and
+   * cost nothing, or hold 300k and pay all of it from a rooftop.
+   *
+   * Guarded by `import.meta.env.DEV`, so it is statically dropped from the
+   * shipped bundle along with the traversal below.
+   */
+  private installCensusHook(): void {
+    const w = window as unknown as {
+      __locoCensus?: () => CensusRow[];
+      __locoWorldStats?: () => Record<string, number>;
+      __locoMeshCensus?: (prefix: string) => Array<Record<string, number | string>>;
+    };
+    w.__locoWorldStats = (): Record<string, number> => this.stats();
+    /* Mesh-level detail for one group. The aggregate census says *which* layer
+     * costs; this says which mesh inside it, which is what a LOD pass needs. */
+    w.__locoMeshCensus = (prefix: string): Array<Record<string, number | string>> => {
+      const out: Array<Record<string, number | string>> = [];
+      const collect = (o: THREE.Object3D): void => {
+        const m = o as THREE.Mesh & { count?: number; isInstancedMesh?: boolean };
+        if (m.isMesh && m.geometry && (m.name || '').startsWith(prefix)) {
+          out.push({
+            name: m.name,
+            tris: Math.round(meshTris(m)),
+            instances: m.count ?? 0,
+            visible: m.visible ? 1 : 0,
+            culled: m.frustumCulled ? 1 : 0,
+            shadow: m.castShadow ? 1 : 0,
+          });
+        }
+        for (const c of o.children) collect(c);
+      };
+      collect(this.opts.scene);
+      out.sort((a, b) => (b.tris as number) - (a.tris as number));
+      return out;
+    };
+    w.__locoCensus = (): CensusRow[] => {
+      const cam = this.lastCamera;
+      const rows: CensusRow[] = [];
+      if (!cam) return rows;
+      cam.updateMatrixWorld();
+      const proj = new THREE.Matrix4().multiplyMatrices(
+        cam.projectionMatrix,
+        cam.matrixWorldInverse,
+      );
+      const frustum = new THREE.Frustum().setFromProjectionMatrix(proj);
+      const sphere = new THREE.Sphere();
+
+      /* The shadow map is a second full render of every caster inside the sun's
+       * ortho box, and `renderer.info` folds it into the same triangle total the
+       * budget is written against — at street level it is as expensive as the
+       * main pass. Counting it separately is the only way to tell a layer that
+       * is merely visible from one that is paid for twice. */
+      const shadowCams: THREE.Camera[] = [];
+      for (const l of [this.lighting.sun, this.lighting.sunFar]) {
+        if (l.castShadow) shadowCams.push(l.shadow.camera);
+      }
+      const shadowFrusta = shadowCams.map((c) => {
+        c.updateMatrixWorld();
+        return new THREE.Frustum().setFromProjectionMatrix(
+          new THREE.Matrix4().multiplyMatrices(c.projectionMatrix, c.matrixWorldInverse),
+        );
+      });
+
+      const box = new THREE.Box3();
+      const tally = (root: THREE.Object3D, label: string): void => {
+        let drawn = 0;
+        let tris = 0;
+        let hiddenTris = 0;
+        let culledTris = 0;
+        let shadowTris = 0;
+        box.makeEmpty();
+        const walk = (o: THREE.Object3D): void => {
+          if (!o.visible) {
+            o.traverse((c) => {
+              const cm = c as THREE.Mesh & { count?: number; isInstancedMesh?: boolean };
+              if (cm.isMesh && cm.geometry) hiddenTris += meshTris(cm);
+            });
+            return;
+          }
+          const m = o as THREE.Mesh & {
+            count?: number;
+            isInstancedMesh?: boolean;
+            boundingSphere?: THREE.Sphere | null;
+          };
+          if (m.isMesh && m.geometry) {
+            const t = meshTris(m);
+            let inFrustum = true;
+            if (m.frustumCulled) {
+              const src = m.isInstancedMesh
+                ? (m.boundingSphere ?? null)
+                : (m.geometry.boundingSphere ??
+                  (m.geometry.computeBoundingSphere(), m.geometry.boundingSphere));
+              if (src) {
+                sphere.copy(src).applyMatrix4(m.matrixWorld);
+                inFrustum = frustum.intersectsSphere(sphere);
+              }
+            }
+            const bs = m.isInstancedMesh ? m.boundingSphere : m.geometry.boundingSphere;
+            if (bs) {
+              sphere.copy(bs).applyMatrix4(m.matrixWorld);
+              box.expandByPoint(sphere.center);
+            }
+            if (inFrustum) {
+              drawn++;
+              tris += t;
+            } else {
+              culledTris += t;
+            }
+            if (m.castShadow) {
+              for (const f of shadowFrusta) {
+                let hit = true;
+                if (m.frustumCulled) {
+                  const src = m.isInstancedMesh ? m.boundingSphere : m.geometry.boundingSphere;
+                  if (src) {
+                    sphere.copy(src).applyMatrix4(m.matrixWorld);
+                    hit = f.intersectsSphere(sphere);
+                  }
+                }
+                if (hit) shadowTris += t;
+              }
+            }
+          }
+          for (const c of o.children) walk(c);
+        };
+        walk(root);
+        if (drawn > 0 || hiddenTris > 0 || culledTris > 0) {
+          const r = (v: number): number => (Number.isFinite(v) ? Math.round(v) : 0);
+          rows.push({
+            group: label,
+            drawn,
+            triangles: Math.round(tris),
+            shadow: Math.round(shadowTris),
+            hidden: Math.round(hiddenTris),
+            culled: Math.round(culledTris),
+            box: [r(box.min.x), r(box.min.y), r(box.min.z), r(box.max.x), r(box.max.y), r(box.max.z)],
+          });
+        }
+      };
+
+      for (const child of this.opts.scene.children) {
+        if (child === this.root) {
+          for (const layer of child.children) tally(layer, layer.name || 'world/unnamed');
+        } else {
+          tally(child, child.name || child.type);
+        }
+      }
+      rows.sort((a, b) => b.triangles - a.triangles);
+      return rows;
+    };
+  }
+
   /* ------------------------------------------------------------- lighting */
 
   /**
@@ -305,6 +490,7 @@ export class World implements System, WorldAPI {
     // Layers (weather included) run next so a weather crossfade is already
     // folded into the lighting state before the sky reads it.
     const cam = ctx.camera;
+    this.lastCamera = cam;
     for (const layer of this.layers) layer.update?.(cam.position, dt, this._timeOfDay);
 
     this.sky.apply(this.lighting.state);
@@ -376,6 +562,7 @@ export class World implements System, WorldAPI {
   /** Numbers the QA harness and the debug overlay want. */
   stats(): Record<string, number> {
     const g = this.ground.stats;
+    const b = this.buildings.stats;
     return {
       lots: this.layout.lots.length,
       blocks: this.layout.blocks.length,
@@ -392,6 +579,17 @@ export class World implements System, WorldAPI {
       layers: this.layers.length,
       timeOfDay: this._timeOfDay,
       seaLevel: SEA_LEVEL,
+      // Façades are ~65% of the district's triangles; the split between the
+      // near shell, its flat twin and the instanced detail is the first thing
+      // any budget triage needs.
+      bldShellTris: b.shellTriangles,
+      bldFacadeTris: b.facadeTriangles,
+      bldMassTris: b.massTriangles,
+      bldRoofTris: b.roofTriangles,
+      bldFarTris: b.farTriangles,
+      bldInstTris: b.instancedTriangles,
+      bldInstances: b.instances,
+      bldInstMeshes: b.instancedMeshes,
       ...this.lighting.stats(),
       ...this.weatherFx.stats(),
     };

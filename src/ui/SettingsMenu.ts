@@ -10,6 +10,7 @@
  * persists; the menu also subscribes back so a change made elsewhere (a quality
  * preset stamping `shadows`, for instance) is reflected without a rebuild.
  */
+import { cameraViewChannel, requestCameraView } from '../camera/CameraModes';
 import { clamp } from '../core/MathUtils';
 import type { QualityTier, SettingsState } from '../core/types';
 import type { SettingsStore } from '../settings/SettingsStore';
@@ -441,6 +442,29 @@ export class SettingsMenu implements NavigableScreen {
 
   private buildControls(panel: HTMLElement): void {
     panel.append(
+      /* The view. Also on `V` and on the camera button in the touch overlay,
+       * but neither of those tells you what the options *are* — and a player
+       * who wants to drive in first person should not have to discover the
+       * cockpit by pressing a key four times. Reading from the live rig rather
+       * than from the stored setting is deliberate: cycling with `V` mid-shift
+       * must move the highlight here too, or the two disagree. */
+      this.segmented<SettingsState['cameraView']>(
+        'Vista',
+        'Camera view',
+        'La cabina te pone en el asiento del conductor. También en la tecla V.',
+        [
+          { value: 'chase', label: 'PERSEC.' },
+          { value: 'close', label: 'CERCA' },
+          { value: 'far', label: 'CINE' },
+          { value: 'cockpit', label: 'CABINA' },
+          { value: 'bumper', label: 'PARAG.' },
+        ],
+        () => cameraViewChannel.current as SettingsState['cameraView'],
+        (v) => {
+          requestCameraView(v);
+          this.store.set('cameraView', v);
+        },
+      ),
       this.toggle(
         'Invertir cámara',
         'Invert look',

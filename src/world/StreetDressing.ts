@@ -77,6 +77,7 @@ import {
   wireRibbon,
 } from './PropKit';
 import type { ClusterRange, DressPlacement, DressSign, FrontEdge, WetnessSource } from './PropKit';
+import { LodField, bucketByCell, bucketFootprint } from './LodGrid';
 import type { PropSpecId } from './Destructibles';
 import type { CityLayout, DistrictZone, Lot, OpenArea, WorldLayer, WorldOpts } from './WorldTypes';
 
@@ -132,6 +133,19 @@ const BUNTING_PALETTE = [0xf2c230, 0xd52b1e, 0x2e5e86, 0xf7f4ec, 0x4fbfb1, 0xe85
 const SPAN_Y = 5.95;
 const FESTOON_Y = 5.35;
 
+/**
+ * Cell size for the instanced dressing, metres.
+ *
+ * Sized against `propDetailDistance` (70 m on `low`, 190 m on `high`) rather
+ * than against the district: the live set is a disc a couple of cells across,
+ * so a cell much finer than the cull radius buys draw calls and no triangles.
+ * 130 m keeps the working set to roughly a 3 × 3 neighbourhood at `high`.
+ */
+const DRESS_CELL = 130;
+
+/** Slack on a cell's footprint: prop reach plus the shader's fade band. */
+const DRESS_PAD = 6;
+
 export interface StreetDressingOptions {
   density?: number;
   /** the world's `MaterialLibrary`, for the shared rain wetness drive */
@@ -141,6 +155,9 @@ export interface StreetDressingOptions {
 }
 
 /* -------------------------------------------------------------------- data */
+
+/** The per-cell meshes one prop type expanded into, with their placements. */
+type DressBuckets = Array<{ mesh: THREE.InstancedMesh; items: DressPlacement[] }>;
 
 interface FrontRef {
   lot: Lot;
@@ -166,6 +183,8 @@ export class StreetDressing implements WorldLayer {
 
   private geometries: THREE.BufferGeometry[] = [];
   private meshes: THREE.Object3D[] = [];
+  /** the per-cell instanced meshes, culled together every frame */
+  private lod = new LodField();
   private _stats = {
     instances: 0,
     triangles: 0,
@@ -645,23 +664,61 @@ export class StreetDressing implements WorldLayer {
     this._stats.triangles += triCount(geo);
   }
 
+  /**
+   * One `InstancedMesh` per prop **per cell**, not one for the whole district.
+   *
+   * The vertex cull in `PropKit` already collapses every one of these props to
+   * a point past `propDetailDistance` — but a single district-wide mesh still
+   * submits all of its triangles, and the shadow camera submits them again. On
+   * `high` that was 169 k triangles of pots, palms, planters and festoon bulbs
+   * transformed every frame from every viewpoint to produce no pixels at all.
+   *
+   * Splitting on a {@link DRESS_CELL} grid gives each mesh a footprint smaller
+   * than the cull radius, so {@link LodField} can drop the ones the shader has
+   * already emptied and three can frustum-cull the rest — in the shadow pass
+   * as well as the main one. It costs draw calls only for the cells that are
+   * genuinely in range, which is three or four of them.
+   */
   private addInstanced(
     geo: THREE.BufferGeometry,
     mat: THREE.Material,
     list: DressPlacement[],
     name: string,
-  ): THREE.InstancedMesh | null {
-    const mesh = dressInstanced(geo, mat, list, name);
-    if (!mesh) {
+  ): Array<{ mesh: THREE.InstancedMesh; items: DressPlacement[] }> {
+    const out: Array<{ mesh: THREE.InstancedMesh; items: DressPlacement[] }> = [];
+    if (list.length === 0) {
       geo.dispose();
-      return null;
+      return out;
     }
-    this.group.add(mesh);
-    this.meshes.push(mesh);
-    this.geometries.push(mesh.geometry);
-    this._stats.instances += mesh.count;
-    this._stats.triangles += triCount(mesh.geometry) * mesh.count;
-    return mesh;
+    const buckets = bucketByCell(list, DRESS_CELL, (p) => p);
+    for (let b = 0; b < buckets.length; b++) {
+      const bucket = buckets[b];
+      // Each bucket needs its own `aCullMul`, which `dressInstanced` attaches
+      // to the geometry, so the geometry cannot be shared between them. These
+      // are 20–90 triangle props; a clone per cell is nothing.
+      const g = buckets.length === 1 ? geo : geo.clone();
+      const mesh = dressInstanced(g, mat, bucket.items, `${name}/${b}`);
+      if (!mesh) {
+        g.dispose();
+        continue;
+      }
+      this.group.add(mesh);
+      this.meshes.push(mesh);
+      this.geometries.push(mesh.geometry);
+      this._stats.instances += mesh.count;
+      this._stats.triangles += triCount(mesh.geometry) * mesh.count;
+
+      // A landmark prop authored with `cull > 1` keeps the whole cell alive
+      // that much longer; taking the max is the only safe reduction.
+      let mul = 1;
+      for (const it of bucket.items) mul = Math.max(mul, it.cull ?? 1);
+      const f = bucketFootprint(bucket, DRESS_PAD);
+      this.lod.add(mesh, f.cx, f.cz, f.radius, mul);
+
+      out.push({ mesh, items: bucket.items });
+    }
+    if (buckets.length !== 1) geo.dispose();
+    return out;
   }
 
   /* ------------------------------------------------------- destructibility */
@@ -678,46 +735,59 @@ export class StreetDressing implements WorldLayer {
    * stall reads better than a rigid box cartwheeling down the aisle anyway.
    */
   private registerDestructibles(m: {
-    pots: THREE.InstancedMesh | null;
-    palms: THREE.InstancedMesh | null;
-    blooms: THREE.InstancedMesh | null;
-    planters: THREE.InstancedMesh | null;
-    tables: THREE.InstancedMesh | null;
-    chairs: THREE.InstancedMesh | null;
-    umbrellas: THREE.InstancedMesh | null;
-    boards: THREE.InstancedMesh | null;
-    crates: THREE.InstancedMesh | null;
+    pots: DressBuckets;
+    palms: DressBuckets;
+    blooms: DressBuckets;
+    planters: DressBuckets;
+    tables: DressBuckets;
+    chairs: DressBuckets;
+    umbrellas: DressBuckets;
+    boards: DressBuckets;
+    crates: DressBuckets;
     clothGeo: THREE.BufferGeometry | null;
     signGeo: THREE.BufferGeometry | null;
     stallClothRanges: ClusterRange[];
     boardFaceRanges: ClusterRange[];
   }): void {
-    const reg = (
-      mesh: THREE.InstancedMesh | null,
-      id: PropSpecId,
-      list: DressPlacement[],
-      clusters?: ReadonlyArray<Array<{ geo: THREE.BufferGeometry; range: ClusterRange }> | null>,
-    ): void => destructibles.registerInstanced(this, mesh, id, list, clusters);
+    /* `Destructibles` addresses a prop by `(mesh, instance index)`, so each
+     * spatial bucket registers with its own sub-list — the order inside a
+     * bucket is exactly the order it was instanced in. */
+    const reg = (buckets: DressBuckets, id: PropSpecId): void => {
+      for (const b of buckets) destructibles.registerInstanced(this, b.mesh, id, b.items);
+    };
 
-    reg(m.pots, 'pot', this.pots);
-    reg(m.palms, 'palm', this.palms);
-    reg(m.blooms, 'bush', this.blooms);
-    reg(m.planters, 'planter', this.planters);
-    reg(m.tables, 'table', this.tables);
-    reg(m.chairs, 'chair', this.chairs);
-    reg(m.umbrellas, 'umbrella', this.umbrellas);
-    reg(m.crates, 'crate', this.crates);
+    reg(m.pots, 'pot');
+    reg(m.palms, 'palm');
+    reg(m.blooms, 'bush');
+    reg(m.planters, 'planter');
+    reg(m.tables, 'table');
+    reg(m.chairs, 'chair');
+    reg(m.umbrellas, 'umbrella');
+    reg(m.crates, 'crate');
 
-    if (m.boards && m.signGeo) {
-      const sign = m.signGeo;
-      reg(
-        m.boards,
-        'board',
-        this.boards,
-        m.boardFaceRanges.map((range) => [{ geo: sign, range }]),
-      );
+    // An A-board's frame is instanced but its two painted faces live in the
+    // shared sign mesh, so the cluster span has to travel with the instance it
+    // belongs to — which now means finding it by identity rather than index.
+    const sign = m.signGeo;
+    if (sign) {
+      const faceOf = new Map<DressPlacement, ClusterRange>();
+      for (let i = 0; i < this.boards.length && i < m.boardFaceRanges.length; i++) {
+        faceOf.set(this.boards[i], m.boardFaceRanges[i]);
+      }
+      for (const b of m.boards) {
+        destructibles.registerInstanced(
+          this,
+          b.mesh,
+          'board',
+          b.items,
+          b.items.map((it) => {
+            const range = faceOf.get(it);
+            return range ? [{ geo: sign, range }] : null;
+          }),
+        );
+      }
     } else {
-      reg(m.boards, 'board', this.boards);
+      reg(m.boards, 'board');
     }
 
     if (m.clothGeo) {
@@ -743,23 +813,27 @@ export class StreetDressing implements WorldLayer {
   /* -------------------------------------------------------------- runtime */
 
   update(cameraPos: THREE.Vector3, dt: number, timeOfDay: number): void {
-    this.kit?.update(
-      dt,
-      nightRamp(timeOfDay),
-      cameraPos,
-      QUALITY_BUDGET[this.quality].propDetailDistance,
-      this,
-    );
+    const cut = QUALITY_BUDGET[this.quality].propDetailDistance;
+    this.kit?.update(dt, nightRamp(timeOfDay), cameraPos, cut, this);
+    /* The cut is exactly the shader's own cull radius, so a cell that goes
+     * invisible here was already collapsed to a point on the GPU — nothing
+     * leaves the frame, only the transform cost does. The shadow pass needs no
+     * separate rule: three frustum-tests every caster against the sun's box,
+     * and a cell-sized bounding sphere finally makes that test say no. */
+    this.lod.update(cameraPos, cut);
   }
 
   onQualityChange(tier: QualityTier): void {
     this.quality = tier;
     const d = QUALITY_BUDGET[tier].propDetailDistance;
-    for (const m of this.meshes) {
-      if (m.name === 'street/crate' || m.name === 'street/chair') m.visible = d >= 100;
-      else if (m.name === 'street/bulb') m.visible = d >= 90;
-      else if (m.name === 'street/hanging') m.visible = d >= 80;
-    }
+    // Enable/disable by tier, not by `visible` — `LodField` owns `visible` now
+    // and would put a tier-dropped prop straight back on the next frame.
+    this.lod.setEnabled(
+      (m) => m.name.startsWith('street/crate') || m.name.startsWith('street/chair'),
+      d >= 100,
+    );
+    this.lod.setEnabled((m) => m.name.startsWith('street/bulb'), d >= 90);
+    this.lod.setEnabled((m) => m.name.startsWith('street/hanging'), d >= 80);
   }
 
   stats(): Record<string, number> {
@@ -778,6 +852,7 @@ export class StreetDressing implements WorldLayer {
 
   dispose(): void {
     destructibles.unregisterOwner(this);
+    this.lod.clear();
     for (const g of this.geometries) g.dispose();
     this.geometries.length = 0;
     for (const m of this.meshes) {

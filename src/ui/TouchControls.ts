@@ -409,11 +409,20 @@ export class TouchControls {
       if (this.onPause) this.onPause();
       else this.channel.pausePressed = true;
     });
+    /* Camera. The desktop cycle is a keyboard key (`V`) and a gamepad button,
+     * neither of which a phone has, so without this the cockpit view — and the
+     * cinematic and bumper views with it — are simply unreachable on the
+     * device most people will play on. It writes the same `cameraPressed` edge
+     * the key does, so the rig needs no idea where the press came from. */
+    const cameraBtn = this.makeDiscrete('Cámara', buildCameraGlyph(), () => {
+      this.haptic('tap');
+      this.channel.cameraPressed = true;
+    });
     const setupBtn = this.makeDiscrete('Ajustar controles', buildGearGlyph(), () => {
       this.haptic('tap');
       this.setPanelOpen(!this.panelOpen);
     });
-    this.util.append(pauseBtn, setupBtn);
+    this.util.append(pauseBtn, cameraBtn, setupBtn);
 
     /* ------------------------------------------------------------ panel */
     this.panel = this.buildPanel();
@@ -765,9 +774,10 @@ export class TouchControls {
       hs.setProperty('--ll-touch-steer-w', px(steerW + Math.max(0, this.prefs.steerDx)));
       hs.setProperty('--ll-touch-steer-h', px(zoneH + Math.max(0, this.prefs.steerDy)));
       hs.setProperty('--ll-touch-util-w', px(utilPx + 12));
-      // two stacked buttons; the HUD needs the height in portrait, where there
-      // is no room beside the column and the fare has to sit under it
-      hs.setProperty('--ll-touch-util-h', px(utilPx * 2 + SIZE.gap * this.scale * 0.8));
+      // three stacked buttons (pause, camera, setup); the HUD needs the height
+      // in portrait, where there is no room beside the column and the fare has
+      // to sit under it
+      hs.setProperty('--ll-touch-util-h', px(utilPx * 3 + SIZE.gap * this.scale * 1.6));
     }
 
     /* ---- hit rectangles ---- */
@@ -1863,6 +1873,21 @@ function buildGearGlyph(): SVGSVGElement {
       ...NS_STROKE,
       'stroke-width': '2.6',
     }),
+  );
+  return s;
+}
+
+/** A stills camera — the view-cycle button. */
+function buildCameraGlyph(): SVGSVGElement {
+  const s = iconRoot(32);
+  s.append(
+    svg('path', {
+      d: 'M4.5 10.5h5l2-3h9l2 3h5a1.6 1.6 0 0 1 1.6 1.6v11a1.6 1.6 0 0 1-1.6 1.6H4.5A1.6 1.6 0 0 1 2.9 23.1v-11a1.6 1.6 0 0 1 1.6-1.6z',
+      ...NS_STROKE,
+      'stroke-width': '2.2',
+      'stroke-linejoin': 'round',
+    }),
+    svg('circle', { cx: '16', cy: '17.4', r: '4.4', ...NS_STROKE, 'stroke-width': '2.2' }),
   );
   return s;
 }

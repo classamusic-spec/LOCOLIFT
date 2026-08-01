@@ -967,4 +967,38 @@ export interface VehicleModel {
   pulseAirBrake?(strength: number): void;
   /** optional: vehicles with a horn animate something when it sounds */
   pulseHorn?(): void;
+
+  /* ------------------------------------------------------ the driver's seat */
+
+  /**
+   * Optional: how much the camera is sitting in this vehicle's driver's seat,
+   * 0..1. Driven straight off the camera's blended `interiorWeight`.
+   *
+   * The contract is that **nothing an interior needs may exist while this is
+   * 0**. Cockpit geometry is built once, parked under a group that starts
+   * hidden, and only shown here — a chase-cam frame must not pay a draw call
+   * or a triangle for a dashboard nobody can see. Implementations may also use
+   * the ramp to swap things the other way: the carriage hides its coachman,
+   * because at weight 1 the camera is inside his head.
+   */
+  setCockpitVisible?(amount: number): void;
+
+  /**
+   * Optional: the driver's eye point in body-local metres, or `null` if this
+   * vehicle has no cockpit.
+   *
+   * Must be reported **through the cosmetic chassis lean**, not in raw body
+   * space. The dashboard is a child of the leaning chassis group; an eye
+   * reported in rigid-body space would slide relative to it by up to 11° of
+   * pitch on every corner, and the dash would visibly swim.
+   */
+  getCockpitEye?(out: THREE.Vector3): THREE.Vector3 | null;
+
+  /**
+   * Optional: live engine state, for vehicles whose interior has instruments.
+   * `rpmNorm` and `speedNorm` are 0..1 of redline / top speed; `gear` is the
+   * simulation's gear index. Called every frame; implementations that are not
+   * showing a cockpit should return immediately.
+   */
+  setInstruments?(rpmNorm: number, speedNorm: number, gear: number): void;
 }

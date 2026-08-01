@@ -155,6 +155,7 @@ export const DEFAULT_SETTINGS: SettingsState = {
   uiScale: 1,
   minimapRotates: true,
   showSpeedUnits: 'mph',
+  cameraView: 'chase',
 };
 
 /**

@@ -47,12 +47,16 @@ import type { GameContext, InputState, QualityTier, SettingsState, System } from
 import { GROUP } from '../physics/PhysicsTypes';
 import type { BodyHandle, PhysicsWorldAPI } from '../physics/PhysicsTypes';
 import {
+  CAMERA_CYCLE,
   CAMERA_MODES,
   MODE_BLEND_TIME,
   blendModeParams,
+  cameraViewChannel,
   copyModeParams,
   createModeParams,
+  isCyclableCameraView,
   nextCameraMode,
+  requestCameraView,
 } from './CameraModes';
 import type { CameraModeId, CameraModeParams } from './CameraModes';
 import { CameraShake } from './CameraShake';
@@ -64,6 +68,7 @@ import {
   FOLLOW,
   FOV,
   FX,
+  INTERIOR,
   LOOK,
   LOOK_BACK,
   PIVOT,
@@ -107,6 +112,55 @@ export interface CameraTarget {
   readonly boostFraction: number;
   /** 0..4 */
   readonly wheelsOnGround: number;
+
+  /**
+   * Optional: where this target's driver's eye is, in the target's own local
+   * frame, metres. Returns `out` when the target has a cockpit, `null` when it
+   * does not — in which case the cockpit mode falls back to its preset offset.
+   *
+   * Local (not world) because the rig has to apply its own tilt-keep frame to
+   * it, and because the vehicle is entitled to fold its cosmetic body lean in
+   * before answering: the dashboard leans with the body, so the eye must too,
+   * or the two visibly slide apart on every corner.
+   */
+  getCockpitEye?(out: THREE.Vector3): THREE.Vector3 | null;
+
+  /**
+   * Optional: how much the rig is inside this target right now, 0..1.
+   *
+   * The camera calls this every frame with the live blended `interiorWeight`,
+   * which is how interior geometry gets built and shown *only* while it can be
+   * seen — a chase-cam frame must not pay a single triangle for a dashboard
+   * nobody is looking at. Ramped rather than boolean so the vehicle can fade
+   * a driver figure out as the eye moves into its head.
+   */
+  setInteriorAmount?(amount: number): void;
+}
+
+/**
+ * The rig's QA surface, published on `window`.
+ *
+ * Declared here rather than in the boot module because the boot module has no
+ * reason to know a camera is testable, and a harness that has to reach through
+ * five layers of wiring to switch view is a harness that stops being run.
+ */
+export interface LocoCameraTestHook {
+  /** the view the rig is in right now */
+  readonly mode: string;
+  /** live blended `interiorWeight`, 0..1 */
+  readonly interior: number;
+  /** every view `V` walks, in order */
+  views(): string[];
+  /** ask for a view by id; unknown ids are ignored */
+  request(view: string): void;
+  cycle(): void;
+  pose(): Record<string, number>;
+}
+
+declare global {
+  interface Window {
+    __locoCam?: LocoCameraTestHook;
+  }
 }
 
 const AXIS_Y = /*@__PURE__*/ new THREE.Vector3(0, 1, 0);
@@ -182,6 +236,14 @@ export class ChaseCamera implements System {
   private _fovKick = 0;
   private noiseTime = 0;
 
+  /** eased chassis pitch/roll borrowed by the head in an interior rig, radians */
+  private headPitch = 0;
+  private headRoll = 0;
+  /** last `interiorWeight` published to the target, so we only call on change */
+  private interiorSent = -1;
+  /** last `settings.cameraView` acted on, so other settings edits don't re-apply */
+  private appliedView: CameraModeId | null = null;
+
   private readonly lastTargetPos = new THREE.Vector3();
   private hasLastTargetPos = false;
 
@@ -199,6 +261,10 @@ export class ChaseCamera implements System {
   private readonly resolved = new THREE.Vector3();
   private readonly rayDir = new THREE.Vector3();
   private readonly localOffset = new THREE.Vector3();
+  private readonly cockpitEye = new THREE.Vector3();
+  private readonly tiltFwd = new THREE.Vector3();
+  private readonly tiltRight = new THREE.Vector3();
+  private readonly tiltUp = new THREE.Vector3();
   private readonly qYaw = new THREE.Quaternion();
   private readonly qFrame = new THREE.Quaternion();
   private readonly qFrameInv = new THREE.Quaternion();
@@ -248,8 +314,12 @@ export class ChaseCamera implements System {
 
   /** Retarget the rig (vehicle swap, spectator hand-off). Does not snap. */
   setTarget(target: CameraTarget): void {
+    // The outgoing vehicle must not be left holding a lit cockpit it can no
+    // longer see out of — that is a permanent leak of geometry into the scene.
+    if (this.target !== target) this.target?.setInteriorAmount?.(0);
     this.target = target;
     this.hasLastTargetPos = false;
+    this.interiorSent = -1;
   }
 
   /** Late-bound physics — the world is created asynchronously. */
@@ -343,6 +413,9 @@ export class ChaseCamera implements System {
     this.modeId = id;
     this.modeBlend = immediate ? 1 : 0;
     if (!this.showcaseActive && id !== 'showcase') this.modeBeforeShowcase = id;
+    // Publish, so the settings menu shows the view the player is actually in
+    // rather than the one they last picked from a list.
+    if (id !== 'showcase') cameraViewChannel.current = id;
   }
 
   /** Advance to the next player-facing view. Ignored while in showcase. */
@@ -408,6 +481,11 @@ export class ChaseCamera implements System {
       ctx.renderer.getSize(this.viewSize);
       if (this.viewSize.y > 0) this.setAspect(this.viewSize.x / this.viewSize.y);
     }
+    // Restore the persisted view before the first frame is solved, so a player
+    // who plays in the cockpit boots into the cockpit rather than watching the
+    // rig dive into it half a second after the shift starts.
+    this.applyViewSetting(ctx.settings, true);
+    this.installTestHook();
     this.snapToTarget();
   }
 
@@ -424,7 +502,69 @@ export class ChaseCamera implements System {
       if (input.cameraPressed) this.cycleMode();
     }
 
+    /* A view asked for by the UI wins over the persisted default, and is
+     * edge-consumed so it can never fight the player's own button press. */
+    const requested = cameraViewChannel.requested;
+    if (requested !== null) {
+      cameraViewChannel.requested = null;
+      this.appliedView = requested;
+      if (!this.showcaseActive) this.setMode(requested);
+    } else {
+      this.applyViewSetting(ctx.settings, false);
+    }
+
     this.solve(dt, ctx.rawDt, ctx.settings, input, false);
+  }
+
+  /**
+   * Adopt `settings.cameraView` when — and only when — it *changes*.
+   *
+   * Watching for a change rather than asserting the value every frame is what
+   * lets the `V` key and the menu coexist: cycling the view with the button
+   * leaves the stored default alone, and editing an unrelated setting (which
+   * hands the camera a whole new frozen `SettingsState`) does not yank the
+   * player back out of the cockpit.
+   */
+  private applyViewSetting(settings: SettingsState, immediate: boolean): void {
+    const want = settings.cameraView;
+    if (!isCyclableCameraView(want) || want === this.appliedView) return;
+    this.appliedView = want;
+    if (this.showcaseActive) {
+      this.modeBeforeShowcase = want;
+      return;
+    }
+    this.setMode(want, immediate);
+  }
+
+  /**
+   * QA surface. Installed by the rig itself, exactly as `TouchControls` does,
+   * because the boot code has no reason to know that a camera is testable.
+   */
+  private installTestHook(): void {
+    if (typeof window === 'undefined') return;
+    const self = this;
+    window.__locoCam = {
+      get mode(): string {
+        return self.modeId;
+      },
+      get interior(): number {
+        return self.params.interiorWeight;
+      },
+      views: () => [...CAMERA_CYCLE],
+      request: (v: string) => {
+        if (isCyclableCameraView(v)) requestCameraView(v);
+      },
+      cycle: () => self.cycleMode(),
+      pose: () => ({
+        x: Number(self.camera.position.x.toFixed(3)),
+        y: Number(self.camera.position.y.toFixed(3)),
+        z: Number(self.camera.position.z.toFixed(3)),
+        fov: Number(self.fovCurrent.toFixed(2)),
+        roll: Number(self.roll.toFixed(4)),
+        headPitch: Number(self.headPitch.toFixed(4)),
+        headRoll: Number(self.headRoll.toFixed(4)),
+      }),
+    };
   }
 
   /**
@@ -440,6 +580,8 @@ export class ChaseCamera implements System {
   dispose(): void {
     for (const off of this.unsubscribers) off();
     this.unsubscribers.length = 0;
+    this.target?.setInteriorAmount?.(0);
+    if (typeof window !== 'undefined' && window.__locoCam) delete window.__locoCam;
     this.shake.dispose();
     if (this.resizeBound && typeof window !== 'undefined') {
       window.removeEventListener('resize', this.resizeBound);
@@ -694,12 +836,27 @@ export class ChaseCamera implements System {
         );
     this.roll = damp(this.roll, rollTarget, FOLLOW.roll * rateScale, sdt);
 
+    /* ---- interior weight --------------------------------------------------
+     * Published to the target first, so the vehicle's cockpit geometry is
+     * already built and visible on the frame the blend starts rather than a
+     * frame after it. `interiorSent` makes the call an edge, not a per-frame
+     * poke: a vehicle rebuilding a dashboard 60 times a second would be worse
+     * than not having one. */
+    const interior = clamp01(showcase ? 0 : p.interiorWeight);
+    if (Math.abs(interior - this.interiorSent) > 0.002) {
+      this.interiorSent = interior;
+      this.target.setInteriorAmount?.(interior);
+    }
+
     /* ---- desired offset --------------------------------------------------
      * `externalRig` is 1 for any rig that sits behind the car and 0 for one
      * that sits on it (bumper). It gates the global pull-backs so a bumper cam
      * doesn't slide backwards through the driver every time you boost, and it
-     * blends smoothly during a chase↔bumper transition. */
-    const externalRig = showcase ? 0 : clamp01(p.distance / 2);
+     * blends smoothly during a chase↔bumper transition. The interior weight
+     * gates it too: a cockpit's fallback `distance` is a small *positive*
+     * number (the driver sits behind the pivot), and without this a boost
+     * would shove the eye backwards out through the seat. */
+    const externalRig = showcase ? 0 : clamp01(p.distance / 2) * (1 - interior);
     let dist =
       p.distance +
       (p.speedPullback * speedCurve +
@@ -746,7 +903,10 @@ export class ChaseCamera implements System {
       this.anchorY = ay;
       this.anchorInitialised = true;
     } else {
-      const yRate = lerp(PIVOT.yFilterRate, PIVOT.yFilterRateAir, this.airBlend) * swayRateMul;
+      const yRate =
+        lerp(PIVOT.yFilterRate, PIVOT.yFilterRateAir, this.airBlend) *
+        swayRateMul *
+        lerp(1, PIVOT.interiorRateMultiplier, interior);
       this.anchorY = clamp(
         damp(this.anchorY, ay, yRate, sdt),
         ay - PIVOT.yMaxLag,
@@ -768,7 +928,36 @@ export class ChaseCamera implements System {
     else this.qFrame.copy(this.qYaw);
     this.qFrameInv.copy(this.qFrame).invert();
 
-    this.desired.set(p.lateral, height, dist).applyQuaternion(this.qFrame).add(this.anchor);
+    /* ---- the offset, in the rig frame -------------------------------------
+     * Normally this is just the mode's `(lateral, height, distance)`. An
+     * interior rig replaces it — proportionally to `interiorWeight` — with the
+     * driver's eye point the *vehicle* reported, re-expressed relative to the
+     * pivot (which sits `PIVOT.height · rigScale` above the chassis origin).
+     *
+     * Deliberately NOT multiplied by `rigScale`: the eye point is a real
+     * measurement of a real seat in the vehicle's own local metres, not a
+     * proportion of a Jeep. Scaling it would put the bus driver 7 m ahead of
+     * the windscreen. */
+    let offX = p.lateral;
+    let offY = height;
+    let offZ = dist;
+    let eyeLateral = 0;
+    if (interior > 0.0001 && this.target.getCockpitEye) {
+      const eye = this.target.getCockpitEye(this.cockpitEye);
+      if (
+        eye &&
+        Number.isFinite(eye.x) &&
+        Number.isFinite(eye.y) &&
+        Number.isFinite(eye.z)
+      ) {
+        offX = lerp(offX, eye.x, interior);
+        offY = lerp(offY, eye.y - PIVOT.height * this.rigScale, interior);
+        offZ = lerp(offZ, eye.z, interior);
+        eyeLateral = eye.x * interior;
+      }
+    }
+
+    this.desired.set(offX, offY, offZ).applyQuaternion(this.qFrame).add(this.anchor);
 
     /* ---- position follow -------------------------------------------------
      * Three independent first-order dampers, expressed in the rig frame:
@@ -919,6 +1108,17 @@ export class ChaseCamera implements System {
       .set(this.anchor.x, this.anchor.y + p.lookHeight, this.anchor.z)
       .addScaledVector(this.leadDir, lead);
 
+    /* A driver sits well off the centreline — 0.66 m in the bus. Aiming at a
+     * point on the centreline from there yaws the whole view a couple of
+     * degrees toward the middle of the road, which puts the steering wheel
+     * visibly off-centre in frame and reads as a broken camera. Sliding the
+     * aim point sideways by the same offset makes the view exactly parallel to
+     * the vehicle's forward axis. Zero for every external rig. */
+    if (eyeLateral !== 0) {
+      scratch.v1.set(1, 0, 0).applyQuaternion(this.qFrame);
+      this.lookTarget.addScaledVector(scratch.v1, eyeLateral);
+    }
+
     /* Airborne: bias the aim toward the landing, proportional to fall speed, so
      * the horizon sits high and the touchdown point is visible on the way down. */
     if (this.airBlend > 0.001) {
@@ -928,6 +1128,52 @@ export class ChaseCamera implements System {
 
     if (doSnap) this.look.copy(this.lookTarget);
     else dampVec3(this.look, this.lookTarget, FOLLOW.look * rateScale, sdt);
+
+    /* ---- borrowed chassis attitude (interior rigs only) -------------------
+     * `lookAt` always builds a world-up basis, so on its own no mode can ever
+     * roll or pitch the *view* — which is exactly right for a camera hanging
+     * behind the car and exactly wrong for one bolted into its dashboard. A
+     * cockpit whose head stays gyroscopically level leaves the dash swinging
+     * inside the frame on every camber change.
+     *
+     * Roll: rotating the chassis right-side-down by α maps its local +X to a
+     * world vector with `y = -sin α` and its local +Y to `y = cos α`, so
+     * `atan2(-r.y, u.y)` recovers α with the right sign through the poles. The
+     * camera's compensating roll is `-α`, matching the drift-roll convention
+     * documented in `CameraTuning.DRIFT.rollPerSlipRad`: a positive rotation
+     * about the camera's local +Z spins the image clockwise, and a right-hand
+     * bank must tilt the horizon counter-clockwise.
+     *
+     * Faded to nothing while airborne (a tumbling chassis has no attitude a
+     * driver's inner ear would recognise) and while looking back (where the
+     * borrowed roll fights the 180° swing), damped so cobblestones don't reach
+     * the head, and hard-clamped so a barrel roll can never spin the view. */
+    const aim =
+      showcase || this.recovering
+        ? 0
+        : p.tiltAim *
+          (1 - clamp01(this.airBlend * INTERIOR.airFade)) *
+          (1 - this.lookBackAmount) *
+          lerp(SWAY.driftFloor, 1, sway);
+    let pitchTarget = 0;
+    let rollTarget2 = 0;
+    if (aim > 0.001) {
+      this.tiltFwd.set(0, 0, -1).applyQuaternion(tq);
+      this.tiltRight.set(1, 0, 0).applyQuaternion(tq);
+      this.tiltUp.set(0, 1, 0).applyQuaternion(tq);
+      pitchTarget = clamp(
+        Math.asin(clamp(this.tiltFwd.y, -1, 1)) * aim,
+        -INTERIOR.maxPitch,
+        INTERIOR.maxPitch,
+      );
+      rollTarget2 = clamp(
+        -Math.atan2(-this.tiltRight.y, this.tiltUp.y) * aim,
+        -INTERIOR.maxRoll,
+        INTERIOR.maxRoll,
+      );
+    }
+    this.headPitch = damp(this.headPitch, pitchTarget, INTERIOR.tiltRate * swayRateMul, sdt);
+    this.headRoll = damp(this.headRoll, rollTarget2, INTERIOR.tiltRate * swayRateMul, sdt);
 
     /* ---- orientation ---- */
     scratch.v3.copy(this.look).sub(this.eye);
@@ -944,9 +1190,9 @@ export class ChaseCamera implements System {
      * they compose with the aim rather than replacing it. YXZ is the natural
      * order for a camera head: yaw, then pitch, then roll. */
     this.euler.set(
-      this.shake.rotationOffset.x,
+      this.shake.rotationOffset.x + this.headPitch,
       this.shake.rotationOffset.y,
-      this.roll + this.shake.rotationOffset.z,
+      this.roll + this.headRoll + this.shake.rotationOffset.z,
       'YXZ',
     );
     this.qLocal.setFromEuler(this.euler);
@@ -1225,6 +1471,8 @@ export class ChaseCamera implements System {
     this.blockedBlend = 0;
     this.collisionDist = Infinity;
     this.recoverHold = 0;
+    this.headPitch = 0;
+    this.headRoll = 0;
     this._speedBlur = 0;
     this._fovKick = 0;
     this.fovCurrent = preset.fovBase;

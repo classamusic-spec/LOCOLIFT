@@ -149,6 +149,9 @@ export class Vehicle implements System {
   /** dust and sand off the contact patches — one draw call, quality-gated */
   private readonly plume: WheelPlume;
 
+  /** 0..1 — how far inside the vehicle the camera currently is */
+  private interiorAmount = 0;
+
   /* ---------------------------------------------------------------- tuning
    * Local aliases onto `tuning`, so the simulation below reads exactly as it
    * did when these were module constants. Assigned in the constructor because
@@ -628,6 +631,37 @@ export class Vehicle implements System {
    */
   setBeatSource(src: BeatSource | null): void {
     this.model.setBeatSource?.(src);
+  }
+
+  /* ------------------------------------------------------ the driver's seat */
+
+  /**
+   * Where the driver's eye is, in this vehicle's local frame.
+   *
+   * Structurally this is `CameraTarget.getCockpitEye`, which is how the camera
+   * gets a first-person eye point without either module importing the other —
+   * the same duck-typing that lets the rig follow anything with a transform.
+   * Returns `null` for a vehicle whose mesh has no cockpit, and the camera
+   * falls back to its preset offset rather than breaking.
+   */
+  getCockpitEye(out: THREE.Vector3): THREE.Vector3 | null {
+    return this.model.getCockpitEye ? this.model.getCockpitEye(out) : null;
+  }
+
+  /**
+   * The camera telling us how far inside the vehicle it is, 0..1. Forwarded
+   * straight to the mesh, which owns whether that means "show a dashboard",
+   * "hide the coachman", or nothing at all.
+   */
+  setInteriorAmount(amount: number): void {
+    const a = clamp01(amount);
+    this.interiorAmount = a;
+    this.model.setCockpitVisible?.(a);
+  }
+
+  /** 0..1 — how much of a cockpit view the camera is currently in. */
+  get interiorFraction(): number {
+    return this.interiorAmount;
   }
 
   get position(): THREE.Vector3 {
@@ -1678,6 +1712,13 @@ export class Vehicle implements System {
     }
 
     this.model.setBoostGlow(this.boost.glowLevel);
+    /* Instrument needles. Pushed unconditionally — the models early-out while
+     * their cockpit is hidden, which is cheaper than us tracking the state. */
+    this.model.setInstruments?.(
+      this.engineRpmNorm,
+      clamp01(this.frame.speed / this.speedT.topSpeed),
+      this.gear,
+    );
     this.model.tick(dt, this.frame.speed);
   }
 

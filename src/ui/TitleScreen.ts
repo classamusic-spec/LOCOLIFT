@@ -85,6 +85,12 @@ export class TitleScreen implements NavigableScreen {
   readonly el: HTMLElement;
 
   onStartMode: ((mode: GameMode) => void) | null = null;
+  /**
+   * The chinchorreo. It has no `GameMode` of its own — the union in
+   * `core/types.ts` has no `'party'` member — so it gets its own callback
+   * rather than being smuggled in as one of the four.
+   */
+  onStartParty: (() => void) | null = null;
   onOpenSettings: (() => void) | null = null;
   onOpenGarage: (() => void) | null = null;
   onOpenCredits: (() => void) | null = null;
@@ -145,6 +151,19 @@ export class TitleScreen implements NavigableScreen {
         }),
       );
     }
+
+    menu.append(
+      this.buildItem(
+        'CHINCHORREO',
+        'Party Bus',
+        'La guagua de la fiesta · diez al club',
+        iconStar(),
+        false,
+        () => {
+          this.onStartParty?.();
+        },
+      ),
+    );
 
     const sep = el('div', 'll-title__sep');
     menu.append(sep);
@@ -451,6 +470,7 @@ export class TitleScreen implements NavigableScreen {
   dispose(): void {
     this.unmount();
     this.onStartMode = null;
+    this.onStartParty = null;
     this.onOpenSettings = null;
     this.onOpenGarage = null;
     this.onOpenCredits = null;
