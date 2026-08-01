@@ -392,15 +392,26 @@ export class RenderPipeline implements System {
     const s = this.settings;
     const tier = this.quality;
 
-    // §6.3 / QUALITY_PRESETS: post is off entirely on low (phones).
-    // `brokenBy` is latched by `onShaderFailure` and never clears — a program
-    // that failed to link will fail again on the next quality change.
-    this.enabled = tier !== 'low' && s.postProcessing !== false && this.brokenBy === null;
+    // The composer runs on every tier now, including low. `brokenBy` is latched
+    // by `onShaderFailure` and never clears — a program that failed to link will
+    // fail again on the next quality change.
+    this.enabled = s.postProcessing !== false && this.brokenBy === null;
     const heavy = tier === 'high' || tier === 'ultra';
+
+    // Low (phones) runs a deliberately *lite* chain: FXAA + the Caribbean grade
+    // + a cheap speed pass + a CAS sharpen, and nothing that costs real
+    // bandwidth. It is what turns the flat, aliased mobile frame into a graded,
+    // clean one without paying for bloom, AO, god-rays, contact shadows or the
+    // half-float SMAA edge buffers. `lite` is true only when the chain is
+    // enabled *and* we are on low; every heavy switch below is gated on `heavy`.
+    const lite = this.enabled && tier === 'low';
 
     const wantAO = this.enabled && s.ssao !== false && heavy;
     const wantContact = this.enabled && s.shadows !== false && heavy;
-    const wantAerial = this.enabled;
+    // Aerial perspective is a cheap depth curve, but on low there is no SceneFX
+    // pass at all (it would drag the depth-texture round trip along with it), so
+    // it rides with the heavier tiers.
+    const wantAerial = this.enabled && !lite;
     const wantShimmer = this.enabled && heavy;
     const wantRays = this.enabled && heavy;
 
@@ -423,12 +434,22 @@ export class RenderPipeline implements System {
 
     this.sceneFxPass.enabled = this.enabled && next.length > 0;
     this.godRayPass.enabled = wantRays;
-    this.bloomPass.enabled = this.enabled && s.bloom !== false;
-    this.speedPass.enabled = this.enabled && s.motionBlur !== false && SPEED_SAMPLES[tier] > 0;
+    // Bloom is the one heavy pass a phone cannot afford (a downsample pyramid of
+    // half-float targets), so it never runs on low. The boost/speed juice on
+    // mobile comes from the speed pass's additive rim and streaks instead.
+    this.bloomPass.enabled = this.enabled && s.bloom !== false && !lite;
+    // The speed pass is arcade juice, not "motion blur" in the settings sense.
+    // Low always runs it (a phone had zero speed VFX before); medium/high still
+    // honour the motionBlur toggle.
+    this.speedPass.enabled =
+      this.enabled && SPEED_SAMPLES[tier] > 0 && (lite || s.motionBlur !== false);
     this.gradePass.enabled = this.enabled;
-    // SMAA on high/ultra, FXAA on medium — never both.
+    // SMAA on high/ultra (heavy, half-float edge buffers); FXAA on medium *and*
+    // low (one cheap dependent-texture pass) — never both on the same tier.
     this.smaaPass.enabled = this.enabled && heavy;
-    this.fxaaPass.enabled = this.enabled && tier === 'medium';
+    this.fxaaPass.enabled = this.enabled && (tier === 'medium' || lite);
+    // CAS restores acuity the upscale threw away; it turns on for any tier
+    // rendering below native, which now includes low at renderScale 0.8.
     this.casPass.enabled = this.enabled && (tier === 'ultra' || s.renderScale < 0.98);
     this.renderPass.enabled = this.enabled;
 
@@ -441,7 +462,11 @@ export class RenderPipeline implements System {
 
     this.sceneFxPass.uniforms.uFarRef.value = QUALITY_BUDGET[tier].drawDistance;
     this.bloomPass.radius = POST_STATE.bloomRadius;
-    this.casPass.uniforms.uSharpness.value = tier === 'ultra' ? 0.35 : 0.28;
+    // Low upscales the most (0.8 → native), so it gets the firmest sharpen; the
+    // clamp inside the CAS shader keeps it from ringing on the high-contrast
+    // façade edges the phone frame is full of.
+    this.casPass.uniforms.uSharpness.value =
+      tier === 'ultra' ? 0.35 : tier === 'low' ? 0.34 : 0.28;
   }
 
   /* --------------------------------------------------------------- render */
@@ -540,10 +565,13 @@ export class RenderPipeline implements System {
     g.uContrast.value = POST_STATE.contrast;
     // Weather owns the 0.22 base and the storm ramp; this adds the per-hour
     // boost and a little more as the lens is pushed
+    // The speed/boost terms punch the vignette down into a tunnel as the frame
+    // accelerates — more aggressive than the old 0.05/0.06 so boost reads as a
+    // squeeze on the lens, not just a colour shift. Still bounded and edge-only.
     g.uVignette.value =
-      POST_STATE.vignette + POST_STATE.vignetteBoost + speed * 0.05 + fx.boost * 0.06;
+      POST_STATE.vignette + POST_STATE.vignetteBoost + speed * 0.07 + fx.boost * 0.1;
     g.uGrain.value = POST_STATE.grain;
-    g.uChroma.value = POST_STATE.chroma * (0.35 + speed * 1.4);
+    g.uChroma.value = POST_STATE.chroma * (0.35 + speed * 1.7);
     g.uFlash.value = POST_STATE.flash;
     g.uImpact.value = fx.impact;
     g.uHit.value = fx.hit;

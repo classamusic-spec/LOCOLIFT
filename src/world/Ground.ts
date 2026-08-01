@@ -120,20 +120,41 @@ interface Profile {
   lanes: Lane[];
 }
 
+/**
+ * Half-width of the drive-up ramp at the foot of each kerb, metres.
+ *
+ * The kerb used to rise on a single *vertical* riser at `k0`: the collider had
+ * two points at the same lateral offset, one at gutter level and one at kerb
+ * height, i.e. a 0.19 m wall. A raycast-suspension car cannot climb a wall —
+ * its chassis box jams against the face, the wheels unload, and it stops dead
+ * however hard you throttle. That is the "invisible wall" the car hit whenever
+ * it drove at a sidewalk, and why it could never "drive over the curb": every
+ * kerb in the district was a stop.
+ *
+ * Splitting the riser into a short ramp (gutter foot pulled `RAMP_RUN` back into
+ * the carriageway, rising to the kerb top) turns every kerb into something the
+ * Jeep mounts and climbs onto the sidewalk. It reads as a rolled/rounded kerb,
+ * which is period-correct for a cobbled street anyway, and the mesh follows the
+ * collider so there is no visual/physics mismatch.
+ */
+const KERB_RAMP_RUN = 0.34;
+
 function streetProfile(hw: number, sidewalk: number, roadMat: MaterialId): Profile {
   const k0 = hw + GUTTER_W;
   const k1 = k0 + KERB_W;
   const s1 = k1 + sidewalk;
+  // foot of the ramp, pulled back into the gutter so the rise is gradual
+  const rf = k0 - KERB_RAMP_RUN;
   return {
     pts: [
       [-s1, KERB_H + 0.05],
       [-k1, KERB_H + 0.01],
       [-k0, KERB_H],
-      [-k0, -0.05],
+      [-rf, -0.04],
       [-hw, -0.02],
       [0, CROWN],
       [hw, -0.02],
-      [k0, -0.05],
+      [rf, -0.04],
       [k0, KERB_H],
       [k1, KERB_H + 0.01],
       [s1, KERB_H + 0.05],

@@ -2664,7 +2664,10 @@
 
 .ll-touch {
   --tc-scale: 1;
-  --tc-alpha: 0.82;
+  /* 0.82 → 0.9: the pads sit over bright stucco and sky on a phone, and the old
+     value let the street read straight through them. Paired with the backdrop
+     blur on `.ll-tbtn` below, the controls now read as solid arcade buttons. */
+  --tc-alpha: 0.9;
   --tc-gas: 104px;
   --tc-brake: 80px;
   --tc-boost: 84px;
@@ -2756,7 +2759,10 @@
   border-radius: 50%;
   background: var(--ll-hud-bg);
   border: var(--ll-key) solid var(--ll-ink);
+  -webkit-backdrop-filter: blur(5px);
+  backdrop-filter: blur(5px);
   box-shadow:
+    inset 0 1.5px 0 rgba(255, 246, 232, 0.24),
     0 5px 0 rgba(4, 9, 14, 0.5),
     0 8px 18px rgba(2, 6, 11, 0.45);
   color: var(--ll-player);
@@ -2843,7 +2849,15 @@
   cursor: pointer;
   touch-action: none;
   -webkit-tap-highlight-color: transparent;
+  /* Backdrop blur pulls the busy street out from behind the glyph so the button
+     reads as a solid moulded control on a bright phone screen. The inset top
+     highlight is the glossy bevel that makes it look pressable — the arcade
+     look. The stacked hard/soft drop shadows give it physical depth. */
+  -webkit-backdrop-filter: blur(5px);
+  backdrop-filter: blur(5px);
   box-shadow:
+    inset 0 1.5px 0 rgba(255, 246, 232, 0.24),
+    inset 0 -2px 6px rgba(2, 6, 11, 0.35),
     0 5px 0 rgba(4, 9, 14, 0.5),
     0 9px 20px rgba(2, 6, 11, 0.45);
   transition:
@@ -2855,6 +2869,7 @@
 .ll-tbtn.is-down {
   transform: translateY(4px);
   box-shadow:
+    inset 0 1.5px 0 rgba(255, 246, 232, 0.24),
     0 1px 0 rgba(4, 9, 14, 0.5),
     0 3px 10px rgba(2, 6, 11, 0.45);
   background: rgba(255, 246, 232, 0.2);
@@ -2869,8 +2884,10 @@
   position: relative;
   z-index: 1;
   display: block;
-  width: 40%;
-  height: 40%;
+  /* 40% → 44%: a bigger, clearer icon on a small screen. */
+  width: 44%;
+  height: 44%;
+  filter: drop-shadow(0 1px 1.5px rgba(2, 6, 11, 0.6));
 }
 
 .ll-tbtn__glyph svg {
@@ -2882,10 +2899,14 @@
 .ll-tbtn__es {
   position: relative;
   z-index: 1;
-  font-size: calc(10.5px * var(--tc-scale));
+  /* 10.5 → 11.5px and a heavier double shadow: the GAS/FRENO/DERRAPE/TURBO
+     labels have to survive on a bright screen at arm's length. */
+  font-size: calc(11.5px * var(--tc-scale));
   font-weight: 900;
-  letter-spacing: 0.09em;
-  text-shadow: 0 1px 2px var(--ll-ink);
+  letter-spacing: 0.06em;
+  text-shadow:
+    0 1px 2px var(--ll-ink),
+    0 0 6px rgba(2, 6, 11, 0.75);
 }
 
 .ll-tbtn__fill {
@@ -3339,6 +3360,28 @@
   .ll-pause__hint,
   .ll-results__hint {
     display: none;
+  }
+
+  /* Crisper HUD on phones. A denser chip fill plus a backdrop blur lets the
+     fare, timer, speed and minimap read over the bright, busy street instead of
+     dissolving into it — the single biggest legibility win on a small screen.
+     Scoped to coarse pointers so the desktop HUD, tuned against the graded
+     scene, is untouched. */
+  .ll-root {
+    --ll-hud-bg: rgba(8, 16, 24, 0.78);
+  }
+
+  .ll-fare,
+  .ll-timer,
+  .ll-combo,
+  .ll-dest,
+  .ll-card,
+  .ll-boost,
+  .ll-speedo,
+  .ll-minimap,
+  .ll-chip {
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
   }
 }
 

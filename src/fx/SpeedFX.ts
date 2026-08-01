@@ -30,7 +30,10 @@ import { GLSL_COLOR, GLSL_NOISE, GLSL_RADIAL, QUAD_VERT } from './PostEffects';
 
 /** Taps along each streak. More taps = smoother streak, not a longer one. */
 export const SPEED_SAMPLES: Record<QualityTier, number> = {
-  low: 0,
+  // Low used to be 0 — phones got no speed streaks at all. Five taps is enough
+  // for a readable streak and the pass early-outs to a single fetch whenever the
+  // frame is slow and not boosting, so it costs almost nothing at rest.
+  low: 5,
   medium: 6,
   high: 9,
   ultra: 13,
@@ -88,7 +91,7 @@ export const SPEED_SHADER = {
     vec2 uv = vUv;
     float punch = uPunch * uSafety;
     if ( punch > 0.002 ) {
-      uv = 0.5 + d * ( 1.0 + edge * punch * 0.055 );
+      uv = 0.5 + d * ( 1.0 + edge * punch * 0.078 );
     }
 
     /* --- radial streak blur ---
@@ -114,16 +117,20 @@ export const SPEED_SHADER = {
 
     /* --- chromatic streaking: red runs long, blue runs short, so the tail of
      * every streak splits. Two extra fetches, not two extra loops. --- */
-    float chroma = edge * clamp( uAmount * 0.55 + uBoost * 0.85, 0.0, 1.0 );
+    float chroma = edge * clamp( uAmount * 0.62 + uBoost * 0.95, 0.0, 1.0 );
     if ( chroma > 0.004 ) {
       float rt = texture2D( tDiffuse, uv - streakStep * 1.35 ).r;
       float bt = texture2D( tDiffuse, uv - streakStep * 0.55 ).b;
-      col.r = mix( col.r, rt, chroma * 0.55 );
-      col.b = mix( col.b, bt, chroma * 0.55 );
+      col.r = mix( col.r, rt, chroma * 0.72 );
+      col.b = mix( col.b, bt, chroma * 0.72 );
     }
 
-    /* --- speed lines --- */
-    float lines = uBoost * uSafety;
+    /* --- speed lines ---
+     * These used to appear only under boost. Arcade speed *is* the point, so
+     * they now bleed in with raw speed too (uAmount) and just intensify under
+     * boost — a car at 45 m/s should streak even without a turbo lit. Still
+     * strictly edge-masked, so the protected centre disc never gets lines. */
+    float lines = clamp( uBoost + uAmount * 0.55, 0.0, 1.0 ) * uSafety;
     if ( lines > 0.01 ) {
       float ang = atan( d.y, d.x * uAspect );
       /* 96 angular cells, each with its own random length and phase; they
@@ -136,13 +143,13 @@ export const SPEED_SHADER = {
       float radial = smoothstep( 0.44, 1.02, r + phase * 0.42 );
       float thin = step( 0.55, seed );
       float streak = band * radial * thin * edge;
-      col += uBoostTint * streak * lines * 0.30;
+      col += uBoostTint * streak * lines * 0.44;
     }
 
     /* --- boost rim: warm light pushes in from the corners --- */
     if ( uBoost > 0.01 ) {
-      float rim = smoothstep( 0.58, 1.05, r ) * uBoost * uSafety;
-      col = mix( col, col * uBoostTint * 1.35, rim * 0.30 );
+      float rim = smoothstep( 0.54, 1.05, r ) * uBoost * uSafety;
+      col = mix( col, col * uBoostTint * 1.45, rim * 0.44 );
     }
 
     gl_FragColor = vec4( col, 1.0 );

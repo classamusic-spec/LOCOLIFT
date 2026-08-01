@@ -33,9 +33,20 @@ export const CONFIG = {
 
 export const QUALITY_PRESETS: Record<QualityTier, Partial<SettingsState>> = {
   low: {
-    renderScale: 0.7,
+    // 0.7 → 0.8: the phone backing store is upscaled, so every 0.1 here is
+    // visible sharpness. 0.8 costs ~30% more scene fragments than 0.7 but the
+    // backing store is tiny on a phone (a landscape 844px CSS frame is ~675px
+    // of buffer at this scale), and the lite post chain below cleans the rest.
+    renderScale: 0.8,
     shadows: false,
-    postProcessing: false,
+    // Phones now run a *lite* post chain — FXAA + the Caribbean grade + speed
+    // VFX + a CAS sharpen — but never the heavy passes (bloom, AO, god-rays,
+    // SMAA, contact shadows). `RenderPipeline.applyQuality` gates each pass on
+    // the tier, so `postProcessing: true` here buys clean edges and the graded
+    // look, not the bandwidth of the full chain. This is the single biggest
+    // lever on how a phone frame reads: without it the mobile image is flat,
+    // ungraded and aliased next to the desktop one.
+    postProcessing: true,
     bloom: false,
     motionBlur: false,
     ssao: false,
@@ -92,7 +103,10 @@ export const QUALITY_BUDGET: Record<
     skidSegments: 220,
     propDetailDistance: 70,
     windowLightDistance: 140,
-    anisotropy: 2,
+    // 2 → 4: the cobblestone road fills the lower half of a phone frame at a
+    // grazing angle, exactly where anisotropy earns its keep. 4 taps is cheap
+    // even on mobile and stops the adoquín smearing into mush at distance.
+    anisotropy: 4,
   },
   medium: {
     shadowMapSize: 2048,

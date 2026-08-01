@@ -158,13 +158,19 @@ export const CAMERA_MODES: Record<CameraModeId, CameraModeDef> = {
     distance: 7.2,
     height: 2.35,
     lateral: 0,
-    speedPullback: 3.9,
+    // 3.9 → 4.7: the rig drops further back as you wind up to top speed, so the
+    // road opens out ahead and the sense of velocity keeps building past the
+    // point the FOV curve alone tops out. `speedTighten` keeps the car from
+    // shrinking to a dot.
+    speedPullback: 4.7,
     speedRise: 0.55,
     lookHeight: 0.55,
     lookLead: 3.2,
     lookLeadSpeed: 13.0,
     fovBase: 62,
-    fovMax: 86,
+    // 86 → 89: a wider top-speed frame. Combined with the fatter boost kick the
+    // total tops out near `FOV.hardMax` (100) only with turbo held at speed.
+    fovMax: 89,
     tiltKeep: 0,
     rateScale: 1,
     feedForward: 0.5,

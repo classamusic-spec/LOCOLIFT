@@ -711,6 +711,11 @@ export class Vehicle implements System {
     return this.suspension.groundedCount;
   }
 
+  /** 1 = upright, 0 = on its side, <0 = upside down. QA/telemetry only. */
+  get frameUpDot(): number {
+    return this.frame.upDot;
+  }
+
   get boostFraction(): number {
     return this.boost.fraction;
   }

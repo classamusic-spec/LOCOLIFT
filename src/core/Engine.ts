@@ -326,6 +326,47 @@ export class Engine {
     }
   };
 
+  /**
+   * QA only: advance the simulation `frames` times in game-time, ignoring the
+   * wall clock and skipping render.
+   *
+   * The headless capture rig renders through SwiftShader at roughly one frame a
+   * second, and the fixed-step accumulator clamps a frame to `maxFrameDelta`
+   * (1/15 s) — so real-time drive tests advance sim-time at about 1/15 speed and
+   * a car appears never to move. This runs the same per-frame body the RAF loop
+   * runs (input sample, fixed substeps, update, lateUpdate) at a fixed
+   * `maxFrameDelta` dt each, so a few hundred calls cover several seconds of
+   * driving deterministically. It never renders and does nothing while paused.
+   */
+  advanceSimForTest(frames: number): void {
+    if (this._paused) return;
+    const ctx = this.ctx;
+    const fixed = ctx.fixedDt;
+    // A realistic per-frame dt (60 Hz), NOT maxFrameDelta: the physics is in
+    // fixedUpdate either way, but steering smoothing, camera and other
+    // per-frame `update` logic misbehave at a 1/15 s step, so a coarse dt makes
+    // the car veer and oscillate. 60 Hz makes a sim-frame behave like a real one.
+    const dt = 1 / 60;
+    for (let f = 0; f < frames; f++) {
+      ctx.rawDt = dt;
+      ctx.dt = dt;
+      ctx.timeOfDay = this._timeOfDay;
+      this.preFrameHook?.(dt);
+      this.elapsed += dt;
+      ctx.elapsed = this.elapsed;
+      this.accumulator += dt;
+      let steps = 0;
+      while (this.accumulator >= fixed && steps < CONFIG.maxSubSteps) {
+        for (const s of this.systems) s.fixedUpdate?.(ctx, fixed);
+        this.accumulator -= fixed;
+        steps++;
+      }
+      if (steps === CONFIG.maxSubSteps) this.accumulator = 0;
+      for (const s of this.systems) s.update?.(ctx, dt);
+      for (const s of this.systems) s.lateUpdate?.(ctx, dt);
+    }
+  }
+
   /* ------------------------------------------------------------ profiling */
 
   /** Begin (or restart) a per-system CPU profile. */

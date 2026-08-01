@@ -576,7 +576,7 @@ export const GRADE_SHADER = {
      * makes uChroma land as a literal fraction of screen width: 1.5 px at
      * 1280, not the 25 px an unscaled x40 would give. It opens up under
      * boost so the lens feels like it is being pushed. */
-    vec2 ca = d * 2.0 * uChroma * edge * ( 1.0 + uBoost * 2.6 );
+    vec2 ca = d * 2.0 * uChroma * edge * ( 1.0 + uBoost * 3.3 );
     vec3 col;
     col.r = texture2D( tDiffuse, vUv + ca ).r;
     col.g = texture2D( tDiffuse, vUv ).g;

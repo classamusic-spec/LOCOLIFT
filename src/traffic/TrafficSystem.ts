@@ -777,15 +777,23 @@ export class TrafficSystem implements System {
     // positive when the player is heading toward us
     const closing = (pv.x * dx + pv.z * dz) / dist;
 
-    /* --- contact: an arcade shunt, not a physics reaction --- */
+    /* --- contact: an arcade shunt, not a physics reaction ---
+     * The impact speed is the fastest of: the player's speed, the traffic car's
+     * own speed, and the closing rate. Keying only off `player.speed` (the old
+     * bug) meant that when a moving traffic car drove into a slow or stopped
+     * player, no shunt fired — and because traffic bodies are KINEMATIC (infinite
+     * mass), the car then bulldozed and pinned the player against whatever was
+     * behind them, which is the "a car hits me and I can't move" report. Now any
+     * real contact bounces the car off so the player is never trapped. */
+    const impact = Math.max(this.player.speed, a.speed, Math.abs(closing));
     if (
       a.shuntTimer <= 0 &&
       a.shuntCooldown <= 0 &&
-      this.player.speed > SHUNT.minSpeed &&
+      impact > SHUNT.minSpeed &&
       dist < a.boundRadius + 2.6 &&
       a.containsPoint(p, SHUNT.contactPad + 1.1)
     ) {
-      this.applyShunt(a, dx, dz, dist);
+      this.applyShunt(a, dx, dz, dist, impact);
       return accelIn;
     }
 
@@ -832,9 +840,12 @@ export class TrafficSystem implements System {
     return Math.min(accelIn, braking);
   }
 
-  private applyShunt(a: RoadAgent, dx: number, dz: number, dist: number): void {
+  private applyShunt(a: RoadAgent, dx: number, dz: number, dist: number, impact: number): void {
     const pv = this.player.velocity;
-    const push = Math.min(SHUNT.maxSpeed, this.player.speed * SHUNT.transfer);
+    // Shove the car off with a slice of the impact speed, but never below a
+    // floor: even a gentle nudge from a slow player has to visibly move the car
+    // aside, or the kinematic body sits there and re-pins the player next frame.
+    const push = Math.min(SHUNT.maxSpeed, Math.max(SHUNT.minPush, impact * SHUNT.transfer));
     const nx = dx / dist;
     const nz = dz / dist;
     a.shuntVel.set(nx * push * 0.72 + pv.x * 0.28, 0.35, nz * push * 0.72 + pv.z * 0.28);

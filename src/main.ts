@@ -153,6 +153,10 @@ export interface LocoTestHook {
   bounds(): { minX: number; maxX: number; minZ: number; maxZ: number };
   /** Which vehicle is being driven. */
   vehicleId(): string;
+  /** QA: advance the sim `frames` game-frames, bypassing the wall clock. */
+  tickSim(frames: number): void;
+  /** QA: raw vehicle kinematics for the stuck/curb/traffic-pin drive tests. */
+  car(): { x: number; y: number; z: number; speed: number; vx: number; vz: number; grounded: number; up: number };
   /** Adaptive-quality state, or null when pinned off via `?governor=off`. */
   governor(): Record<string, number | string | boolean> | null;
   /** Per-group mesh/triangle/instance breakdown, for budget triage. */
@@ -647,6 +651,26 @@ function installTestHook(
     },
     vehicleId() {
       return vehicle.vehicleId;
+    },
+    /** QA: advance the sim in game-time (SwiftShader renders too slowly for
+     * real-time drive tests — one call ≈ maxFrameDelta of driving). */
+    tickSim(frames: number) {
+      engine.advanceSimForTest(Math.max(1, Math.min(4000, Math.floor(frames))));
+    },
+    /** QA: raw vehicle kinematics, for the stuck/curb/traffic-pin drive tests. */
+    car() {
+      const p = vehicle.position;
+      const v = vehicle.velocity;
+      return {
+        x: Number(p.x.toFixed(3)),
+        y: Number(p.y.toFixed(3)),
+        z: Number(p.z.toFixed(3)),
+        speed: Number(vehicle.speed.toFixed(3)),
+        vx: Number(v.x.toFixed(3)),
+        vz: Number(v.z.toFixed(3)),
+        grounded: vehicle.wheelsOnGround,
+        up: Number(vehicle.frameUpDot.toFixed(3)),
+      };
     },
     governor() {
       return governor ? governor.stats() : null;

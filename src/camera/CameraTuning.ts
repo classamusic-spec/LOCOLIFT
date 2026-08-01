@@ -125,17 +125,27 @@ export const FOLLOW = {
    */
   vertical: 13.0,
 
-  /** how fast the aim point chases its target — stiffer than position, so the car stays centred */
-  look: 9.5,
+  /**
+   * how fast the aim point chases its target — stiffer than position, so the
+   * car stays centred. 9.5 → 10.6: a snappier aim keeps the taxi nailed to the
+   * middle of the frame through hard direction changes, which is what makes the
+   * chase feel reactive rather than floaty.
+   */
+  look: 10.6,
 
-  /** how fast the rig's yaw chases the blended heading */
-  yaw: 5.2,
+  /** how fast the rig's yaw chases the blended heading. 5.2 → 5.9 for a crisper
+   * swing in behind the car out of a corner. */
+  yaw: 5.9,
 
   /** how fast the camera rolls into and out of a slide */
   roll: 4.5,
 
-  /** FOV easing. Slow on purpose: a snapping FOV is instantly cheap-looking. */
-  fov: 3.4,
+  /**
+   * FOV easing. Slow on purpose: a snapping FOV is instantly cheap-looking.
+   * 3.4 → 4.1 — quick enough that the fatter boost kick lands with some snap,
+   * slow enough that it still reads as a lens breathing rather than a cut.
+   */
+  fov: 4.1,
 
   /**
    * Rates are multiplied by `1 + speedNorm · speedTighten`. Without this the
@@ -168,19 +178,28 @@ export const FOLLOW = {
 
 /** Field of view, degrees. Base 62 matches `CONFIG.camera.fov`. */
 export const FOV = {
-  /** extra degrees while `isBoosting`, on top of the speed curve */
-  boostKick: 7.5,
+  /**
+   * extra degrees while `isBoosting`, on top of the speed curve. 7.5 → 10.5:
+   * the boost lens-punch is the single loudest "you are going fast" cue in a
+   * Crazy-Taxi-grade arcade racer, and the old value read as polite. The easing
+   * (`FOLLOW.fov`) keeps it from snapping, and `hardMax` still caps the total.
+   */
+  boostKick: 10.5,
   /**
    * The boost kick scales with how full the meter is — a boost fired on fumes
    * shouldn't punch as hard as one off a full bar.
    */
   boostKickMeterFloor: 0.55,
   /** extra degrees while airborne — opens the frame up so the horizon reads */
-  airKick: 3.0,
+  airKick: 3.5,
   /** extra degrees at full drift — subtle, the yaw swing does the heavy lifting */
-  driftKick: 2.5,
-  /** absolute clamp so no combination of kicks can produce a fisheye */
-  hardMax: 96,
+  driftKick: 3.0,
+  /**
+   * absolute clamp so no combination of kicks can produce a fisheye. Raised
+   * 96 → 100 to give the fatter boost/speed kick somewhere to land instead of
+   * clipping the top off it the instant you hold turbo at speed.
+   */
+  hardMax: 100,
   hardMin: 32,
   /** skip `updateProjectionMatrix()` when the change is below this many degrees */
   epsilon: 0.004,
@@ -311,13 +330,15 @@ export const AIR = {
 
 /** Boost framing — a short punch layered on top of the speed curve. */
 export const BOOST = {
-  /** extra metres of pull-back while boosting */
-  pullback: 1.1,
+  /** extra metres of pull-back while boosting. 1.1 → 1.7: the rig drops back
+   * harder as the turbo lights, so the car visibly lunges away from the camera. */
+  pullback: 1.7,
   /** how fast the boost blend rises and falls */
   engageRate: 9.0,
   releaseRate: 4.0,
-  /** continuous shake rumble while boosting, 0..1 */
-  rumble: 0.34,
+  /** continuous shake rumble while boosting, 0..1. 0.34 → 0.44 — the turbo
+   * should buzz through the whole rig, not just tint the edges. */
+  rumble: 0.44,
 };
 
 /** Look-back (the `input.lookBack` 180° swing). */
@@ -449,14 +470,16 @@ export const SWAY = {
 
 /** Values the fx module reads (`speedBlurAmount`, `fovKick`). */
 export const FX = {
-  /** speed fraction at which radial blur starts to appear */
-  blurStart: 0.28,
-  /** weight of the raw speed term in `speedBlurAmount` */
-  blurSpeedWeight: 0.78,
-  /** additive weight while boosting */
-  blurBoostWeight: 0.34,
+  /** speed fraction at which radial blur starts to appear. 0.28 → 0.2: the
+   * streaks bleed in earlier so mid-speed cruising already feels quick. */
+  blurStart: 0.2,
+  /** weight of the raw speed term in `speedBlurAmount`. 0.78 → 0.92 — more of
+   * the streak effect comes from raw speed, so you feel it without a turbo. */
+  blurSpeedWeight: 0.92,
+  /** additive weight while boosting. 0.34 → 0.5 for a harder boost smear. */
+  blurBoostWeight: 0.5,
   /** additive weight at full drift */
-  blurDriftWeight: 0.16,
+  blurDriftWeight: 0.18,
   /** how fast `speedBlurAmount` eases — matched to the FOV rate so they agree */
   easeRate: 5.0,
 };
@@ -469,10 +492,15 @@ export const SHAKE = {
   /**
    * Shake magnitude is `trauma²`. The square is what makes small hits read as
    * a tap and big ones as a slam, instead of everything feeling the same.
+   * 0.42 → 0.5: because the response is squared, this lands almost entirely on
+   * the big hits — a head-on now genuinely jolts while a kerb scrape is
+   * untouched. Still fully scaled by `settings.screenShake` downstream.
    */
-  positionAmplitude: 0.42,
-  /** radians of rotational shake at full trauma */
-  rotationAmplitude: 0.052,
+  positionAmplitude: 0.5,
+  /** radians of rotational shake at full trauma. 0.052 → 0.058 — a hair more
+   * angular kick on a slam; roll stays throttled by `rollScale` (the nauseating
+   * axis), so this reads as impact, not as a spin. */
+  rotationAmplitude: 0.058,
   /** roll shakes less than pitch/yaw — rolling the horizon is the nauseating axis */
   rollScale: 0.45,
 
@@ -501,11 +529,13 @@ export const SHAKE = {
   /** ceiling on trauma from a single collision, so a pile-up can't max out */
   collisionMax: 0.85,
 
-  /** drop height (m) that produces full landing trauma */
-  landFullHeight: 9.0,
-  /** landing trauma weight from height and from airtime */
-  landHeightWeight: 0.62,
-  landAirtimeWeight: 0.18,
+  /** drop height (m) that produces full landing trauma. 9.0 → 7.5 so ordinary
+   * ramp landings register as a thump, not just the big drops. */
+  landFullHeight: 7.5,
+  /** landing trauma weight from height and from airtime. 0.62 → 0.74: a landing
+   * should slam the camera into the ground, the way it does in the arcade. */
+  landHeightWeight: 0.74,
+  landAirtimeWeight: 0.2,
   /** airtime (s) that saturates the airtime term */
   landFullAirtime: 2.2,
   /** a clean (wheels-level) landing shakes less */
@@ -516,8 +546,9 @@ export const SHAKE = {
   /** metres beyond which a prop break contributes nothing */
   propFalloffDistance: 26.0,
 
-  /** trauma punch when a boost fires */
-  boostTrauma: 0.30,
+  /** trauma punch when a boost fires. 0.30 → 0.44 — lighting the turbo should
+   * kick the camera, not nudge it. */
+  boostTrauma: 0.44,
 
   /** noise seeds — distinct per channel so the axes never correlate */
   seedPosX: 0x1a2b,

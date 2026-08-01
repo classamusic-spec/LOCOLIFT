@@ -207,12 +207,19 @@ export const PLAYER_REACT = {
 
 /** Arcade "shunt": what a kinematic traffic car does when the Jeep hits it. */
 export const SHUNT = {
-  /** the player must be this fast for a hit to shove the car, m/s */
-  minSpeed: 7.0,
+  /**
+   * Minimum impact speed for a hit to shove the car, m/s. Impact is the fastest
+   * of the player's speed, the car's own speed, and the closing rate — so a
+   * traffic car driving into a stopped player still trips it. ~3 m/s (7 mph) is
+   * a real bump, below which nothing dramatic should happen.
+   */
+  minSpeed: 3.0,
   /** contact test radius padding on top of the two half-lengths, m */
   contactPad: 0.35,
-  /** shove speed as a fraction of the player's closing speed */
-  transfer: 0.55,
+  /** shove speed as a fraction of the impact speed */
+  transfer: 0.6,
+  /** the car is always shoved at least this fast, so it clears the player, m/s */
+  minPush: 4.5,
   /** maximum shove speed, m/s */
   maxSpeed: 13.0,
   /** yaw spin imparted, rad/s per m/s of shove */
