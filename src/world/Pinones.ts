@@ -49,7 +49,7 @@ import { RNG } from '../core/RNG';
 import { GROUP } from '../physics/PhysicsTypes';
 import type { BodyHandle, PhysicsWorldAPI } from '../physics/PhysicsTypes';
 import { SEA_LEVEL } from './CityLayout';
-import { GeoBuilder } from './Coast';
+import { GeoBuilder, SURFACE_GRIP, type SurfaceGrip, type SurfaceKind } from './Coast';
 import type { MaterialLibrary } from './Materials';
 import { Vegetation } from './Vegetation';
 import {
@@ -223,6 +223,33 @@ const enum Surface {
 }
 type SurfaceCode = 0 | 1 | 2 | 3 | 4 | 5;
 
+/**
+ * Collider friction classes. These are an *authoring* vocabulary — the beach
+ * road has a gravel apron and packed-marl kickers, neither of which the
+ * vehicle's four-way {@link SurfaceKind} enum names — and every one of them
+ * resolves to a real `SurfaceKind` through {@link GRIP_KIND} before it reaches
+ * physics or the grip query. Nothing downstream ever sees a class the tyre
+ * model cannot price.
+ */
+type GripClass = 'asphalt' | 'gravel' | 'sand' | 'ramp';
+
+/**
+ * Authoring class → the surface the tyre model understands.
+ *
+ * `gravel` maps to `grass` rather than `sand`: a packed shell-and-marl parking
+ * apron is firm enough to hold a line (lateral 0.8) but still scrubs speed
+ * (drag 0.09), which is exactly the half-step between tarmac and beach that
+ * makes swinging onto the apron in front of a chinchorro feel deliberate.
+ * `ramp` maps to `asphalt` because a kicker you cannot predict is not a jump,
+ * it is a lottery — the launch has to be repeatable at any entry speed.
+ */
+const GRIP_KIND: Record<GripClass, SurfaceKind> = {
+  asphalt: 'asphalt',
+  gravel: 'grass',
+  sand: 'sand',
+  ramp: 'asphalt',
+};
+
 interface Column {
   /** 'abs' = fixed lateral offset; 'beach' / 'surf' = fraction of the run */
   mode: 'abs' | 'beach' | 'surf';
@@ -231,7 +258,7 @@ interface Column {
   /** include in the drivable collider */
   solid: boolean;
   /** collider surface class — decides the friction body this strip joins */
-  grip?: 'asphalt' | 'gravel' | 'sand';
+  grip?: GripClass;
 }
 
 /**
@@ -253,11 +280,12 @@ const COLUMNS: readonly Column[] = [
   { mode: 'abs', v: -55, kind: Surface.Forest, solid: false },
   { mode: 'abs', v: -46, kind: Surface.Forest, solid: false },
   { mode: 'abs', v: -38, kind: Surface.Forest, solid: false },
-  { mode: 'abs', v: -31, kind: Surface.Forest, solid: true, grip: 'sand' },
-  { mode: 'abs', v: -25, kind: Surface.Scrub, solid: true, grip: 'sand' },
-  { mode: 'abs', v: -20, kind: Surface.Scrub, solid: true, grip: 'sand' },
-  { mode: 'abs', v: -16, kind: Surface.Scrub, solid: true, grip: 'sand' },
-  { mode: 'abs', v: -13, kind: Surface.Scrub, solid: true, grip: 'sand' },
+  // the vegetated cut bench is dune scrub, not loose sand — it holds a line
+  { mode: 'abs', v: -31, kind: Surface.Forest, solid: true, grip: 'gravel' },
+  { mode: 'abs', v: -25, kind: Surface.Scrub, solid: true, grip: 'gravel' },
+  { mode: 'abs', v: -20, kind: Surface.Scrub, solid: true, grip: 'gravel' },
+  { mode: 'abs', v: -16, kind: Surface.Scrub, solid: true, grip: 'gravel' },
+  { mode: 'abs', v: -13, kind: Surface.Scrub, solid: true, grip: 'gravel' },
   { mode: 'abs', v: -10.8, kind: Surface.Sand, solid: true, grip: 'sand' },
   { mode: 'abs', v: -9.4, kind: Surface.Gravel, solid: true, grip: 'gravel' },
   { mode: 'abs', v: -8, kind: Surface.Gravel, solid: true, grip: 'gravel' },
@@ -299,19 +327,40 @@ interface DeckUniforms {
 }
 
 const DECK_COMMON = /* glsl */ `
+/**
+ * Hash on a **wrapped integer lattice**.
+ *
+ * The obvious "fract( p * 233.34 )" hash is fine at the city origin and
+ * catastrophic here. Piñones runs from x = 357 to x = 1078, so the fine
+ * detail bands evaluate the hash at |p| ~ 10^4; multiplying that by 233 puts
+ * the product at ~4e6, where a float32 mantissa has an ulp of 0.5 — so
+ * fract() collapsed to **two** distinct values and 1600 lattice cells yielded
+ * three distinct hashes instead of ~1400. That degenerate lattice was the
+ * woven cross-hatch that read as parallel streaks across the whole beach.
+ *
+ * The fix is two-part and both halves are load-bearing: the lattice index is
+ * wrapped into 0..288 so the hash only ever sees small exact integers, and
+ * the mixing itself keeps every intermediate well inside the mantissa. The
+ * 289-cell period is a ~11 m repeat at the highest frequency used here, on a
+ * ±0.07 modulation — below the noise floor of the surfaces it perturbs.
+ */
 float pnHash( vec2 p ) {
-  p = fract( p * vec2( 233.34, 851.73 ) );
-  p += dot( p, p + 23.45 );
-  return fract( p.x * p.y );
+  vec3 p3 = fract( vec3( p.x, p.y, p.x ) * 0.1031 );
+  p3 += dot( p3, p3.yzx + 33.33 );
+  return fract( ( p3.x + p3.y ) * p3.z );
 }
 float pnNoise( vec2 p ) {
   vec2 i = floor( p );
   vec2 f = fract( p );
   f = f * f * ( 3.0 - 2.0 * f );
+  i = mod( i, 289.0 );
+  vec2 i1 = mod( i + vec2( 1.0, 0.0 ), 289.0 );
+  vec2 i2 = mod( i + vec2( 0.0, 1.0 ), 289.0 );
+  vec2 i3 = mod( i + vec2( 1.0, 1.0 ), 289.0 );
   float a = pnHash( i );
-  float b = pnHash( i + vec2( 1.0, 0.0 ) );
-  float c = pnHash( i + vec2( 0.0, 1.0 ) );
-  float d = pnHash( i + vec2( 1.0, 1.0 ) );
+  float b = pnHash( vec2( i1.x, i.y ) );
+  float c = pnHash( vec2( i.x, i2.y ) );
+  float d = pnHash( i3 );
   return mix( mix( a, b, f.x ), mix( c, d, f.x ), f.y );
 }
 float pnFbm( vec2 p ) {
@@ -471,6 +520,16 @@ export class Pinones implements WorldLayer {
   private geometries: THREE.BufferGeometry[] = [];
   private meshes: THREE.Object3D[] = [];
   private deckMat: THREE.MeshStandardMaterial | null = null;
+
+  /** Running-surface footprint of each launch ramp, for {@link surfaceAt}. */
+  private rampFrames: Array<{
+    ox: number;
+    oz: number;
+    ux: number;
+    uz: number;
+    len: number;
+    halfW: number;
+  }> = [];
 
   private uniforms: DeckUniforms = {
     uTime: { value: 0 },
@@ -849,7 +908,7 @@ export class Pinones implements WorldLayer {
     };
 
     /** collider strips, one array pair per friction class */
-    const grip: Record<string, { pos: number[]; idx: number[] }> = {
+    const grip: Record<GripClass, { pos: number[]; idx: number[] }> = {
       asphalt: { pos: [], idx: [] },
       gravel: { pos: [], idx: [] },
       sand: { pos: [], idx: [] },
@@ -950,10 +1009,7 @@ export class Pinones implements WorldLayer {
         put(s1, va1, pb);
         put(s1, vb1, pc);
         put(s0, vb0, pd);
-        // the coarser of the two strips wins, so the asphalt body never claims
-        // a triangle that is half gravel
-        const cls = ca.grip === cb.grip ? (ca.grip ?? 'sand') : ca.grip === 'asphalt' || cb.grip === 'asphalt' ? 'gravel' : 'sand';
-        const bucket = grip[cls];
+        const bucket = grip[stripGrip(ca, cb)];
         pushTri(bucket.pos, bucket.idx, pa, pb, pc);
         pushTri(bucket.pos, bucket.idx, pa, pc, pd);
       }
@@ -961,25 +1017,37 @@ export class Pinones implements WorldLayer {
 
     this.buildRamps(grip.ramp);
 
-    const makeBody = (pos: number[], idx: number[], friction: number, surface: string): void => {
+    /**
+     * One static trimesh per friction class, all in `GROUP.WORLD`.
+     *
+     * The body carries **both** channels a consumer might reach for: `surface`
+     * is the descriptive authoring class, matching how `Ground` and `Coast`
+     * already tag theirs, and `grip` is the typed {@link SurfaceKind} the tyre
+     * model can price directly with `SURFACE_GRIP[ud.grip]`. Rapier's own
+     * friction is derived from the same table rather than hand-tuned twice, so
+     * the collider and the grip query can never drift apart.
+     */
+    const makeBody = (cls: GripClass): void => {
+      const { pos, idx } = grip[cls];
       if (idx.length === 0) return;
+      const kind = GRIP_KIND[cls];
       const body = opts.physics.createBody({
         kind: 'static',
         shape: { type: 'trimesh', vertices: new Float32Array(pos), indices: new Uint32Array(idx) },
         position: new THREE.Vector3(0, 0, 0),
-        friction,
+        friction: 0.55 + 0.45 * SURFACE_GRIP[kind].longitudinal,
         restitution: 0.02,
         group: GROUP.WORLD,
         mask: GROUP.VEHICLE | GROUP.TRAFFIC | GROUP.PROP | GROUP.PED | GROUP.DEBRIS | GROUP.TRIGGER,
-        userData: { kind: 'world', surface },
+        userData: { kind: 'world', surface: cls, grip: kind },
       });
       this.bodies.push(body);
       this._stats.colliderTriangles += idx.length / 3;
     };
-    makeBody(grip.asphalt.pos, grip.asphalt.idx, 1.0, 'asphalt');
-    makeBody(grip.gravel.pos, grip.gravel.idx, 0.86, 'gravel');
-    makeBody(grip.sand.pos, grip.sand.idx, 0.62, 'sand');
-    makeBody(grip.ramp.pos, grip.ramp.idx, 0.98, 'ramp');
+    makeBody('asphalt');
+    makeBody('gravel');
+    makeBody('sand');
+    makeBody('ramp');
   }
 
   /**
@@ -1020,6 +1088,7 @@ export class Pinones implements WorldLayer {
       const uz = dirZ / dl;
       const px = -uz;
       const pz = ux;
+      this.rampFrames.push({ ox, oz, ux, uz, len: dl, halfW: 3.9 });
       /** centreline height: low at the mouth, ~16° at the lip */
       const riseAt = (t: number): number => r.height * Math.pow(t, 1.35);
       const halfAt = (t: number): number => lerp(3.9, r.halfW, t);
@@ -1193,7 +1262,11 @@ export class Pinones implements WorldLayer {
             'float pnV = vBeach.x;',
             'float pnKind = vBeach.y;',
             'float pnS = vBeach.z;',
-            'vec2 pnW = vWorldPos.xz;',
+            // recentred on the middle of the ribbon: every noise band below is a
+            // function of pnW, and halving the magnitude of the coordinate that
+            // feeds them keeps the interpolation fraction well-resolved out at
+            // the east end of the spit (see pnHash for the full story)
+            'vec2 pnW = vWorldPos.xz - vec2( 690.0, 300.0 );',
             'vec3 pnTint = vColor.rgb;',
             'float pnRough = 0.92;',
 
@@ -1207,8 +1280,10 @@ export class Pinones implements WorldLayer {
             // 40 m of dry sand reading as one flat card
             'pnSandC *= 1.0 + 0.11 * sin( dot( pnW, vec2( 0.22, 0.09 ) ) + pnFbm( pnW * 0.13 ) * 9.0 );',
             // shell hash and dark mineral sand along the old high-tide line
-            'float pnHash = smoothstep( 1.6, 0.5, vWorldPos.y - uSeaLevel ) * smoothstep( 0.1, 0.6, vWorldPos.y - uSeaLevel );',
-            'pnSandC = mix( pnSandC, pnSandC * vec3( 0.72, 0.68, 0.64 ), pnHash * smoothstep( 0.45, 0.8, pnFbm( pnW * 0.42 + 11.0 ) ) * 0.7 );',
+            // (named for what it is — a local called `pnHash` here would shadow
+            // the hash function and is a trap for the next edit)
+            'float pnShellBand = smoothstep( 1.6, 0.5, vWorldPos.y - uSeaLevel ) * smoothstep( 0.1, 0.6, vWorldPos.y - uSeaLevel );',
+            'pnSandC = mix( pnSandC, pnSandC * vec3( 0.72, 0.68, 0.64 ), pnShellBand * smoothstep( 0.45, 0.8, pnFbm( pnW * 0.42 + 11.0 ) ) * 0.7 );',
             // wrack line: a broken ribbon of dried sargassum at the spring-tide mark
             'float pnWrackBand = smoothstep( 0.55, 0.0, abs( vWorldPos.y - uSeaLevel - 1.05 ) );',
             'float pnWrack = pnWrackBand * smoothstep( 0.5, 0.78, pnFbm( pnW * vec2( 0.7, 0.16 ) + 23.0 ) );',
@@ -1333,7 +1408,7 @@ export class Pinones implements WorldLayer {
           ['#include <roughnessmap_fragment>', 'roughnessFactor = pnRough;'].join('\n'),
         );
     };
-    mat.customProgramCacheKey = () => 'loco/pinones-deck-v7';
+    mat.customProgramCacheKey = () => 'loco/pinones-deck-v8';
     this.deckMat = mat;
     return mat;
   }
@@ -1371,6 +1446,53 @@ export class Pinones implements WorldLayer {
       return this.layout?.groundHeight(x, z) ?? 0;
     }
     return this.profile(st, v);
+  }
+
+  /**
+   * What the tyres are on, in the vocabulary the vehicle already speaks.
+   *
+   * `Coast.surfaceAt` rasterises its answer over `DISTRICT_BOUNDS`, which stops
+   * at x = 450 — the entire Piñones ribbon (x = 357 … 1078) is off the east
+   * edge of that grid and comes back `'cobble'`. So the beach road answers for
+   * itself, using **the same column table and the same coarser-of-two rule the
+   * collider was built from**: picture, physics body and grip query are three
+   * readings of one cross-section and cannot drift apart.
+   *
+   * Returns `'sand'` off the ribbon — a caller outside our footprint should be
+   * asking the district, and loose is the safe default on a barrier spit.
+   */
+  surfaceAt(x: number, z: number): SurfaceKind {
+    if (this.stations.length === 0) return 'sand';
+    const st = this.nearestStation(x, z);
+    const dx = x - st.x;
+    const dz = z - st.z;
+    const v = dx * st.nx + dz * st.nz;
+    if (Math.abs(dx * st.tx + dz * st.tz) > STEP * 1.6) return 'sand';
+    if (v < BLUFF_V || v > st.waterV + SURF_RUN) return 'sand';
+
+    // a kicker is packed marl laid over whatever it crosses, so it wins
+    for (const f of this.rampFrames) {
+      const rx = x - f.ox;
+      const rz = z - f.oz;
+      const t = rx * f.ux + rz * f.uz;
+      if (t < 0 || t > f.len) continue;
+      if (Math.abs(rx * -f.uz + rz * f.ux) <= f.halfW) return GRIP_KIND.ramp;
+    }
+
+    for (let k = 0; k < COLUMNS.length - 1; k++) {
+      const ca = COLUMNS[k];
+      const cb = COLUMNS[k + 1];
+      if (!ca.solid || !cb.solid) continue;
+      if (v >= this.columnV(st, ca) && v <= this.columnV(st, cb)) {
+        return GRIP_KIND[stripGrip(ca, cb)];
+      }
+    }
+    return 'sand';
+  }
+
+  /** Convenience: the tyre multipliers for whatever is under (x, z). */
+  gripAt(x: number, z: number): SurfaceGrip {
+    return SURFACE_GRIP[this.surfaceAt(x, z)];
   }
 
   /** True where the ribbon owns the ground — the projected layout's zone test. */
@@ -1908,6 +2030,20 @@ export class Pinones implements WorldLayer {
 /* ========================================================================== *
  *  helpers
  * ========================================================================== */
+
+/**
+ * Friction class of the strip between two cross-section columns. The coarser
+ * of the two wins, so the asphalt body never claims a triangle that is half
+ * apron — a wheel straddling the white line gets the shoulder's grip, not the
+ * carriageway's, which is what makes running wide onto the gravel cost you
+ * something.
+ */
+function stripGrip(ca: Column, cb: Column): GripClass {
+  const a = ca.grip ?? 'sand';
+  const b = cb.grip ?? 'sand';
+  if (a === b) return a;
+  return a === 'asphalt' || b === 'asphalt' ? 'gravel' : 'sand';
+}
 
 /** A double-sided sign panel on the atlas material, centred on a post top. */
 function signPanel(

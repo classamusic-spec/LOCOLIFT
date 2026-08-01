@@ -1461,6 +1461,207 @@ export function buildThicket(rng: RNG): THREE.BufferGeometry {
   return finish(g, true);
 }
 
+/* ========================================================================== *
+ *  coastal understorey
+ * ========================================================================== */
+
+/**
+ * **Sea grape** (*Coccoloba uvifera*) — the plant that actually holds a Puerto
+ * Rican beach together and the one that makes PR-187 look like PR-187 rather
+ * than a road across a lawn.
+ *
+ * Shape language matters more than leaf count here: sea grape is *wide and
+ * low*, a flattened dome that spreads further than it rises, so it reads as a
+ * horizontal green mass under the vertical palm trunks. Two horizontal leaf
+ * planes through the crown stop it going hollow when the camera lifts over a
+ * crest, and the oldest leaves take the rust-red the species is known for.
+ */
+export function buildSeaGrape(rng: RNG): THREE.BufferGeometry {
+  const g = new GeoBuilder().enableAux();
+  const cards = 8;
+  const wave = new THREE.Vector3();
+  const phase = rng.next();
+  const spread = rng.range(1.5, 2.4);
+  const top = rng.range(1.1, 1.9);
+  const leaf = [0x4c7a34, 0x3d6b2c, 0x6b8f36, 0x8a5f30] as const;
+  for (let i = 0; i < cards; i++) {
+    const ang = (i / cards) * Math.PI * 2 + rng.range(-0.3, 0.3);
+    const rad = rng.range(0.25, 1.0) * spread;
+    // the crown thins and drops as it spreads — a dome, not a cylinder
+    const h = top * rng.range(0.62, 1.0) * (1 - rad / (spread * 2.6));
+    const w = rng.range(1.3, 2.1);
+    const y0 = rng.range(0.02, 0.3);
+    const cx = Math.cos(ang) * rad;
+    const cz = Math.sin(ang) * rad;
+    const dx = Math.cos(ang + 1.57);
+    const dz = Math.sin(ang + 1.57);
+    wave.set(0.09, phase, 0.12);
+    card(
+      g,
+      new THREE.Vector3(cx - dx * w * 0.5, y0, cz - dz * w * 0.5),
+      new THREE.Vector3(cx + dx * w * 0.5, y0, cz + dz * w * 0.5),
+      new THREE.Vector3(cx + dx * w * 0.5, y0 + h, cz + dz * w * 0.5),
+      new THREE.Vector3(cx - dx * w * 0.5, y0 + h, cz - dz * w * 0.5),
+      // one leaf in eight goes rusty; any more and it reads as a dying plant
+      i === 3 ? leaf[3] : leaf[i % 3],
+      wave,
+    );
+  }
+  for (let k = 0; k < 2; k++) {
+    const r = spread * (k === 0 ? 0.95 : 0.55);
+    const y = top * (k === 0 ? 0.52 : 0.86);
+    wave.set(0.07, phase, 0.1);
+    quadUV(
+      g,
+      new THREE.Vector3(-r, y, -r),
+      new THREE.Vector3(r, y, -r),
+      new THREE.Vector3(r, y, r),
+      new THREE.Vector3(-r, y, r),
+      FULL_UV,
+      shade(leaf[k], 0.9),
+      wave,
+    );
+  }
+  return finish(g, true);
+}
+
+/**
+ * Fern / low palmetto clump for the shaded back of the bench, where the bluff
+ * cuts the light. Fronds arch *outward and down*, which is the read that
+ * separates a fern from a grass tuft at 45 m/s.
+ */
+export function buildFernClump(rng: RNG): THREE.BufferGeometry {
+  const g = new GeoBuilder().enableAux();
+  const fronds = 7;
+  const wave = new THREE.Vector3();
+  const phase = rng.next();
+  for (let i = 0; i < fronds; i++) {
+    const ang = (i / fronds) * Math.PI * 2 + rng.range(-0.35, 0.35);
+    const len = rng.range(0.7, 1.25);
+    const wdt = rng.range(0.3, 0.52);
+    const rise = rng.range(0.42, 0.78);
+    const dx = Math.cos(ang);
+    const dz = Math.sin(ang);
+    // the tip falls back toward the ground: arch, not spike
+    const tipY = rise * rng.range(0.55, 0.85);
+    wave.set(0.2, phase, 0.26);
+    card(
+      g,
+      new THREE.Vector3(-dz * wdt * 0.35, 0.04, dx * wdt * 0.35),
+      new THREE.Vector3(dz * wdt * 0.35, 0.04, -dx * wdt * 0.35),
+      new THREE.Vector3(dx * len + dz * wdt * 0.5, tipY, dz * len - dx * wdt * 0.5),
+      new THREE.Vector3(dx * len - dz * wdt * 0.5, tipY, dz * len + dx * wdt * 0.5),
+      [KIT.leafDark, KIT.leafMid, 0x2c6b3a][i % 3],
+      wave,
+    );
+  }
+  return finish(g, true);
+}
+
+/**
+ * Sea oats / beach grass — the tall thin stuff on the dune crest that catches
+ * the light and moves most in the wind. Deliberately the cheapest plant in the
+ * set (five blades) because it is scattered in the largest numbers.
+ */
+export function buildBeachGrass(rng: RNG): THREE.BufferGeometry {
+  const g = new GeoBuilder().enableAux();
+  const blades = 5;
+  const wave = new THREE.Vector3();
+  const phase = rng.next();
+  for (let i = 0; i < blades; i++) {
+    const ang = (i / blades) * Math.PI * 2 + rng.range(-0.5, 0.5);
+    const h = rng.range(0.55, 1.15);
+    const w = rng.range(0.3, 0.55);
+    const lean = rng.range(0.12, 0.42);
+    const dx = Math.cos(ang);
+    const dz = Math.sin(ang);
+    const px = -dz;
+    const pz = dx;
+    // grass is the most wind-active thing on the dune; give it the top weight
+    wave.set(0.42, phase, 0.5);
+    card(
+      g,
+      new THREE.Vector3(-px * w * 0.5, 0, -pz * w * 0.5),
+      new THREE.Vector3(px * w * 0.5, 0, pz * w * 0.5),
+      new THREE.Vector3(dx * h * lean + px * w * 0.22, h, dz * h * lean + pz * w * 0.22),
+      new THREE.Vector3(dx * h * lean - px * w * 0.22, h, dz * h * lean - pz * w * 0.22),
+      [0x8a9a3c, 0x6f8f34, 0xa8ac52][i % 3],
+      wave,
+    );
+  }
+  return finish(g, true);
+}
+
+/* ========================================================================== *
+ *  chinchorro strip furniture
+ * ========================================================================== */
+
+/**
+ * Free-standing painted drink board — the yellow-and-red enamel advertising
+ * panel propped against every kiosk on the island. Every brand on it is
+ * invented (§7): CERVEZA CANGREJA, MALTA SOLIMAR, REFRESCOS FLAMBOYÁN.
+ */
+export function buildDrinkBoard(key: SignKey): THREE.BufferGeometry {
+  const g = new GeoBuilder();
+  const w = 0.72;
+  const h = 1.02;
+  const y0 = 0.16;
+  const rect = signRect(key);
+  // panel leans back a little, as a propped board does
+  const tilt = 0.13;
+  quadUV(
+    g,
+    new THREE.Vector3(-w, y0, 0),
+    new THREE.Vector3(w, y0, 0),
+    new THREE.Vector3(w, y0 + h, -tilt * h),
+    new THREE.Vector3(-w, y0 + h, -tilt * h),
+    rect,
+  );
+  g.quad(
+    new THREE.Vector3(-w, y0 + h, -tilt * h),
+    new THREE.Vector3(w, y0 + h, -tilt * h),
+    new THREE.Vector3(w, y0, 0),
+    new THREE.Vector3(-w, y0, 0),
+    KIT.zincOld,
+    0.6,
+  );
+  for (const sx of [-w * 0.72, w * 0.72]) {
+    g.box(sx, y0 * 0.5, 0.01, 0.035, y0 * 0.5, 0.035, KIT.steelDark);
+  }
+  // a back prop so it is not a floating panel
+  g.box(0, y0 + h * 0.3, -tilt * h - 0.16, 0.03, y0 + h * 0.3, 0.03, KIT.woodDark);
+  return finish(g);
+}
+
+/**
+ * PA speaker on a tripod stand. Piñones is loud — the music is half the reason
+ * anybody drives out here — and a speaker box on a pole is the visual shorthand
+ * for it. Paired with the `musica` boards and the dancers in `PinonesLife`.
+ */
+export function buildSpeakerStack(): THREE.BufferGeometry {
+  const g = new GeoBuilder();
+  const standH = 1.15;
+  g.cylinder(0, 0, 0, 0.035, 0.03, standH, 6, KIT.steelDark);
+  for (let i = 0; i < 3; i++) {
+    const a = (i / 3) * Math.PI * 2;
+    strut(
+      g,
+      new THREE.Vector3(0, standH * 0.5, 0),
+      new THREE.Vector3(Math.cos(a) * 0.32, 0, Math.sin(a) * 0.32),
+      0.022,
+      KIT.steelDark,
+    );
+  }
+  const cy = standH + 0.34;
+  g.box(0, cy, 0, 0.22, 0.34, 0.2, KIT.black);
+  // grille face: the woofer and the horn, as proud panels on the front
+  g.box(0, cy - 0.11, 0.21, 0.15, 0.15, 0.012, 0x2a2e32);
+  g.box(0, cy + 0.17, 0.21, 0.09, 0.06, 0.012, 0x3a3f44);
+  // a lighter cap so the box does not read as one black blob against the sea
+  g.box(0, cy + 0.35, 0, 0.23, 0.02, 0.21, shade(KIT.black, 1.9));
+  return finish(g);
+}
+
 /**
  * Festoon bulb — a warm emissive teardrop hung along a catenary. Deliberately
  * over-scale: a true 4 cm bulb is sub-pixel at 30 m, and these have to read as
