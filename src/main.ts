@@ -130,6 +130,20 @@ export interface LocoTestHook {
   setWeather(k: string): void;
   teleport(x: number, y: number, z: number, heading?: number): void;
   perfSample(ms: number): Promise<Record<string, number>>;
+  /**
+   * Per-system CPU breakdown over `ms`. Answers *which* system spent the frame,
+   * which frame time alone cannot. `subStepsPerFrame` distinguishes a system
+   * that is expensive from one that is merely running eight times per frame.
+   */
+  profile(ms: number): Promise<{
+    frames: number;
+    subStepsPerFrame: number;
+    renderMs: number;
+    fixed: Array<{ name: string; ms: number }>;
+    update: Array<{ name: string; ms: number }>;
+    late: Array<{ name: string; ms: number }>;
+    totalMs: number;
+  }>;
   stats(): Record<string, number>;
   /** Ground height under a point, so a scripted teleport lands on the street. */
   groundY(x: number, z: number): number;
@@ -573,6 +587,11 @@ function installTestHook(
     async perfSample(ms) {
       const s = await engine.perfSample(ms);
       return { ...s };
+    },
+    async profile(ms) {
+      engine.profileStart();
+      await new Promise<void>((r) => setTimeout(r, ms));
+      return engine.profileStop();
     },
     groundY(x, z) {
       return Number(world.groundHeight(x, z).toFixed(3));

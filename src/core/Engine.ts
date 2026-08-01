@@ -5,6 +5,11 @@ import { RNG } from './RNG';
 import { clamp } from './MathUtils';
 import type { GameContext, QualityTier, SettingsState, System } from './types';
 
+/** Add `ms` to `key`'s running total. Hoisted so the hot path stays flat. */
+function accum(map: Map<string, number>, key: string, ms: number): void {
+  map.set(key, (map.get(key) ?? 0) + ms);
+}
+
 export interface PerfSample {
   fps: number;
   /** 1% low fps — the number that actually reveals stutter */
@@ -49,6 +54,25 @@ export class Engine {
   private frameTimes = new Float32Array(180);
   private frameCursor = 0;
   private frameCount = 0;
+
+  /**
+   * Per-system CPU profiling. Off by default and genuinely free when off: the
+   * hot loops branch on one boolean and never call `performance.now()`.
+   *
+   * This exists because "the game is choppy" is not actionable. Frame time
+   * tells you *that* a frame was slow; only a per-system breakdown tells you
+   * *which* system spent it, and whether it went to `fixedUpdate` (which runs
+   * up to `maxSubSteps` times per frame, so its cost rises as the frame rate
+   * falls) or to `update`/`lateUpdate` (once per frame). Those two profiles
+   * call for opposite fixes, and guessing between them wastes the pass.
+   */
+  private profiling = false;
+  private profFixed = new Map<string, number>();
+  private profUpdate = new Map<string, number>();
+  private profLate = new Map<string, number>();
+  private profFrames = 0;
+  private profSubSteps = 0;
+  private profRenderMs = 0;
 
   private ctx: GameContext;
   private settings: SettingsState;
@@ -236,6 +260,9 @@ export class Engine {
     // Sampled before the fixed loop so edge-triggered presses fire exactly once.
     this.preFrameHook?.(dt);
 
+    const prof = this.profiling;
+    if (prof) this.profFrames++;
+
     if (!this._paused) {
       this.elapsed += dt;
       ctx.elapsed = this.elapsed;
@@ -245,22 +272,117 @@ export class Engine {
       this.accumulator += dt;
       let steps = 0;
       while (this.accumulator >= fixed && steps < CONFIG.maxSubSteps) {
-        for (const s of this.systems) s.fixedUpdate?.(ctx, fixed);
+        if (prof) {
+          for (const s of this.systems) {
+            if (!s.fixedUpdate) continue;
+            const t0 = performance.now();
+            s.fixedUpdate(ctx, fixed);
+            accum(this.profFixed, s.name, performance.now() - t0);
+          }
+        } else {
+          for (const s of this.systems) s.fixedUpdate?.(ctx, fixed);
+        }
         this.accumulator -= fixed;
         steps++;
       }
       // Bail out of a death spiral rather than falling further behind.
       if (steps === CONFIG.maxSubSteps) this.accumulator = 0;
+      if (prof) this.profSubSteps += steps;
 
-      for (const s of this.systems) s.update?.(ctx, dt);
+      if (prof) {
+        for (const s of this.systems) {
+          if (!s.update) continue;
+          const t0 = performance.now();
+          s.update(ctx, dt);
+          accum(this.profUpdate, s.name, performance.now() - t0);
+        }
+      } else {
+        for (const s of this.systems) s.update?.(ctx, dt);
+      }
     }
 
     // lateUpdate always runs — the camera and HUD must keep working while paused.
-    for (const s of this.systems) s.lateUpdate?.(ctx, this._paused ? 0 : dt);
+    const lateDt = this._paused ? 0 : dt;
+    if (prof) {
+      for (const s of this.systems) {
+        if (!s.lateUpdate) continue;
+        const t0 = performance.now();
+        s.lateUpdate(ctx, lateDt);
+        accum(this.profLate, s.name, performance.now() - t0);
+      }
+    } else {
+      for (const s of this.systems) s.lateUpdate?.(ctx, lateDt);
+    }
 
-    if (this.renderHook) this.renderHook(dt);
-    else this.renderer.render(this.scene, this.camera);
+    if (prof) {
+      const t0 = performance.now();
+      if (this.renderHook) this.renderHook(dt);
+      else this.renderer.render(this.scene, this.camera);
+      this.profRenderMs += performance.now() - t0;
+    } else if (this.renderHook) {
+      this.renderHook(dt);
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
   };
+
+  /* ------------------------------------------------------------ profiling */
+
+  /** Begin (or restart) a per-system CPU profile. */
+  profileStart(): void {
+    this.profFixed.clear();
+    this.profUpdate.clear();
+    this.profLate.clear();
+    this.profFrames = 0;
+    this.profSubSteps = 0;
+    this.profRenderMs = 0;
+    this.profiling = true;
+  }
+
+  /**
+   * Stop profiling and return per-frame averages in milliseconds.
+   *
+   * `fixedMs` is the cost *per frame*, already summed over however many
+   * sub-steps that frame ran — that is the number that matters, because a
+   * system whose `fixedUpdate` costs 0.4 ms costs 3.2 ms per frame once the
+   * frame rate has fallen far enough to demand eight sub-steps. `subStepsPerFrame`
+   * is reported alongside so the two can be told apart.
+   *
+   * `renderMs` is CPU time spent inside the render hook — command submission and
+   * post-chain setup, not GPU execution. A browser cannot measure GPU time
+   * without `EXT_disjoint_timer_query_webgl2`, so treat a small `renderMs` on a
+   * slow frame as evidence the cost is on the GPU, not as evidence of health.
+   */
+  profileStop(): {
+    frames: number;
+    subStepsPerFrame: number;
+    renderMs: number;
+    fixed: Array<{ name: string; ms: number }>;
+    update: Array<{ name: string; ms: number }>;
+    late: Array<{ name: string; ms: number }>;
+    totalMs: number;
+  } {
+    this.profiling = false;
+    const n = Math.max(1, this.profFrames);
+    const per = (m: Map<string, number>): Array<{ name: string; ms: number }> =>
+      [...m.entries()]
+        .map(([name, ms]) => ({ name, ms: Number((ms / n).toFixed(3)) }))
+        .sort((a, b) => b.ms - a.ms);
+    const fixed = per(this.profFixed);
+    const update = per(this.profUpdate);
+    const late = per(this.profLate);
+    const sum = (a: Array<{ ms: number }>): number => a.reduce((t, x) => t + x.ms, 0);
+    const renderMs = Number((this.profRenderMs / n).toFixed(3));
+    return {
+      frames: this.profFrames,
+      subStepsPerFrame: Number((this.profSubSteps / n).toFixed(2)),
+      renderMs,
+      fixed,
+      update,
+      late,
+      totalMs: Number((sum(fixed) + sum(update) + sum(late) + renderMs).toFixed(3)),
+    };
+  }
 
   /** Average + 1% low over the last `ms` of frames. */
   async perfSample(ms: number): Promise<PerfSample> {
