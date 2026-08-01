@@ -517,6 +517,9 @@ export class CarriageModel implements VehicleModel {
   private readonly matPassenger: THREE.MeshStandardMaterial;
   private readonly matBeam: THREE.MeshBasicMaterial;
 
+  /** decided before the materials are built; gates the clearcoat lobe */
+  private readonly lowDetail: boolean;
+
   private readonly materials: THREE.Material[] = [];
   private readonly geometries: THREE.BufferGeometry[] = [];
   private readonly textures: THREE.Texture[] = [];
@@ -546,6 +549,7 @@ export class CarriageModel implements VehicleModel {
   private idlePhase = 0;
 
   constructor(quality: QualityTier = 'high') {
+    this.lowDetail = quality === 'low';
     this.object3d.name = 'Carriage';
     this.chassis.name = 'carriageChassis';
     this.object3d.add(this.chassis);
@@ -553,15 +557,22 @@ export class CarriageModel implements VehicleModel {
     const low = quality === 'low';
     const seg = low ? 24 : 36;
 
-    /* ------------------------------------------------------------ materials */
-    const matLacquer = this.mat(P.lacquer, 0.38, 0.11);
-    const matLacquerLit = this.mat(P.lacquerLit, 0.3, 0.2);
-    const matYellow = this.mat(P.yellow, 0.28, 0.34);
-    const matYellowDeep = this.mat(P.yellowDeep, 0.25, 0.42);
-    const matBrass = this.mat(P.brass, 0.92, 0.24);
-    const matLeather = this.mat(P.leather, 0.1, 0.52);
-    const matCushion = this.mat(P.cushion, 0.02, 0.62);
-    const matIron = this.mat(P.iron, 0.55, 0.55);
+    /* ------------------------------------------------------------ materials
+     *
+     * Varnished mahogany is the textbook clearcoat case: a deep, saturated,
+     * completely non-metallic pigment under a hard gloss film. It was running
+     * at metalness 0.38, which threw away nearly two-fifths of that colour and
+     * tinted the gloss brown. Brass stays metal because it *is* metal; wrought
+     * iron drops to §5's 0.35/0.45 — hand-forged iron is oxidised, not
+     * polished, and 0.55/0.55 was splitting the difference between the two. */
+    const matLacquer = this.paint(P.lacquer, 0.28, 1.0, 0.05, 0);
+    const matLacquerLit = this.paint(P.lacquerLit, 0.3, 0.9, 0.08, 0);
+    const matYellow = this.paint(P.yellow, 0.34, 1.0, 0.07);
+    const matYellowDeep = this.paint(P.yellowDeep, 0.34, 1.0, 0.07);
+    const matBrass = this.mat(P.brass, 0.92, 0.24, 1.2);
+    const matLeather = this.mat(P.leather, 0.0, 0.52);
+    const matCushion = this.mat(P.cushion, 0.0, 0.62);
+    const matIron = this.mat(P.iron, 0.35, 0.45);
 
     const canopyTex = makeCanopyTexture();
     if (canopyTex) this.textures.push(canopyTex);
@@ -890,8 +901,33 @@ export class CarriageModel implements VehicleModel {
 
   /* ================================================================ builders */
 
-  private mat(color: number, metalness: number, roughness: number): THREE.MeshStandardMaterial {
-    const m = new THREE.MeshStandardMaterial({ color, metalness, roughness });
+  private mat(
+    color: number,
+    metalness: number,
+    roughness: number,
+    envMapIntensity = 1,
+  ): THREE.MeshStandardMaterial {
+    const m = new THREE.MeshStandardMaterial({ color, metalness, roughness, envMapIntensity });
+    this.materials.push(m);
+    return m;
+  }
+
+  /**
+   * Varnished or painted timber: a dielectric base plus a clear film. Gated on
+   * quality, and the fallback keeps identical metalness and roughness so the
+   * coachwork is the same colour at every tier.
+   */
+  private paint(
+    color: number,
+    roughness: number,
+    clearcoat: number,
+    clearcoatRoughness: number,
+    metalness = 0.05,
+  ): THREE.MeshStandardMaterial {
+    const base = { color, metalness, roughness, envMapIntensity: 1 };
+    const m = this.lowDetail
+      ? new THREE.MeshStandardMaterial(base)
+      : new THREE.MeshPhysicalMaterial({ ...base, clearcoat, clearcoatRoughness });
     this.materials.push(m);
     return m;
   }

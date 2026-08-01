@@ -304,6 +304,9 @@ export class JeepModel {
   private readonly matBeam: THREE.MeshBasicMaterial;
   private readonly matPassenger: THREE.MeshStandardMaterial;
 
+  /** decided before the materials are built; gates the clearcoat lobe */
+  private readonly lowDetail: boolean;
+
   private readonly materials: THREE.Material[] = [];
   private readonly geometries: THREE.BufferGeometry[] = [];
   private readonly textures: THREE.Texture[] = [];
@@ -315,31 +318,42 @@ export class JeepModel {
   private headlightsOn = false;
 
   constructor(quality: QualityTier = 'high') {
+    this.lowDetail = quality === 'low';
     this.object3d.name = 'Jeep';
     this.chassis.name = 'jeepChassis';
     this.beams.name = 'headlightBeams';
     this.object3d.add(this.chassis);
 
-    /* ---------------------------------------------------------- materials */
-    const matPaint = this.mat(PAINT.main, 0.45, 0.34);
-    const matAccent = this.mat(PAINT.accent, 0.35, 0.42);
-    const matStripe = this.mat(PAINT.stripe, 0.3, 0.4);
-    const matChrome = this.mat(PAINT.chrome, 1.0, 0.16);
-    const matMatte = this.mat(PAINT.matte, 0.15, 0.85);
-    const matRubber = this.mat(PAINT.rubber, 0.05, 0.95);
-    const matSeat = this.mat(PAINT.seat, 0.1, 0.8);
-    const matSeatTrim = this.mat(PAINT.seatTrim, 0.15, 0.6);
+    /* ---------------------------------------------------------- materials
+     *
+     * Painted panels are **dielectrics**. Car paint is pigment under lacquer;
+     * the metal is under the primer and light never reaches it. Running these
+     * at metalness 0.3–0.45 cost the taxi twice: Three multiplies diffuse by
+     * (1 - metalness), so nearly half the body colour was being thrown away,
+     * and it tints the specular lobe with the albedo, so the highlight came
+     * back mustard instead of white. ART_REFERENCE §6.2 R8 wants this vehicle
+     * to be the highest-chroma object on screen; metalness 0.05 plus a
+     * clearcoat lobe is how paint actually gets there.
+     *
+     * Chrome is the exception and stays a plain metal: lacquer over bare chrome
+     * is a second dielectric interface, and all it does is soften the
+     * reflection we want sharp. */
+    const matPaint = this.paint(PAINT.main, 0.3, 1.0, 0.06);
+    const matAccent = this.paint(PAINT.accent, 0.32, 1.0, 0.07);
+    const matStripe = this.paint(PAINT.stripe, 0.3, 1.0, 0.06);
+    const matChrome = this.mat(PAINT.chrome, 1.0, 0.13, 1.3);
+    const matMatte = this.mat(PAINT.matte, 0.1, 0.82);
+    const matRubber = this.mat(PAINT.rubber, 0.0, 0.92);
+    const matSeat = this.mat(PAINT.seat, 0.0, 0.8);
+    const matSeatTrim = this.mat(PAINT.seatTrim, 0.05, 0.6);
     const seatTrimShell = new Shell();
 
-    const matGlass = new THREE.MeshStandardMaterial({
-      color: PAINT.glass,
-      metalness: 0.1,
-      roughness: 0.06,
+    const matGlass = this.paint(PAINT.glass, 0.06, 0.3, 0.05, {
+      metalness: 0,
       transparent: true,
       opacity: 0.26,
       side: THREE.DoubleSide,
     });
-    this.materials.push(matGlass);
 
     this.matHeadlight = new THREE.MeshStandardMaterial({
       color: PAINT.headlight,
@@ -550,8 +564,44 @@ export class JeepModel {
 
   /* ================================================================ builders */
 
-  private mat(color: number, metalness: number, roughness: number): THREE.MeshStandardMaterial {
-    const m = new THREE.MeshStandardMaterial({ color, metalness, roughness });
+  private mat(
+    color: number,
+    metalness: number,
+    roughness: number,
+    envMapIntensity = 1,
+  ): THREE.MeshStandardMaterial {
+    const m = new THREE.MeshStandardMaterial({ color, metalness, roughness, envMapIntensity });
+    this.materials.push(m);
+    return m;
+  }
+
+  /**
+   * A painted panel: a dielectric base plus a clear lacquer lobe.
+   *
+   * The clearcoat is gated on quality, and the fallback is *not* a different
+   * look bolted on — it is the same material minus the second lobe, with
+   * identical metalness and roughness, so the paint reads the same colour and
+   * the same brightness on a phone as it does on a desktop. Clearcoat costs no
+   * draw calls and no triangles; the cost is per-fragment over the screen area
+   * the vehicle covers, which is why it is affordable here and nowhere else.
+   */
+  private paint(
+    color: number,
+    roughness: number,
+    clearcoat: number,
+    clearcoatRoughness: number,
+    extra: Partial<THREE.MeshPhysicalMaterialParameters> = {},
+  ): THREE.MeshStandardMaterial {
+    const base = {
+      color,
+      metalness: 0.05,
+      roughness,
+      envMapIntensity: 1,
+      ...extra,
+    };
+    const m = this.lowDetail
+      ? new THREE.MeshStandardMaterial(base)
+      : new THREE.MeshPhysicalMaterial({ ...base, clearcoat, clearcoatRoughness });
     this.materials.push(m);
     return m;
   }

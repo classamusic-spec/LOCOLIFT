@@ -145,6 +145,7 @@ export const DEFAULT_SETTINGS: SettingsState = {
   photosensitiveSafe: false,
   colorBlindMode: 'none',
   subtitles: true,
+  language: 'both',
   largeText: false,
   highContrastHud: false,
   holdToBoost: true,

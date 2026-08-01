@@ -85,6 +85,17 @@ export class ScoreSystem implements System {
   private lastCounted: FareResult | null = null;
   private readonly met = new Set<string>();
 
+  /**
+   * Free roam has no end, so waiting for `endShift` to write the bank would mean
+   * a closed tab costs the player everything they earned. With auto-bank on,
+   * every delivery flushes what has been earned since the last one straight to
+   * `SaveSystem`; `endShift` then only pays the remainder, so nothing is ever
+   * counted twice.
+   */
+  private autoBank = false;
+  /** cash already written to the save this shift */
+  private flushed = 0;
+
   private readonly changePayload = { score: 0, delta: 0 };
   private readonly unsubs: Array<() => void> = [];
 
@@ -165,6 +176,28 @@ export class ScoreSystem implements System {
     if (payable <= 0) return;
     this.cash += payable;
     this.add(payable);
+    this.flush();
+  }
+
+  /**
+   * Write everything earned since the last flush to the save. Style money rides
+   * along with the delivery that closed it out, which is exactly how the fare
+   * breakdown already reports it.
+   */
+  private flush(): void {
+    if (!this.autoBank || !this.save || !this.running) return;
+    const owed = Math.round(this.cash - this.flushed);
+    if (owed <= 0) return;
+    this.flushed += owed;
+    this.save.addBank(owed);
+  }
+
+  /**
+   * Bank cash as it is earned rather than only at the end of the run. Used for
+   * modes that never end on their own.
+   */
+  setAutoBank(on: boolean): void {
+    this.autoBank = on;
   }
 
   /* --------------------------------------------------------------- control */
@@ -183,6 +216,7 @@ export class ScoreSystem implements System {
     this.distance = 0;
     this.hasLastPos = false;
     this.lastCounted = null;
+    this.flushed = 0;
     this.met.clear();
     this.running = true;
     this.changePayload.score = 0;
@@ -215,7 +249,10 @@ export class ScoreSystem implements System {
       save.record('biggestCombo', this.bestCombo);
       save.record('longestDrift', this.longestDrift);
       save.record('longestAirtime', this.longestAir);
-      save.addBank(summary.cash);
+      /* whatever auto-bank already wrote is not owed again */
+      const owed = Math.max(0, Math.round(this.cash - this.flushed));
+      this.flushed += owed;
+      save.addBank(owed);
       const met = this.met;
       save.update((d) => {
         d.totalFares += this.fares;

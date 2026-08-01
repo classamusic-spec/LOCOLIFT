@@ -573,7 +573,8 @@ export class StreetDressing implements WorldLayer {
       geo.dispose();
     }
 
-    this.addMerged(this.wires.build('aDress'), kit.solid, 'street/wires', false);
+    // the strung ironwork and its fixings are metal; same merged mesh as before
+    this.addMerged(this.wires.build('aDress'), kit.metal, 'street/wires', false);
     const clothGeo = this.cloth.build('aWave');
     this.addMerged(clothGeo, kit.cloth, 'street/cloth', false);
     const signGeo = this.signs.build('aDress');

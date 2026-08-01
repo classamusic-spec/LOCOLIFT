@@ -58,6 +58,14 @@ export interface SettingsState {
   photosensitiveSafe: boolean; // damps strobing / heavy flashes
   colorBlindMode: 'none' | 'protanopia' | 'deuteranopia' | 'tritanopia';
   subtitles: boolean;
+  /**
+   * UI language. `both` keeps the bilingual pairing the HUD ships with
+   * (`TARIFA Fare`), which is how signage and speech actually work in San Juan
+   * and is the default; `es` and `en` render a single language for players who
+   * want one. Passenger dialogue keeps its natural code-switching regardless —
+   * that is characterisation, not chrome.
+   */
+  language: 'both' | 'es' | 'en';
   largeText: boolean;
   highContrastHud: boolean;
   holdToBoost: boolean; // false = toggle

@@ -331,6 +331,9 @@ export class BusModel implements VehicleModel {
   private readonly matPassenger: THREE.MeshStandardMaterial;
   private readonly festoon: THREE.MeshStandardMaterial[] = [];
 
+  /** decided before the materials are built; gates the clearcoat lobe */
+  private readonly lowDetail: boolean;
+
   private readonly materials: THREE.Material[] = [];
   private readonly geometries: THREE.BufferGeometry[] = [];
   private readonly textures: THREE.Texture[] = [];
@@ -361,19 +364,25 @@ export class BusModel implements VehicleModel {
   private readonly tmpColor = new THREE.Color();
 
   constructor(quality: QualityTier = 'high') {
+    this.lowDetail = quality === 'low';
     this.object3d.name = 'ChinchorreoBus';
     this.chassis.name = 'busChassis';
     this.beams.name = 'headlightBeams';
     this.object3d.add(this.chassis);
 
     /* ------------------------------------------------------------ materials */
-    const matBody = this.mat(BUS_PAINT.body, 0.34, 0.42);
-    const matBodyDark = this.mat(BUS_PAINT.bodyDark, 0.3, 0.5);
-    const matLime = this.mat(BUS_PAINT.lime, 0.28, 0.44);
-    const matRed = this.mat(BUS_PAINT.red, 0.3, 0.4);
-    const matRedDark = this.mat(BUS_PAINT.redDark, 0.25, 0.55);
-    const matChrome = this.mat(BUS_PAINT.chrome, 1.0, 0.14);
-    const matSteel = this.mat(BUS_PAINT.steel, 0.75, 0.45);
+    /* Painted panels are dielectrics — see the note in `JeepModel`. A
+     * hand-painted chinchorreo bus is *more* saturated than a taxi, not less,
+     * and it was losing a third of its diffuse to a metalness value that
+     * described nothing physical. Chrome and steel stay metal; 0.75 was the
+     * odd one out, describing neither a metal nor a paint. */
+    const matBody = this.paint(BUS_PAINT.body, 0.34, 1.0, 0.07);
+    const matBodyDark = this.paint(BUS_PAINT.bodyDark, 0.34, 1.0, 0.07);
+    const matLime = this.paint(BUS_PAINT.lime, 0.34, 1.0, 0.07);
+    const matRed = this.paint(BUS_PAINT.red, 0.34, 1.0, 0.07);
+    const matRedDark = this.paint(BUS_PAINT.redDark, 0.34, 1.0, 0.07);
+    const matChrome = this.mat(BUS_PAINT.chrome, 1.0, 0.14, 1.3);
+    const matSteel = this.mat(BUS_PAINT.steel, 1.0, 0.45);
     const matMatte = this.mat(BUS_PAINT.matte, 0.12, 0.85);
     const matRubber = this.mat(BUS_PAINT.rubber, 0.04, 0.95);
     const matSeat = this.mat(BUS_PAINT.seat, 0.1, 0.62);
@@ -675,8 +684,32 @@ export class BusModel implements VehicleModel {
 
   /* ================================================================ builders */
 
-  private mat(color: number, metalness: number, roughness: number): THREE.MeshStandardMaterial {
-    const m = new THREE.MeshStandardMaterial({ color, metalness, roughness });
+  private mat(
+    color: number,
+    metalness: number,
+    roughness: number,
+    envMapIntensity = 1,
+  ): THREE.MeshStandardMaterial {
+    const m = new THREE.MeshStandardMaterial({ color, metalness, roughness, envMapIntensity });
+    this.materials.push(m);
+    return m;
+  }
+
+  /**
+   * A painted panel: dielectric base plus a clear lacquer lobe, with the lobe
+   * gated on quality. The fallback keeps identical metalness and roughness, so
+   * the livery reads the same colour at every tier.
+   */
+  private paint(
+    color: number,
+    roughness: number,
+    clearcoat: number,
+    clearcoatRoughness: number,
+  ): THREE.MeshStandardMaterial {
+    const base = { color, metalness: 0.05, roughness, envMapIntensity: 1 };
+    const m = this.lowDetail
+      ? new THREE.MeshStandardMaterial(base)
+      : new THREE.MeshPhysicalMaterial({ ...base, clearcoat, clearcoatRoughness });
     this.materials.push(m);
     return m;
   }

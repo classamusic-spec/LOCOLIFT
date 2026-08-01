@@ -650,8 +650,18 @@ const KIT_CACHE = new Map<QualityTier, DressKit>();
 export class DressKit {
   readonly quality: QualityTier;
 
-  /** stone, iron, timber, terracotta, plastics — everything hard */
+  /** stone, timber, terracotta, plastics — every hard *dielectric* */
   readonly solid: THREE.MeshStandardMaterial;
+  /**
+   * Cast iron and brass. Checklist §8.20: one vertex-coloured dielectric was
+   * covering the lamp standards and the strung ironwork as well as the stone
+   * and the plastic, so the district's cast iron read as painted plastic —
+   * metal reflects the environment and tints its own specular, and at
+   * metalness 0.06 it did neither. This is the same shader patch as `solid`
+   * (same cull, same rain response), so props already drawn as one mesh simply
+   * point at this instead: **no extra draw calls, no extra geometry.**
+   */
+  readonly metal: THREE.MeshStandardMaterial;
   /** awnings, bunting, flags — double sided, wind driven */
   readonly cloth: THREE.MeshStandardMaterial;
   /** alpha-cut leaf cards — double sided, wind driven */
@@ -698,6 +708,18 @@ export class DressKit {
       envMapIntensity: 0.85,
     });
     this.patch(this.solid, 'loco/dress-solid-v1', { wet: 0.8 });
+
+    this.metal = new THREE.MeshStandardMaterial({
+      name: 'loco/dressMetal',
+      vertexColors: true,
+      normalMap: stoneN,
+      normalScale: new THREE.Vector2(0.22, 0.22),
+      roughness: 0.42,
+      metalness: 0.85,
+      envMapIntensity: 1.15,
+    });
+    // metal barely darkens in the rain — it just gets sharper
+    this.patch(this.metal, 'loco/dress-metal-v1', { wet: 0.25 });
 
     this.cloth = new THREE.MeshStandardMaterial({
       name: 'loco/dressCloth',
@@ -789,7 +811,7 @@ export class DressKit {
     if (!src) return;
     if (this.wet !== src.wetnessUniform) {
       this.wet = src.wetnessUniform;
-      for (const m of [this.solid, this.cloth, this.foliage, this.sign, this.paving]) {
+      for (const m of [this.solid, this.metal, this.cloth, this.foliage, this.sign, this.paving]) {
         m.needsUpdate = true;
       }
     }
@@ -882,7 +904,10 @@ export class DressKit {
   }
 
   get materials(): readonly THREE.MeshStandardMaterial[] {
-    return [this.solid, this.cloth, this.foliage, this.glow, this.sign, this.paving, this.water];
+    return [
+      this.solid, this.metal, this.cloth, this.foliage,
+      this.glow, this.sign, this.paving, this.water,
+    ];
   }
 
   release(holder?: object): void {

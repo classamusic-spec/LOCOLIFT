@@ -120,6 +120,7 @@ function sanitize(s: SettingsState): SettingsState {
     )
       ? s.colorBlindMode
       : 'none',
+    language: (['both', 'es', 'en'] as const).includes(s.language) ? s.language : 'both',
     showSpeedUnits: s.showSpeedUnits === 'kmh' ? 'kmh' : 'mph',
   };
 }

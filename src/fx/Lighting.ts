@@ -89,6 +89,35 @@ const CASCADE_FAR: Record<QualityTier, number> = { low: 0, medium: 0, high: 260,
 /** Share of the key light the near cascade carries. */
 const CASCADE_NEAR_SHARE = 0.58;
 
+/**
+ * **Off, and measured.**
+ *
+ * The split works and looks right — 3.1 cm near texels instead of 7.3 cm, and
+ * shadows that survive out to the fort. It is also unaffordable in this scene,
+ * and not marginally:
+ *
+ * | viewpoint | 1 cascade        | 2 cascades       | delta            |
+ * |-----------|------------------|------------------|------------------|
+ * | street    | 526 calls 2.24 M | 750 calls 3.45 M | +224 calls +1.22 M |
+ * | plaza     | 484 calls 2.23 M | 700 calls 3.39 M | +216 calls +1.17 M |
+ *
+ * (`high` tier, 1280x720, measured in-frame with `setCascadesForTest`.)
+ *
+ * The reason it costs so much more than a second 260 m box ought to is that
+ * most of the district is merged, district-wide meshes carrying
+ * `frustumCulled = false` — correct for the main pass, where per-object
+ * culling on a mesh that spans the map is useless, but it means every extra
+ * shadow *view* re-rasterises all of them in full. Shrinking the far box does
+ * not help; those meshes are drawn whatever its size.
+ *
+ * Grounding is instead delivered by the screen-space contact shadows in
+ * `PostEffects`, which cost eight depth taps inside a pass that already runs
+ * and no draw calls at all, and distance is carried by aerial perspective.
+ * Flip this to `true` (or call `setCascadesForTest(true)`) once the world
+ * layers gain shadow-specific LOD or per-view culling.
+ */
+const CASCADES_DEFAULT = false;
+
 /** How far up-light the shadow camera sits. Must clear the fort (43 m). */
 const SHADOW_DISTANCE = 260;
 
@@ -239,6 +268,8 @@ export class Lighting {
   private _weatherAmount = 0;
   private shadowsEnabled = true;
   private cascades = false;
+  /** QA override for `cascades`; null = follow the quality tier */
+  private cascadeOverride: boolean | null = null;
 
   /* lamp field */
   private lampSites: LampSite[] = [];
@@ -304,6 +335,13 @@ export class Lighting {
 
     this.buildLamps();
     this.refresh();
+
+    /* QA hook, mirroring `window.__loco`. The far cascade is the only thing in
+     * this module with a scene-scale draw cost; the harness has to be able to
+     * A/B it inside one frame. */
+    if (typeof window !== 'undefined') {
+      (window as unknown as { __locoLighting?: Lighting }).__locoLighting = this;
+    }
   }
 
   /* ------------------------------------------------------------- controls */
@@ -341,6 +379,23 @@ export class Lighting {
     this.focus.copy(p);
     this.focusTarget.copy(p);
     this.placeKeyLight();
+  }
+
+  /**
+   * QA/debug: force the far cascade off so its draw-call cost can be measured
+   * against the same frame. A second shadow map is a second full render of
+   * every caster inside its box, and that box is 260 m across — this is the
+   * one thing in this module with a scene-scale cost, so it needs to be
+   * measurable rather than argued about.
+   */
+  setCascadesForTest(on: boolean | null): void {
+    this.cascadeOverride = on;
+    this.configureShadow(this.quality);
+    this.sun.shadow.map?.dispose();
+    this.sun.shadow.map = null;
+    this.sunFar.shadow.map?.dispose();
+    this.sunFar.shadow.map = null;
+    this.refresh();
   }
 
   /** `amount` lets a shower fade in and out instead of snapping. */
@@ -474,7 +529,7 @@ export class Lighting {
 
   private configureShadow(tier: QualityTier): void {
     const map = QUALITY_BUDGET[tier].shadowMapSize;
-    this.cascades = CASCADE_FAR[tier] > 0;
+    this.cascades = this.cascadeOverride ?? (CASCADES_DEFAULT && CASCADE_FAR[tier] > 0);
 
     const nearExt = this.cascades ? CASCADE_NEAR[tier] : SHADOW_EXTENT[tier];
     this.setupShadowCamera(this.sun, nearExt, map);

@@ -726,7 +726,9 @@ export class PlazaLife implements WorldLayer {
       'plaza/treeBloom',
     );
     const benchMesh = this.addInstanced(buildBench(), kit.solid, this.benches, 'plaza/bench');
-    this.addInstanced(buildLampPost(true), kit.solid, this.lamps, 'plaza/lampPost');
+    // cast iron, not painted plastic — see `DressKit.metal`. Same mesh, same
+    // draw call, different BRDF.
+    this.addInstanced(buildLampPost(true), kit.metal, this.lamps, 'plaza/lampPost');
     this.addInstanced(buildLampGlobe(true), kit.glow, this.lamps, 'plaza/lampGlobe');
     const potMesh = this.addInstanced(buildDoorwayPot(rng.fork(0x14), true), kit.foliage, this.pots, 'plaza/pot');
     const palmMesh = this.addInstanced(buildPottedPalm(rng.fork(0x15)), kit.foliage, this.palms, 'plaza/palm');

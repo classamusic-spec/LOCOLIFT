@@ -28,6 +28,7 @@
 import './styles.css';
 import { clamp, clamp01 } from '../core/MathUtils';
 import type { SettingsState } from '../core/types';
+import { i18n } from './i18n';
 
 /* ------------------------------------------------------------------ tokens */
 
@@ -302,6 +303,29 @@ export class UITheme {
     return this.flashSafe ? 0 : 1;
   }
 
+  /**
+   * Amplitude multiplier for anything that *shakes* — HUD kick, timer jitter,
+   * combo slam. `settings.screenShake` is a player-authored 0..1 comfort dial
+   * and it governs the interface exactly as it governs the camera; motion
+   * suppression zeroes it outright.
+   *
+   * Every shake in `src/ui` multiplies its amplitude by this. Nothing shakes
+   * behind the player's back.
+   */
+  get shake(): number {
+    if (this.flashSafe) return 0;
+    return clamp01(this.settings?.screenShake ?? 1);
+  }
+
+  /**
+   * True when the HUD is allowed to pulse continuously — an always-on beat
+   * throb is exactly the kind of periodic luminance change `photosensitiveSafe`
+   * exists to remove, so it is gated separately from one-shot animation.
+   */
+  get canPulse(): boolean {
+    return !this.flashSafe;
+  }
+
   /** A duration in ms, stretched and de-punched when motion is suppressed. */
   duration(ms: number): number {
     return this.flashSafe ? Math.min(ms, 160) : ms;
@@ -377,6 +401,14 @@ export class UITheme {
     this.root.dataset.contrast = hc ? 'high' : 'normal';
     this.root.dataset.cb = mode;
     this.root.dataset.large = settings.largeText ? '1' : '0';
+
+    // Language. `data-lang` drives the CSS that hides one half of every static
+    // bilingual pair; `i18n.setMode` re-renders the composed strings that CSS
+    // cannot reach. Both are idempotent, so re-applying settings is free.
+    i18n.setMode(settings.language);
+    this.root.dataset.lang = settings.language;
+    this.root.lang = i18n.primaryLang;
+
     this.writeMotionState();
   }
 
@@ -499,6 +531,97 @@ export class ScaleSlot {
     if (Math.abs(value - this.last) < this.epsilon) return false;
     this.last = value;
     this.target.style.transform = `scaleX(${clamp01(value).toFixed(4)})`;
+    return true;
+  }
+
+  invalidate(): void {
+    this.last = Number.NaN;
+  }
+}
+
+/**
+ * A numeric custom property that is **registered** with `@property` in
+ * `styles.css`, written only when it moves past `epsilon`.
+ *
+ * The distinction matters and it is the whole reason this class exists
+ * separately from `VarSlot`. An *unregistered* custom property is an opaque
+ * token to the style engine: Chromium cannot prove it does not feed a
+ * geometry-affecting property, so every write dirties layout — that is the bug
+ * that once cost this HUD a layout pass on 121 of 121 sampled frames. A
+ * property declared `@property { syntax: '<number>' }` has a known type and a
+ * known set of consumers, and animating it stays off the layout path.
+ *
+ * **Contract:** the property named here must have an `@property` block in
+ * `styles.css`, and must only be consumed by paint-level properties (colour,
+ * opacity, box-shadow, filter). Feed it into a `width` and the layout comes
+ * straight back.
+ */
+export class NumSlot {
+  private last = Number.NaN;
+
+  constructor(
+    private readonly target: HTMLElement | SVGElement,
+    private readonly name: string,
+    private readonly epsilon = 0.004,
+    private readonly digits = 3,
+  ) {}
+
+  set(value: number): boolean {
+    if (Math.abs(value - this.last) < this.epsilon) return false;
+    this.last = value;
+    this.target.style.setProperty(this.name, value.toFixed(this.digits));
+    return true;
+  }
+
+  invalidate(): void {
+    this.last = Number.NaN;
+  }
+}
+
+/**
+ * A `transform` written straight onto an element, cached so an unchanged
+ * transform never reaches the DOM. Compositor-only on any element declaring
+ * `will-change: transform`.
+ *
+ * Values are quantised before the string is built (`.toFixed`), so a needle
+ * that is jittering in the fourth decimal writes nothing at all.
+ */
+export class TransformSlot {
+  private last = '';
+
+  constructor(private readonly target: HTMLElement | SVGElement) {}
+
+  set(value: string): boolean {
+    if (value === this.last) return false;
+    this.last = value;
+    this.target.style.transform = value;
+    return true;
+  }
+
+  /** Rotation in degrees about the element's own `transform-origin`. */
+  rotate(deg: number, digits = 2): boolean {
+    return this.set(`rotate(${deg.toFixed(digits)}deg)`);
+  }
+
+  invalidate(): void {
+    this.last = ' ';
+  }
+}
+
+/** An `opacity` written only when it moves. Compositor-only. */
+export class OpacitySlot {
+  private last = Number.NaN;
+
+  constructor(
+    private readonly target: HTMLElement | SVGElement,
+    private readonly epsilon = 0.01,
+  ) {}
+
+  set(value: number): boolean {
+    const v = clamp01(value);
+    if (Math.abs(v - this.last) < this.epsilon) return false;
+    this.last = v;
+    this.target.style.opacity = v.toFixed(3);
     return true;
   }
 

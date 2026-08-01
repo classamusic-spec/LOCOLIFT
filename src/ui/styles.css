@@ -1202,21 +1202,10 @@
   animation-play-state: var(--ll-anim-play);
 }
 
-.ll-nav__dist {
-  position: absolute;
-  left: 50%;
-  bottom: calc(-26px * var(--ll-ui-scale));
-  transform: translateX(-50%) rotate(calc(-1 * var(--turn, 0deg)));
-  font-size: var(--ll-fs-md);
-  font-weight: 900;
-  font-variant-numeric: tabular-nums;
-  color: var(--ll-paper);
-  white-space: nowrap;
-  text-shadow:
-    0 0 3px var(--ll-ink),
-    2px 2px 0 var(--ll-ink),
-    -2px 2px 0 var(--ll-ink);
-}
+/* `.ll-nav__dist` used to live here. Nothing builds that element — the
+   distance readout is `.ll-pin__dist`, on the world pin — and the rule was the
+   last consumer of the `--turn` custom property that `DestinationArrow` no
+   longer writes. Removed rather than left as a decoy. */
 
 .ll-wrongway {
   position: absolute;

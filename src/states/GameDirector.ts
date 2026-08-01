@@ -438,6 +438,8 @@ export class GameDirector implements System {
     }
 
     this.controller = controller;
+    /* a mode with no end has to bank as it goes, or a closed tab costs the lot */
+    this.score.setAutoBank(!controller.timed);
     this.score.beginShift(this.mode);
     this.missions.reset();
     this.combo.reset();
