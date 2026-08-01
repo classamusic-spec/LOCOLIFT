@@ -13,7 +13,7 @@
 import * as THREE from 'three';
 import { Engine } from './core/Engine';
 import { Input } from './core/Input';
-import { CONFIG } from './core/Config';
+import { CONFIG, QUALITY_PRESETS } from './core/Config';
 import { RNG } from './core/RNG';
 import type { GameContext, InputState, System } from './core/types';
 import { SettingsStore } from './settings/SettingsStore';
@@ -35,6 +35,7 @@ import { ScoreSystem } from './scoring/ScoreSystem';
 import { Progression } from './scoring/Progression';
 import { Relationships } from './scoring/Relationships';
 import { GameDirector, type EntryMode } from './states/GameDirector';
+import { QualityGovernor } from './core/QualityGovernor';
 import { PartyBusMode } from './states/PartyBusMode';
 import { RenderPipeline } from './fx/RenderPipeline'; // LOCOFX-TEMP-WIRING
 import { installShaderGuard } from './fx/ShaderGuard';
@@ -152,6 +153,8 @@ export interface LocoTestHook {
   bounds(): { minX: number; maxX: number; minZ: number; maxZ: number };
   /** Which vehicle is being driven. */
   vehicleId(): string;
+  /** Adaptive-quality state, or null when pinned off via `?governor=off`. */
+  governor(): Record<string, number | string | boolean> | null;
   /** Per-group mesh/triangle/instance breakdown, for budget triage. */
   sceneBreakdown(): Array<{ group: string; meshes: number; instanced: number; instances: number; triangles: number }>;
 }
@@ -228,13 +231,45 @@ async function boot(): Promise<void> {
   // "Calidad: MEDIUM" toast could never fire. Emit it on a real tier change
   // only; the audio system's listener re-applies the same idempotent trims.
   let lastTier = settingsStore.current.quality;
+  // Declared before the subscriber that closes over it: a `const` down-file
+  // would sit in the temporal dead zone for any settings write that happened
+  // in between, and that is a ReferenceError at boot rather than a type error.
+  let governor: QualityGovernor | null = null;
   settingsStore.subscribe((s) => {
     engine.applySettings(s);
     if (s.quality !== lastTier) {
       lastTier = s.quality;
       engine.bus.emit('game:quality', { tier: s.quality });
     }
+    // A change the governor did not make is the player's, and becomes its
+    // ceiling. `notifyManualChange` recognises and ignores its own moves.
+    governor?.notifyManualChange(s);
   });
+
+  /**
+   * Adaptive quality. `autoDetectQuality` guesses once from core count and
+   * device memory and, until now, nothing ever revisited that guess — an
+   * integrated GPU behind a fast CPU was handed `high` and kept it at 5 fps.
+   * `?governor=off` pins it for benchmarks, which must not move under
+   * measurement.
+   */
+  governor =
+    new URLSearchParams(location.search).get('governor') === 'off'
+      ? null
+      : new QualityGovernor({
+          getSettings: () => settingsStore.current,
+          apply: (tier, renderScale) => {
+            // One `patch`, not `setQuality` followed by `set`. Each write
+            // notifies, and every notification runs `engine.applySettings` —
+            // which recompiles shaders and reallocates render targets. Paying
+            // that twice to apply one rung would itself cause the stutter the
+            // governor is trying to remove.
+            settingsStore.patch({ ...QUALITY_PRESETS[tier], quality: tier, renderScale });
+          },
+          onChange: (rung, reason) => {
+            console.info(`[quality] auto-${reason} → ${rung.tier} @ ${rung.scale.toFixed(2)}x`);
+          },
+        });
 
   const input = new Input();
   engine.setInput(input.state);
@@ -387,6 +422,7 @@ async function boot(): Promise<void> {
   engine.add(progression);
   engine.add(relationships);
   // Before the UI: the director's marker/patience pump must land the same frame.
+  if (governor) engine.add(governor);
   engine.add(director);
   engine.add(camera);
   // After the camera: the listener is refreshed in lateUpdate from final transforms.
@@ -433,7 +469,7 @@ async function boot(): Promise<void> {
   engine.start();
 
   clearTimeout(watchdog);
-  installTestHook(engine, input, world, vehicle, camera, save, audio, director, missions, ui);
+  installTestHook(engine, input, world, vehicle, camera, save, audio, director, missions, ui, governor);
   hideBootSplash();
 }
 
@@ -460,6 +496,7 @@ function installTestHook(
   director: GameDirector,
   missions: MissionSystem,
   ui: UISystem,
+  governor: QualityGovernor | null,
 ): void {
   const text = (sel: string): string => document.querySelector(sel)?.textContent ?? '';
   const hook: LocoTestHook = {
@@ -610,6 +647,9 @@ function installTestHook(
     },
     vehicleId() {
       return vehicle.vehicleId;
+    },
+    governor() {
+      return governor ? governor.stats() : null;
     },
     sceneBreakdown() {
       const rows: Array<{ group: string; meshes: number; instanced: number; instances: number; triangles: number }> = [];
