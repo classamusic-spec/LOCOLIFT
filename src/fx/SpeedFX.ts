@@ -91,16 +91,23 @@ export const SPEED_SHADER = {
       uv = 0.5 + d * ( 1.0 + edge * punch * 0.055 );
     }
 
-    /* --- radial streak blur --- */
+    /* --- radial streak blur ---
+     * NOTE: this vector is deliberately NOT named \`step\`. A variable with a
+     * builtin's name hides that builtin for the rest of the scope, and the
+     * speed-lines block below calls \`step()\`. SwiftShader (headless capture)
+     * accepts the shadowing; desktop and mobile drivers reject the whole
+     * program with "'step' : function name expected", which black-screens the
+     * game because this pass sits mid-pipeline. Never name a local after a
+     * GLSL builtin. */
     float k = edge * clamp( uAmount + uBoost * 0.35, 0.0, 1.0 ) * ${MAX_BLUR.toFixed(3)};
-    vec2 step = ( uv - vec2( 0.5 ) ) * k;
+    vec2 streakStep = ( uv - vec2( 0.5 ) ) * k;
 
     vec3 acc = vec3( 0.0 );
     float wsum = 0.0;
     for ( int i = 0; i < LOCO_SPEED_SAMPLES; i ++ ) {
       float f = float( i ) / float( LOCO_SPEED_SAMPLES - 1 );
       float w = 1.0 - f * 0.45;
-      acc += texture2D( tDiffuse, uv - step * f ).rgb * w;
+      acc += texture2D( tDiffuse, uv - streakStep * f ).rgb * w;
       wsum += w;
     }
     vec3 col = acc / wsum;
@@ -109,8 +116,8 @@ export const SPEED_SHADER = {
      * every streak splits. Two extra fetches, not two extra loops. --- */
     float chroma = edge * clamp( uAmount * 0.55 + uBoost * 0.85, 0.0, 1.0 );
     if ( chroma > 0.004 ) {
-      float rt = texture2D( tDiffuse, uv - step * 1.35 ).r;
-      float bt = texture2D( tDiffuse, uv - step * 0.55 ).b;
+      float rt = texture2D( tDiffuse, uv - streakStep * 1.35 ).r;
+      float bt = texture2D( tDiffuse, uv - streakStep * 0.55 ).b;
       col.r = mix( col.r, rt, chroma * 0.55 );
       col.b = mix( col.b, bt, chroma * 0.55 );
     }

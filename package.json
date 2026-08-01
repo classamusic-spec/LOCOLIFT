@@ -6,10 +6,12 @@
   "description": "Loco Lift - a crazy arcade taxi game set in a stylized Old San Juan, Puerto Rico",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "node tools/glsl-lint.mjs && tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
+    "lint:glsl": "node tools/glsl-lint.mjs",
     "preview": "vite preview --port 4173",
     "smoke": "node tools/smoke.mjs",
+    "test:shaderguard": "node tools/shader-guard-test.mjs",
     "standalone": "node tools/bundle-standalone.mjs",
     "test:mobile": "node tools/mobile-test.mjs",
     "test:mobile:standalone": "node tools/mobile-test.mjs --file dist-standalone/loco-lift.html --out .captures-mobile-standalone"

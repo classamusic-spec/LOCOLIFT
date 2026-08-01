@@ -111,6 +111,19 @@ async function main() {
     await page.waitForTimeout(700);
     await shot('09-pause');
 
+    /* Every shader this run has touched has now compiled — the title, arcade,
+     * night, rain and sunset states between them exercise the whole chain.
+     *
+     * This assertion exists because a screenshot cannot prove a shader linked.
+     * Headless Chromium rasterises through SwiftShader, which accepted a
+     * `LocoSpeedFX` program that every real driver rejected; the captures
+     * stayed green while players got a black screen. So read the failures the
+     * driver actually reported instead of trusting the pixels. */
+    report.shaderFailures = await page.evaluate(
+      () => (window.__locoShaderFailures ?? []).map((f) => `${f.name} (${f.stage}): ${f.log}`),
+    );
+    for (const f of report.shaderFailures) errors.push(`shader: ${f}`);
+
     report.ok = errors.length === 0;
   } catch (err) {
     errors.push(`harness: ${err?.message ?? String(err)}`);

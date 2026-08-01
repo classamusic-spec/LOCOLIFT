@@ -34,6 +34,7 @@ import { ComboSystem } from './scoring/ComboSystem';
 import { ScoreSystem } from './scoring/ScoreSystem';
 import { GameDirector } from './states/GameDirector';
 import { RenderPipeline } from './fx/RenderPipeline'; // LOCOFX-TEMP-WIRING
+import { installShaderGuard } from './fx/ShaderGuard';
 
 /** How long boot may take before we tell the player something is wrong. */
 const BOOT_WATCHDOG_MS = 45_000;
@@ -132,6 +133,11 @@ async function boot(): Promise<void> {
   const settingsStore = new SettingsStore();
   const save = new SaveSystem();
   const engine = new Engine(canvas, settingsStore.current);
+
+  // Before a single material compiles. A GLSL program that fails to link is
+  // otherwise invisible here and fatal on the player's machine — see
+  // `fx/ShaderGuard.ts` for the incident that put this in.
+  installShaderGuard(engine.renderer);
 
   // First run on an unknown device: guess a tier rather than opening on high.
   if (!localStorage.getItem('locolift.settings.v1')) {

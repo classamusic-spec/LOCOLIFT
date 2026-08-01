@@ -136,6 +136,47 @@ interface LocoTestHook {
 }
 ```
 
+## Shaders: what the harness can and cannot prove
+
+**A screenshot does not prove a shader compiled.** This is not a caution, it is
+a measured result. `LocoSpeedFX` shipped declaring `vec2 step`, which hides the
+`step()` builtin for the rest of that scope. On the player's machine:
+
+```
+ERROR: 0:188: 'step' : function name expected
+WebGL: INVALID_OPERATION: useProgram: program not valid
+```
+
+That pass sits mid-chain, so no scene colour ever reached the framebuffer and
+the game drew its HUD over a black viewport. The bug was reintroduced
+deliberately and re-run through `tools/smoke.mjs`: **`ok: true`, zero errors,
+all 76 programs reported compiled.** Headless Chromium runs ANGLE on the
+SwiftShader/Vulkan backend, which lowers to SPIR-V where a name collision is
+meaningless; the player's ANGLE lowers to native GLSL and the driver's compiler
+rejects it. No headless configuration available here reproduces it.
+
+Three defences, in the order they fire:
+
+1. **`tools/glsl-lint.mjs`, in `npm run build`.** Scans every GLSL string for a
+   declaration whose identifier is a builtin function name. This is the only
+   defence that works in this environment — verified by reintroducing the bug
+   and watching it fail the build. **Never name a GLSL local, uniform or
+   varying after a builtin.**
+2. **`src/fx/ShaderGuard.ts`, installed in `main.ts` before anything
+   compiles.** Records every link failure to `SHADER_FAILURES` /
+   `window.__locoShaderFailures` with the material name (recovered from three's
+   `#define SHADER_NAME`) and the offending source lines. `smoke.mjs` and
+   `mobile-test.mjs` both fail the run if it is non-empty.
+3. **`RenderPipeline` drops the whole post chain on any link failure** and
+   forward-renders for the rest of the session. Blunt on purpose: three exposes
+   no material on the error callback, our world materials are unnamed, and
+   several of three's own post internals are unnamed too — so an unrecognised
+   name cannot be ruled *out* of the chain. Losing bloom and grading is a bad
+   frame; a dead mid-chain pass is no game. `tools/shader-guard-test.mjs`
+   proves it by corrupting the grade pass at runtime and asserting the viewport
+   is still lit (luma 0.36 healthy → 0.59 ungraded, with the DOM HUD hidden so
+   overlay pixels cannot mask a black canvas).
+
 ## Art direction (binding on every visual module)
 
 - **Old San Juan, not generic tropical.** Blue-grey *adoquín* cobblestone,

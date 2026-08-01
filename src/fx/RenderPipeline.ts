@@ -73,6 +73,7 @@ import type { GameContext, QualityTier, SettingsState, System } from '../core/ty
 import { GodRays } from './GodRays';
 import { POST_STATE } from './LightingPresets';
 import { CAS_SHADER, GRADE_SHADER, SCENE_FX_SHADER, ScreenFX } from './PostEffects';
+import { onShaderFailure, type ShaderFailure } from './ShaderGuard';
 import { SPEED_SAMPLES, SPEED_SHADER, SpeedDrive } from './SpeedFX';
 
 /* ------------------------------------------------------------ godray pass */
@@ -168,6 +169,10 @@ export class RenderPipeline implements System {
   private measureArmed = false;
   private costSample: { plain: number; withPost: number; overhead: number } | null = null;
 
+  /** Set once a shader link failure has forced the chain off for good. */
+  private brokenBy: string | null = null;
+  private unsubscribeShaderGuard: (() => void) | null = null;
+
   constructor(
     renderer: THREE.WebGLRenderer,
     scene: THREE.Scene,
@@ -248,12 +253,46 @@ export class RenderPipeline implements System {
     renderer.getSize(this.sizeProbe);
     this.setSize(this.sizeProbe.x, this.sizeProbe.y);
 
+    this.unsubscribeShaderGuard = onShaderFailure((f) => this.onShaderFailure(f));
+
     /* QA hook, mirroring `window.__loco`. The harness needs to A/B the chain
      * at runtime — measuring the post cost by rebuilding twice measures the
      * rest of the district drifting under it as well. */
     if (typeof window !== 'undefined') {
       (window as unknown as { __locoFx?: RenderPipeline }).__locoFx = this;
     }
+  }
+
+  /**
+   * A GLSL program failed to link. Drop the chain and forward-render forever.
+   *
+   * The rule is deliberately blunt: *any* link failure kills post, not just one
+   * we can attribute to a pass in this file. Attribution is not actually
+   * available — three only exposes the material name through
+   * `#define SHADER_NAME`, our world materials are unnamed, and several of
+   * three's own post internals (the bloom blur chain, the SMAA stages) are
+   * unnamed too. So a name we do not recognise cannot be ruled *out* of the
+   * chain, and a dead pass mid-chain means no scene colour ever reaches the
+   * framebuffer — the black screen this whole guard exists to prevent.
+   *
+   * The false-positive cost is a world material breaking and the player also
+   * losing bloom and grading. That is a bad frame. A black screen is no game.
+   * Taking the bad frame is the right trade, and the console names what broke.
+   */
+  private onShaderFailure(f: ShaderFailure): void {
+    if (this.brokenBy !== null) return;
+    this.brokenBy = f.name;
+    if (!this.enabled) return;
+    console.warn(
+      `[renderPipeline] post-processing disabled for this session: ` +
+        `'${f.name}' failed to link. Rendering the scene forward instead.`,
+    );
+    this.applyQuality();
+  }
+
+  /** Name of the shader that forced the chain off, or null if it is healthy. */
+  get failedShader(): string | null {
+    return this.brokenBy;
   }
 
   /**
@@ -354,7 +393,9 @@ export class RenderPipeline implements System {
     const tier = this.quality;
 
     // §6.3 / QUALITY_PRESETS: post is off entirely on low (phones).
-    this.enabled = tier !== 'low' && s.postProcessing !== false;
+    // `brokenBy` is latched by `onShaderFailure` and never clears — a program
+    // that failed to link will fail again on the next quality change.
+    this.enabled = tier !== 'low' && s.postProcessing !== false && this.brokenBy === null;
     const heavy = tier === 'high' || tier === 'ultra';
 
     const wantAO = this.enabled && s.ssao !== false && heavy;
@@ -530,6 +571,8 @@ export class RenderPipeline implements System {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.unsubscribeShaderGuard?.();
+    this.unsubscribeShaderGuard = null;
     this.screenFX.dispose();
     this.godRays.dispose();
     this.renderPass.dispose?.();
@@ -554,6 +597,7 @@ export class RenderPipeline implements System {
   stats(): Record<string, number> {
     return {
       postEnabled: this.enabled ? 1 : 0,
+      shaderBroken: this.brokenBy === null ? 0 : 1,
       passes: this.composer.passes.filter((p) => p.enabled).length,
       sceneFx: this.sceneFxPass.enabled ? 1 : 0,
       godRays: this.godRays.active ? 1 : 0,

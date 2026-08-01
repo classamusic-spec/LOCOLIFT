@@ -1048,6 +1048,14 @@ async function runProfile(browser, profile, baseUrl, report) {
       for (const p of data.problems) entry.problems.push({ step, ...p });
       for (const w of data.warnings) entry.warnings.push({ step, ...w });
     }
+
+    /* A phone screenshot proves even less than a desktop one: the DOM controls
+     * draw over the canvas, so a dead render chain still produces a plausible
+     * looking frame. Ask the driver what failed to link instead. */
+    for (const f of await page.evaluate(() => window.__locoShaderFailures ?? [])) {
+      entry.problems.push({ kind: 'shader', detail: `${f.name} (${f.stage}): ${f.log}` });
+    }
+
     entry.ok = entry.problems.length === 0 && errors.length === 0;
   } catch (err) {
     entry.problems.push({ kind: 'harness', detail: err?.message ?? String(err) });
