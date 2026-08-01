@@ -129,6 +129,19 @@ interface MaterialSpec extends SurfaceFinish {
  * Finish presets. §5's roughness/porosity numbers for Old San Juan surfaces win
  * over any reference sheet built for a kart track; what is borrowed from the
  * reference is the *method* — a real clearcoat lobe and non-flat roughness.
+ *
+ * **On the `macro*` amplitudes.** §2.3 asks for a macro multiply layer at 23.7 m
+ * swinging **±14 %** in value and a mega layer at 71.3 m swinging **±9 %**. The
+ * shader applies them as `1 + locoVar * macroValue * 2`, and `locoVar` is a
+ * 0.7/0.3 blend of two value-noise octaves, so it sits around ±0.25 typical and
+ * ±0.5 at the extremes. A `macroValue` of 0.07 therefore delivered ±3.5 %
+ * typical / ±7 % peak — a quarter of spec, and invisible at speed.
+ *
+ * The market floor is what exposed it: ~60 m of unbroken flagstone at a 3 m tile
+ * where the repeating motif is identifiable well inside the §2.3.6 30 m
+ * acceptance distance, because nothing was breaking it up. These values put the
+ * peak swing on spec. They cost nothing — the noise lookups already happen, only
+ * the multiplier changed.
  */
 const PAVED: SurfaceFinish = {
   porosity: 0.85,
@@ -137,39 +150,70 @@ const PAVED: SurfaceFinish = {
   coat: 0.1,
   wetCoat: 1.0,
   coatRough: 0.34,
-  wetCoatRough: 0.06,
+  /**
+   * 0.13, not the 0.06 this started at — and the reason is worth writing down,
+   * because 0.06 is the number the reference sheets quote and it is the wrong
+   * one *here*.
+   *
+   * §2.4 puts wet adoquín at roughness **0.30** and reserves **0.06** for
+   * standing puddles. Setting the coat to 0.06 everywhere treats the whole
+   * street as a puddle, and with only punctual lights and an almost-black night
+   * environment cube to reflect, a near-mirror lobe returns a *small tight dot*
+   * under each lamp. The elongated smear §2.4 asks for — "reflections of lamp
+   * light stretch 6–14 m down the street" — is a GGX lobe of moderate width
+   * seen at a grazing angle; tightening the lobe shortens it.
+   *
+   * So the general wet street sits at 0.13 and the puddle term (which already
+   * multiplies this by `1 - puddle * 0.75`) still drives pools down to the
+   * 0.0525 floor. That restores the §2.4 contrast between "wet" and "puddle"
+   * instead of flattening both to mirror.
+   */
+  wetCoatRough: 0.13,
   puddle: 1.0,
-  macroRough: 0.2,
-  macroValue: 0.07,
+  macroRough: 0.3,
+  macroValue: 0.13,
 };
 
+/**
+ * Losa canaria, flagstone, kerbstone — and no clearcoat, deliberately.
+ *
+ * These carried a coat for one revision and it did not survive costing. The
+ * clearcoat lobe is a whole second BRDF per light plus its own IBL sample, paid
+ * per *fragment*, so what it costs is the screen area it covers — and the plaza,
+ * the market square, the promenade and every sidewalk in the district together
+ * cover far more ground pixels than the carriageway does.
+ *
+ * What it bought there was not in the brief and not in the reference: §5 gives
+ * losa canaria, kerb stone and asphalt patch a wet *roughness collapse*
+ * (0.80 → 0.28, 0.84 → 0.32, 0.88 → 0.20) and no coat at all. The rows that do
+ * ask for one are painted wood, varnished mahogany, azulejo and vehicle paint —
+ * all of which are on the façade atlas or the vehicle, not underfoot. Basalt
+ * paving slabs in rain are wet stone, not lacquer.
+ *
+ * So they keep the whole §5.1 wet model and the puddle mask, which is what
+ * actually sells rain on a pavement, and stay `MeshStandardMaterial`.
+ */
 const SLAB: SurfaceFinish = {
   porosity: 0.7,
   wetAlbedo: 0.6,
-  coat: 0.07,
-  wetCoat: 0.85,
-  coatRough: 0.3,
-  wetCoatRough: 0.08,
   puddle: 0.45,
-  macroRough: 0.17,
-  macroValue: 0.06,
+  macroRough: 0.27,
+  macroValue: 0.12,
 };
 
+/** Asphalt. §5's "Asphalt patch" row: rough → 0.20 wet, no coat. */
 const SEALED: SurfaceFinish = {
   porosity: 0.7,
   wetAlbedo: 0.6,
-  coat: 0.05,
-  wetCoat: 0.9,
-  coatRough: 0.28,
-  wetCoatRough: 0.05,
   puddle: 0.85,
-  macroRough: 0.22,
-  macroValue: 0.05,
+  // asphalt is laid in lands and patched: it is the *most* blotchy thing here
+  macroRough: 0.32,
+  macroValue: 0.11,
 };
 
 /** No clearcoat: matte masonry and landscape. Still gets spatial roughness. */
-const MASONRY: SurfaceFinish = { porosity: 0.95, wetAlbedo: 0.7, macroRough: 0.2, macroValue: 0.07 };
-const SOFT: SurfaceFinish = { porosity: 0.7, wetAlbedo: 0.85, macroRough: 0.24, macroValue: 0.08 };
+const MASONRY: SurfaceFinish = { porosity: 0.95, wetAlbedo: 0.7, macroRough: 0.26, macroValue: 0.11 };
+const SOFT: SurfaceFinish = { porosity: 0.7, wetAlbedo: 0.85, macroRough: 0.3, macroValue: 0.13 };
 
 const SPECS: Record<MaterialId, MaterialSpec> = {
   /* — carriageways — */
@@ -188,13 +232,20 @@ const SPECS: Record<MaterialId, MaterialSpec> = {
   /* — open areas — */
   plazaFlagstone: { surface: 'flagstone', tile: 4.2, color: 0xfffaf0, roughness: 1, metalness: 0, normal: 0.8, wetness: 1, ...SLAB },
   plazaCobble: { surface: 'cobblestone', tile: 1.9, color: 0xf6f6f8, roughness: 1, metalness: 0, normal: 1, wetness: 1, ...PAVED },
-  marketFloor: { surface: 'flagstone', tile: 3.0, color: 0xe9cfae, roughness: 1, metalness: 0, normal: 0.7, wetness: 1, ...SLAB },
+  // the market square is the single largest unbroken run of one material in the
+  // district — ~60 m with no kerb, no gutter and no camber to break it up — so
+  // it carries the §2.3 macro layers at the top of their range
+  marketFloor: { surface: 'flagstone', tile: 3.0, color: 0xe9cfae, roughness: 1, metalness: 0, normal: 0.7, wetness: 1, ...SLAB, macroRough: 0.34, macroValue: 0.17 },
   promenade: { surface: 'flagstone', tile: 3.4, color: 0xf4ecdc, roughness: 1, metalness: 0, normal: 0.8, wetness: 1, ...SLAB },
   apron: { surface: 'asphalt', tile: 5.5, color: 0xcfcfcf, roughness: 1, metalness: 0, normal: 0.9, wetness: 1, ...SEALED },
 
   /* — landscape — */
   terrain: { surface: 'grass', tile: 5.5, color: 0xa9b98d, roughness: 1, metalness: 0, normal: 0.6, wetness: 0.6, ...SOFT, porosity: 0.6 },
-  sand: { surface: 'sand', tile: 5.0, color: 0xffffff, roughness: 1, metalness: 0, normal: 1, wetness: 0.9, porosity: 0.8, wetAlbedo: 0.7, macroRough: 0.18, macroValue: 0.06, coat: 0, wetCoat: 0.7, coatRough: 0.3, wetCoatRough: 0.1, puddle: 0.3 },
+  // No coat: `Coast` owns the beach, and its own sand material already carries a
+  // wet-only lobe keyed to the animated tideline, which is where a sheet of
+  // water actually exists. This one is the dry inland patches — a coat here
+  // would pay for a highlight on sand that is never under water.
+  sand: { surface: 'sand', tile: 5.0, color: 0xffffff, roughness: 1, metalness: 0, normal: 1, wetness: 0.9, porosity: 0.8, wetAlbedo: 0.7, macroRough: 0.24, macroValue: 0.09, puddle: 0.3 },
   grass: { surface: 'grass', tile: 4.0, color: 0xffffff, roughness: 1, metalness: 0, normal: 1, wetness: 0.5, ...SOFT, porosity: 0.6 },
 
   /* — water — */
@@ -203,7 +254,11 @@ const SPECS: Record<MaterialId, MaterialSpec> = {
 
   /* — vertical surfaces later modules will want — */
   fortStone: { surface: 'sandstone', tile: 4.5, color: PALETTE.fortStone, roughness: 1, metalness: 0, normal: 1, wetness: 0.8, ...MASONRY },
-  stucco: { surface: 'stucco', tile: 3.2, color: 0xffffff, roughness: 1, metalness: 0, normal: 1, wetness: 0.7, porosity: 0.9, wetAlbedo: 0.8, macroRough: 0.26, macroValue: 0.09 },
+  // §5 painted lime stucco is matte and gets no coat, but §8.17 and §8.19 are
+  // both about walls: one trowel at one phase, one gloss level everywhere. The
+  // value swing stays under the paving's — a wall is read at 3 m, not 40, and
+  // blotchy render reads as damp rather than as variation.
+  stucco: { surface: 'stucco', tile: 3.2, color: 0xffffff, roughness: 1, metalness: 0, normal: 1, wetness: 0.7, porosity: 0.9, wetAlbedo: 0.8, macroRough: 0.3, macroValue: 0.1 },
   // §5 azotea/tile: glazed clay goes properly glossy in rain and is read from
   // the ramparts and every balcony, so it earns a wet-only coat.
   roofTile: { surface: 'roofTile', tile: 2.2, color: 0xffffff, roughness: 1, metalness: 0, normal: 1, wetness: 0.9, porosity: 0.6, wetAlbedo: 0.66, macroRough: 0.2, macroValue: 0.08, coat: 0, wetCoat: 0.6, coatRough: 0.3, wetCoatRough: 0.09, puddle: 0.2 },

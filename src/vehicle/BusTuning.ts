@@ -524,8 +524,8 @@ export const BUS_TERRAIN: TerrainTuning = {
   surfaceDragForce: 11000,
   kerbStep: 0.06,
   kerbMinSpeed: 8,
-  kerbKick: 130,
-  kerbKickMax: 5200,
+  kerbKick: 380,
+  kerbKickMax: 14000,
   kerbCooldown: 0.34,
 };
 

@@ -333,10 +333,10 @@ export const PRESETS: readonly LightingPreset[] = [
     aerialColor: 0xd9a882,
     aerialStrength: 0.7,
     shimmer: 0,
-    gradeShadowTint: 0x8c9ad0,
-    gradeHighlightTint: 0xffd2a0,
+    gradeShadowTint: 0xffc49a,
+    gradeHighlightTint: 0xd6e4ff,
     gradeSplit: 0.65,
-    gradeSaturation: 1.1,
+    gradeSaturation: 1.35,
     gradeContrast: 1.06,
     gradeLiftColor: 0x1a1c2e,
     gradeLift: 0.038,
@@ -387,7 +387,7 @@ export const PRESETS: readonly LightingPreset[] = [
     gradeShadowTint: 0xffc98e,
     gradeHighlightTint: 0xdcecff,
     gradeSplit: 0.7,
-    gradeSaturation: 1.08,
+    gradeSaturation: 1.55,
     gradeContrast: 1.1,
     gradeLiftColor: 0x0e1a28,
     gradeLift: 0.03,
@@ -412,7 +412,7 @@ export const PRESETS: readonly LightingPreset[] = [
     envIntensity: 1.0,
     fogColor: 0xc6dcec,
     fogDensity: 0.0009,
-    exposure: 0.95,
+    exposure: 1.0,
     bloomStrength: 0.34,
     bloomThreshold: 0.94,
     skyZenith: 0x2e7bc4,
@@ -440,7 +440,7 @@ export const PRESETS: readonly LightingPreset[] = [
     gradeShadowTint: 0xffbf7d,
     gradeHighlightTint: 0xd4e8ff,
     gradeSplit: 0.85,
-    gradeSaturation: 1.10,
+    gradeSaturation: 1.60,
     gradeContrast: 1.14,
     gradeLiftColor: 0x0e1a28,
     gradeLift: 0.028,
@@ -459,10 +459,10 @@ export const PRESETS: readonly LightingPreset[] = [
     sunEl: 24,
     sunColor: 0xffd9a8,
     sunIntensity: 3.9,
-    hemiSky: 0x8fb6de,
+    hemiSky: 0x9dbcd8,
     hemiGround: 0x7a6248,
     hemiIntensity: 0.72,
-    ambientColor: 0x9aaec4,
+    ambientColor: 0xa8aab0,
     ambientIntensity: 0.24,
     bounceColor: 0xd8a468,
     bounceIntensity: 0.66,
@@ -492,10 +492,10 @@ export const PRESETS: readonly LightingPreset[] = [
     aerialColor: 0xdcc6a8,
     aerialStrength: 0.68,
     shimmer: 0.35,
-    gradeShadowTint: 0x8fa8e0,
-    gradeHighlightTint: 0xffdcb0,
-    gradeSplit: 0.8,
-    gradeSaturation: 1.10,
+    gradeShadowTint: 0xffc48e,
+    gradeHighlightTint: 0xcfe2ff,
+    gradeSplit: 0.75,
+    gradeSaturation: 1.75,
     gradeContrast: 1.13,
     gradeLiftColor: 0x101c2c,
     gradeLift: 0.03,
@@ -510,7 +510,7 @@ export const PRESETS: readonly LightingPreset[] = [
     sunEl: 8,
     sunColor: 0xffa85c,
     sunIntensity: 3.6,
-    hemiSky: 0x7fa8d8,
+    hemiSky: 0x8fa8c8,
     hemiGround: 0x6b4e3a,
     hemiIntensity: 0.6,
     ambientColor: 0x93849a,
@@ -520,7 +520,7 @@ export const PRESETS: readonly LightingPreset[] = [
     envIntensity: 1.0,
     fogColor: 0xe8a56b,
     fogDensity: 0.0018,
-    exposure: 1.12,
+    exposure: 1.22,
     bloomStrength: 0.78,
     bloomThreshold: 0.90,
     skyZenith: 0x2f5a9c,
@@ -543,10 +543,10 @@ export const PRESETS: readonly LightingPreset[] = [
     aerialColor: 0xffab63,
     aerialStrength: 0.82,
     shimmer: 0,
-    gradeShadowTint: 0x7f9ae0,
-    gradeHighlightTint: 0xffd08c,
-    gradeSplit: 0.95,
-    gradeSaturation: 1.12,
+    gradeShadowTint: 0xffb877,
+    gradeHighlightTint: 0xcfe0ff,
+    gradeSplit: 0.8,
+    gradeSaturation: 1.55,
     gradeContrast: 1.12,
     gradeLiftColor: 0x171e38,
     gradeLift: 0.036,
@@ -597,7 +597,7 @@ export const PRESETS: readonly LightingPreset[] = [
     gradeShadowTint: 0x8a9ad8,
     gradeHighlightTint: 0xffc38c,
     gradeSplit: 0.85,
-    gradeSaturation: 1.06,
+    gradeSaturation: 1.25,
     gradeContrast: 1.1,
     gradeLiftColor: 0x141c34,
     gradeLift: 0.045,
@@ -623,8 +623,8 @@ export const PRESETS: readonly LightingPreset[] = [
     fogColor: 0x101828,
     fogDensity: 0.0034,
     exposure: 1.10,
-    bloomStrength: 0.85,
-    bloomThreshold: 0.70,
+    bloomStrength: 0.45,
+    bloomThreshold: 0.78,
     skyZenith: 0x050b1c,
     skyHorizon: 0x101b33,
     skyBand: 0x18243c,
@@ -710,6 +710,7 @@ interface WeatherVariant {
   gradeContrast: number;
   vignetteBoost: number;
   grain: number;
+  gradeLift: number;
 }
 
 const RAIN: WeatherVariant = {
@@ -720,12 +721,12 @@ const RAIN: WeatherVariant = {
   hemiGround: 0x4a4f52,
   hemiIntensity: 0.85,
   ambientColor: 0x8695a0,
-  ambientIntensity: 0.34,
+  ambientIntensity: 0.42,
   bounceScale: 0.45,
   envScale: 1.0,
   fogColor: 0x97a5ae,
   fogDensity: 0.0038,
-  exposure: 1.1,
+  exposure: 1.46,
   bloomStrength: 0.62,
   // a wet street is nothing but specular highlights; drop the gate so they glow
   bloomThreshold: 0.86,
@@ -744,12 +745,13 @@ const RAIN: WeatherVariant = {
   godRays: 0.3,
   aerialColor: 0x9aa8b2,
   aerialStrength: 0.85,
-  gradeShadowTint: 0x8fa8c8,
-  gradeHighlightTint: 0xffe0bc,
-  gradeSaturation: 1.02,
-  gradeContrast: 1.14,
+  gradeShadowTint: 0x9fb0c4,
+  gradeHighlightTint: 0xffebd2,
+  gradeSaturation: 1.45,
+  gradeContrast: 1.12,
   vignetteBoost: 0.05,
   grain: 0.016,
+  gradeLift: 0.05,
 };
 
 /**
@@ -777,12 +779,12 @@ const STORM: WeatherVariant = {
   hemiGround: 0x31352b,
   hemiIntensity: 0.8,
   ambientColor: 0x69725d,
-  ambientIntensity: 0.36,
+  ambientIntensity: 0.44,
   bounceScale: 0.28,
   envScale: 0.95,
   fogColor: 0x6d7663,
   fogDensity: 0.0068,
-  exposure: 1.14,
+  exposure: 1.48,
   bloomStrength: 0.7,
   bloomThreshold: 0.85,
   skyZenith: 0x242b22,
@@ -802,10 +804,11 @@ const STORM: WeatherVariant = {
   aerialStrength: 0.95,
   gradeShadowTint: 0x9ab0c0,
   gradeHighlightTint: 0xffe4b0,
-  gradeSaturation: 0.98,
-  gradeContrast: 1.18,
+  gradeSaturation: 1.60,
+  gradeContrast: 1.14,
   vignetteBoost: 0.09,
   grain: 0.022,
+  gradeLift: 0.062,
 };
 
 /* ------------------------------------------------------------------- math */
@@ -1160,6 +1163,7 @@ function applyVariant(s: LightingState, v: WeatherVariant, wa: number, azOffsetD
   s.gradeContrast = lerp(s.gradeContrast, v.gradeContrast, wa);
   s.vignetteBoost = lerp(s.vignetteBoost, v.vignetteBoost, wa);
   s.grain = lerp(s.grain, v.grain, wa);
+  s.gradeLift = lerp(s.gradeLift, v.gradeLift, wa);
 }
 
 /* --------------------------------------------------------- post-fx bridge */
@@ -1254,14 +1258,36 @@ export const POST_STATE: PostState = {
 const _tint = new THREE.Color();
 
 /**
+ * Maximum per-channel deviation from neutral a split-tone may apply.
+ *
+ * This exists because normalising a tint to luminance 1 preserves *exposure*
+ * but does nothing to bound *chroma*, and the two are easy to confuse. A tint
+ * authored as `#FFBF7D` normalises to `(1.69, 0.86, 0.36)` — a multiply that
+ * removes two thirds of the blue channel. On a sunny frame that reads as a
+ * warm grade; on an overcast one, where every pixel sits in the shadow half of
+ * the split, it turns the entire district sepia. That was a real capture.
+ *
+ * 0.16 keeps the grade inside roughly ±1/6 stop per channel, which is where
+ * film split-toning actually lives.
+ */
+const TINT_MAX_DEVIATION = 0.16;
+
+/**
  * Normalise a tint to luminance 1 so it shifts hue without moving exposure,
- * then walk it back toward white by `1 - split`.
+ * clamp how far from neutral it is allowed to travel, then walk it back toward
+ * white by `1 - split`.
  */
 function bakeTint(src: THREE.Color, split: number, out: THREE.Color): void {
   _tint.copy(src);
   const lum = 0.2126 * _tint.r + 0.7152 * _tint.g + 0.0722 * _tint.b;
   if (lum > 1e-4) _tint.multiplyScalar(1 / lum);
-  out.setRGB(lerp(1, _tint.r, split), lerp(1, _tint.g, split), lerp(1, _tint.b, split));
+  const lo = 1 - TINT_MAX_DEVIATION;
+  const hi = 1 + TINT_MAX_DEVIATION;
+  out.setRGB(
+    lerp(1, clamp(_tint.r, lo, hi), split),
+    lerp(1, clamp(_tint.g, lo, hi), split),
+    lerp(1, clamp(_tint.b, lo, hi), split),
+  );
 }
 
 /** Push the parts of a lighting state the composer needs. Called by `Lighting`. */

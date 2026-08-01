@@ -184,6 +184,21 @@ export const MISSION_TUNING = {
   scrapeImpulse: 420,
 } as const;
 
+/**
+ * What `setDiscoveryMode(true)` changes. Free roam has no clock, so the only
+ * thing standing between the player and a fare is whether they can *see* one.
+ */
+export const DISCOVERY = {
+  /** fares standing on the street at once */
+  waiting: 8,
+  /** they wait roughly four minutes rather than one */
+  patienceScale: 3.4,
+  /** beacon columns stand this much taller */
+  beaconReach: 2.1,
+  /** …and shout from this much further away (95 m → ~180 m) */
+  noticeScale: 1.9,
+} as const;
+
 /* ------------------------------------------------------ special missions */
 
 export type { SpecialMissionDef, MapRegion, WeatherKind } from './MissionCatalog';
@@ -311,6 +326,21 @@ export class MissionSystem implements System {
   private elapsed = 0;
   private running = false;
 
+  /**
+   * Seconds handed to the *next* fare's ride allowance on top of the distance
+   * par. Free roam uses this to roll unspent shift time into the run the player
+   * just accepted, so the HUD clock and the ride deadline are the same number.
+   * Consumed on pickup; zero everywhere else, so arcade is untouched.
+   */
+  private rideCarry = 0;
+  /** multiplies how long an ordinary fare stands on the kerb before giving up */
+  private waitPatienceScale = 1;
+  /** beacon height and hail-announcement radius multipliers, 1 = authored */
+  private beaconReach = 1;
+  private noticeScale = 1;
+  /** how many fares the street holds right now; free roam widens it */
+  private waitBudget: number;
+
   private deliveries = 0;
   private failures = 0;
   private sinceSpecial = 0;
@@ -369,6 +399,7 @@ export class MissionSystem implements System {
     this.combo = opts.combo ?? null;
     this.rng = opts.rng ?? new RNG(0x10c0_fa2e);
     this.maxWaiting = opts.maxWaiting ?? MISSION_TUNING.maxWaiting;
+    this.waitBudget = this.maxWaiting;
     this.heavyImpulse = opts.heavyImpulse ?? MISSION_TUNING.heavyImpulse;
     this.useVehicleSeat = opts.useVehicleSeatVisual ?? false;
 
@@ -517,6 +548,7 @@ export class MissionSystem implements System {
     this.spawnTimer = 0;
     this.storyActiveId = null;
     this.storyResolved = null;
+    this.rideCarry = 0;
     this.dialogue.reset(0);
   }
 
@@ -573,6 +605,79 @@ export class MissionSystem implements System {
     if (this.active?.special) return this.active.special.id;
     if (this.cart) return 'runaway-cart';
     return null;
+  }
+
+  /* ------------------------------------------------- the free-roam knobs */
+
+  /**
+   * Seconds to fold into the *next* fare's deadline on top of its distance par.
+   *
+   * Free roam has no shift clock of its own: whatever time is left on the HUD
+   * when a fare is accepted becomes part of that fare's allowance, so the one
+   * visible number is also the real deadline. Set it every frame while roaming;
+   * it is consumed the moment someone gets in.
+   */
+  setRideCarrySeconds(seconds: number): void {
+    this.rideCarry = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+  }
+
+  /**
+   * Scale how long an ordinary fare waits on the kerb. Free roam runs this well
+   * above 1 — you are meant to *find* people, not race their patience — while
+   * the arcade shift leaves it at the archetype's authored value.
+   */
+  setWaitPatienceScale(scale: number): void {
+    this.waitPatienceScale = Number.isFinite(scale) ? clamp(scale, 0.25, 12) : 1;
+  }
+
+  get waitPatience(): number {
+    return this.waitPatienceScale;
+  }
+
+  /**
+   * How many fares stand on the street at once. Clamped to the configured
+   * maximum below, and to twice it above, so a caller cannot flood the city.
+   */
+  setWaitingBudget(count: number): void {
+    if (!Number.isFinite(count)) return;
+    this.waitBudget = Math.round(clamp(count, 1, this.maxWaiting * 2));
+  }
+
+  get waitingBudget(): number {
+    return this.waitBudget;
+  }
+
+  /**
+   * Discovery mode: the whole free-roam contract in one call.
+   *
+   * On, the street holds more people, they wait far longer, their beacons stand
+   * taller and they announce themselves from further out — because in free roam
+   * *finding* somebody is the verb, and a fare that walks off before you have
+   * turned the corner is not a challenge, it is a bug you can feel. Off restores
+   * the arcade values exactly.
+   */
+  setDiscoveryMode(on: boolean): void {
+    if (on) {
+      this.setWaitPatienceScale(DISCOVERY.patienceScale);
+      this.setWaitingBudget(DISCOVERY.waiting);
+      this.beaconReach = DISCOVERY.beaconReach;
+      this.noticeScale = DISCOVERY.noticeScale;
+    } else {
+      this.setWaitPatienceScale(1);
+      this.setWaitingBudget(this.maxWaiting);
+      this.beaconReach = 1;
+      this.noticeScale = 1;
+    }
+  }
+
+  /** Seconds left on the ride in progress, or 0 when nobody is aboard. */
+  get rideSecondsLeft(): number {
+    return this.active ? Math.max(0, this.active.left) : 0;
+  }
+
+  /** The deadline that ride was given, or 0 when nobody is aboard. */
+  get rideAllowance(): number {
+    return this.active ? this.active.allowance : 0;
   }
 
   /** What the HUD patience bar shows: ride clock while aboard, else 1. */
@@ -854,7 +959,9 @@ export class MissionSystem implements System {
       models: this.models,
       beacons: this.beacons,
       /* a story beat waits for you; an ordinary special is merely patient */
-      patienceScale: special ? (special.story ? 4 : 1.8) : 1,
+      patienceScale: (special ? (special.story ? 4 : 1.8) : 1) * this.waitPatienceScale,
+      beaconReach: this.beaconReach,
+      noticeScale: this.noticeScale,
     });
     p.spawn(this.group);
     this.waiting.push(p);
@@ -891,11 +998,11 @@ export class MissionSystem implements System {
     if (this.cart) this.updateCart(dt, vx, vz);
 
     /* keep the street populated */
-    if (!this.active || this.waiting.length < this.maxWaiting) {
+    if (!this.active || this.waiting.length < this.waitBudget) {
       this.spawnTimer -= dt;
       if (this.spawnTimer <= 0) {
         this.spawnTimer = MISSION_TUNING.spawnInterval;
-        if (this.waiting.length < this.maxWaiting) {
+        if (this.waiting.length < this.waitBudget) {
           const pending = this.pendingSpecial;
           const anchored =
             pending !== null &&
@@ -1014,7 +1121,14 @@ export class MissionSystem implements System {
       destination.pos.z - p.position.z,
     );
     const par = parTimeFor(dist);
-    const allowance = special ? special.timeLimit : rideAllowanceFor(par);
+    /*
+     * Whatever the caller banked and did not spend rides along with the fare.
+     * Zero in every timed mode, so this is a no-op there; in free roam it is
+     * what makes the one clock on screen also be the fare's real deadline.
+     */
+    const carry = this.rideCarry;
+    this.rideCarry = 0;
+    const allowance = (special ? special.timeLimit : rideAllowanceFor(par)) + carry;
 
     const ride = blankRide(p.archetype);
     ride.routeDistance = dist;

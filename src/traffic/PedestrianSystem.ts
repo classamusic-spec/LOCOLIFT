@@ -72,6 +72,13 @@ export interface PedPlayerRef {
   readonly position: THREE.Vector3;
   readonly velocity: THREE.Vector3;
   readonly speed: number;
+  /**
+   * Chassis orientation. Optional so any stand-in still satisfies the shape,
+   * but supplying it matters: the anti-tunnelling sweep is aligned to *travel*,
+   * and a drifting car's bodywork is nowhere near its direction of travel. See
+   * {@link PedestrianSystem.enforceClearance}.
+   */
+  readonly quaternion?: THREE.Quaternion;
 }
 
 export interface PedestrianSystemOpts {
@@ -264,8 +271,18 @@ export class PedestrianSystem implements System {
   private readonly prevPlayer = new THREE.Vector3();
   private hasPrevPlayer = false;
   private shoutCooldown = 0;
-  /** worst overlap count seen since the last reset — must stay at zero */
+  /** peds the clearance pass had to push out this frame */
   private worstOverlap = 0;
+  /** peds still inside the chassis footprint *after* the push — must be zero */
+  private statResidual = 0;
+  private worstResidual = 0;
+  /**
+   * The player's chassis half-extents. The Jeep is 4.2 x 1.84 m; the exclusion
+   * box (2.4 x 2.15 half-extents) comfortably contains every roster vehicle, so
+   * "outside the exclusion box" implies "outside the bodywork".
+   */
+  private readonly playerHalfLength = 2.2;
+  private readonly playerHalfWidth = 1.0;
   private minEverPlayerDist = Infinity;
   private safetyFrames = 0;
   private statCrossing = 0;
@@ -988,20 +1005,12 @@ export class PedestrianSystem implements System {
     const cull = (halfLen + halfWide) * (halfLen + halfWide);
 
     this.statOverlaps = 0;
-    this.statMinPlayerDist = Infinity;
 
     for (let i = 0; i < this.peds.length; i++) {
       const p = this.peds[i];
       if (!p.active) continue;
       const dx = p.pos.x - cx;
       const dz = p.pos.z - cz;
-
-      // telemetry is measured against the *car*, not the swept box
-      const toCarX = p.pos.x - player.x;
-      const toCarZ = p.pos.z - player.z;
-      const dCar = Math.hypot(toCarX, toCarZ);
-      if (dCar < this.statMinPlayerDist) this.statMinPlayerDist = dCar;
-
       if (dx * dx + dz * dz > cull) continue;
       // project into the player's frame
       const along = dx * fx + dz * fz;
@@ -1025,11 +1034,83 @@ export class PedestrianSystem implements System {
     }
 
     this.prevPlayer.copy(player);
-    this.safetyFrames++;
     if (this.statOverlaps > this.worstOverlap) this.worstOverlap = this.statOverlaps;
+
+    /* --- second pass: the bodywork itself ---------------------------------
+     * The sweep above is aligned to *travel*, which is what stops anyone being
+     * tunnelled through between two frames. It is not where the car IS: at
+     * eighty degrees of drift the chassis lies almost across its own velocity,
+     * and a pedestrian beside the flank sits outside a travel-aligned box while
+     * being very much underneath the door. This pass uses the real chassis
+     * axes, so the exclusion volume always contains the bodywork whatever the
+     * car is doing. */
+    let bx = 0;
+    let bz = 1;
+    const quat = this.player.quaternion;
+    if (quat) {
+      _v2.set(0, 0, -1).applyQuaternion(quat);
+      _v2.y = 0;
+      if (_v2.lengthSq() > 1e-8) {
+        _v2.normalize();
+        bx = _v2.x;
+        bz = _v2.z;
+      }
+    } else {
+      bx = fx;
+      bz = fz;
+    }
+    const bodyLen = PED_PANIC.clearHalfLength;
+    const bodyWide = PED_PANIC.clearRadius;
+    for (let i = 0; i < this.peds.length; i++) {
+      const p = this.peds[i];
+      if (!p.active) continue;
+      const dx = p.pos.x - player.x;
+      const dz = p.pos.z - player.z;
+      if (dx * dx + dz * dz > (bodyLen + bodyWide) * (bodyLen + bodyWide)) continue;
+      const along = dx * bx + dz * bz;
+      const side = dx * -bz + dz * bx;
+      if (Math.abs(along) > bodyLen || Math.abs(side) > bodyWide) continue;
+      this.statOverlaps++;
+      const sign = side >= 0 ? 1 : -1;
+      const need = bodyWide - Math.abs(side) + 0.05;
+      const ox = -bz * sign * need;
+      const oz = bx * sign * need;
+      p.pos.x += ox;
+      p.pos.z += oz;
+      p.dodge.x += ox;
+      p.dodge.z += oz;
+      p.dodgeHold = Math.max(p.dodgeHold, PED_PANIC.shoveHold);
+      p.panicTimer = Math.max(p.panicTimer, PED_PANIC.duration);
+      if (p.hopTimer <= 0) p.hopTimer = PED_PANIC.hopTime;
+    }
+
+    /* --- third pass: the audit --------------------------------------------
+     * Nothing moves a pedestrian between here and `writeInstances`, so this is
+     * measured on exactly the geometry that will be drawn. `residual` counts
+     * anyone still inside the chassis box; by construction it is zero, and the
+     * QA harness asserts on it. */
+    this.statMinPlayerDist = Infinity;
+    let residual = 0;
+    for (let i = 0; i < this.peds.length; i++) {
+      const p = this.peds[i];
+      if (!p.active) continue;
+      const dx = p.pos.x - player.x;
+      const dz = p.pos.z - player.z;
+      const d = Math.hypot(dx, dz);
+      if (d < this.statMinPlayerDist) this.statMinPlayerDist = d;
+      const along = dx * bx + dz * bz;
+      const side = dx * -bz + dz * bx;
+      if (Math.abs(along) <= this.playerHalfLength && Math.abs(side) <= this.playerHalfWidth) {
+        residual++;
+      }
+    }
+    this.statResidual = residual;
+    if (residual > this.worstResidual) this.worstResidual = residual;
     if (this.activeCount > 0 && this.statMinPlayerDist < this.minEverPlayerDist) {
       this.minEverPlayerDist = this.statMinPlayerDist;
     }
+    this.safetyFrames++;
+    if (this.statOverlaps > this.worstOverlap) this.worstOverlap = this.statOverlaps;
   }
 
   /**
@@ -1293,12 +1374,15 @@ export class PedestrianSystem implements System {
       dodging: this.statDodged,
       overlaps: this.statOverlaps,
       worstOverlap: this.worstOverlap,
+      residual: this.statResidual,
+      worstResidual: this.worstResidual,
       minPlayerDistance:
         this.minEverPlayerDist === Infinity ? -1 : Number(this.minEverPlayerDist.toFixed(3)),
       frames: this.safetyFrames,
     });
     bag.resetPeds = (): void => {
       this.worstOverlap = 0;
+      this.worstResidual = 0;
       this.minEverPlayerDist = Infinity;
       this.safetyFrames = 0;
     };
@@ -1384,6 +1468,7 @@ export class PedestrianSystem implements System {
       pedDrawCalls: this.kit.drawCalls,
       pedTriangles: this.kit.liveTriangles,
       pedOverlaps: this.statOverlaps,
+      pedInsideChassis: this.statResidual,
       pedMinPlayerDistance:
         this.statMinPlayerDist === Infinity ? -1 : Number(this.statMinPlayerDist.toFixed(3)),
       pedAnchorSpots: this.spots.length,

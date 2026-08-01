@@ -561,6 +561,11 @@ export const GRADE_SHADER = {
   ${GLSL_NOISE}
   ${GLSL_RADIAL}
 
+  /* §6.3.5 puts the grade's tonal pivot just under middle grey; the graded
+   * frames measure a mean luminance of 0.38-0.52, so 0.42 sits where the
+   * material of the image actually is. */
+  const float LOCO_PIVOT = 0.42;
+
   void main() {
     vec2 d = vUv - 0.5;
     float rn = locoRadius( vUv, uAspect );
@@ -592,12 +597,23 @@ export const GRADE_SHADER = {
     /* §6.3.5 — lift the black point so daylight shadows never crush */
     col += uLiftColor * uLift * ( 1.0 - smoothstep( 0.0, 0.55, dot( col, vec3( 0.3333 ) ) ) );
 
-    /* filmic S-curve about the 0.42 pivot. Applied in display space and
-     * smoothstep-shaped so it adds bite in the mids without clipping either
-     * end — which is what the §6.4 luminance-std-dev target is really asking
-     * for. */
-    vec3 sc = clamp( ( col - 0.42 ) * uContrast + 0.42, 0.0, 1.0 );
-    col = mix( col, sc, 0.85 );
+    /* Filmic S-curve, in display space, pivoted at LOCO_PIVOT.
+     *
+     * Two obvious controls are both wrong here. A linear (x - p) * k + p
+     * drives the top of the range past 1.0, and the §6.4 clipped-pixel budget
+     * is only 1.5 % by day and 0.6 % at night — a linear stretch blows through
+     * that on any frame with sky in it. Blending toward smoothstep cannot
+     * clip, but smoothstep's pivot is fixed at 0.5, so on a frame whose mean
+     * sits at 0.40 it darkens almost every pixel: it cost 0.05 of mean
+     * luminance across five of the six graded conditions when measured.
+     *
+     * This is the pivoted power pair. It fixes LOCO_PIVOT exactly, maps 0 to 0
+     * and 1 to 1, is monotone, and has zero gradient at neither end — so it
+     * adds mid-tone bite, cannot clip, and does not move the exposure the
+     * preset asked for. */
+    vec3 lo = LOCO_PIVOT * pow( col / LOCO_PIVOT, vec3( uContrast ) );
+    vec3 hi2 = 1.0 - ( 1.0 - LOCO_PIVOT ) * pow( ( 1.0 - col ) / ( 1.0 - LOCO_PIVOT ), vec3( uContrast ) );
+    col = mix( lo, hi2, step( vec3( LOCO_PIVOT ), col ) );
 
     float g = locoLum( col );
     col = clamp( mix( vec3( g ), col, uSaturation ), 0.0, 1.0 );

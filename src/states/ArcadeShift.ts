@@ -22,6 +22,14 @@ export interface ShiftController {
   readonly timeRemaining: number;
   /** true once the mode has ended itself */
   readonly finished: boolean;
+  /**
+   * True when the mode drives the HUD's chain badge itself, so the generic
+   * combo chain stands down rather than fighting it for the same readout.
+   * Absent means the ordinary behaviour: the combo chain owns it.
+   */
+  readonly ownsCombo?: boolean;
+  /** True when the mode wants the streets empty of waiting fares. */
+  readonly suppressFares?: boolean;
   /** emits `shift:start` and arms the mode */
   start(): void;
   /** the countdown gate — the clock only moves while running */

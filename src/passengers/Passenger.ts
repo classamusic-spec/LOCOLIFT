@@ -56,6 +56,10 @@ export interface PassengerOptions {
   beacons: BeaconPool;
   /** scales the archetype's patience — the director shortens it late in a shift */
   patienceScale?: number;
+  /** scales the hail beacon's height, so free roam reads across a plaza */
+  beaconReach?: number;
+  /** scales `noticeRadius` — how far away the hail announces itself */
+  noticeScale?: number;
 }
 
 /* ---------------------------------------------------------------- tuning */
@@ -146,6 +150,10 @@ export class Passenger {
   private rideTime = 0;
   private faceX: number;
   private faceZ: number;
+  /** how tall this fare's beacon stands, 1 = the authored height */
+  private readonly beaconReach: number;
+  /** squared hail-announcement radius, precomputed so `updateWaiting` is free */
+  private readonly noticeR2: number;
 
   constructor(opts: PassengerOptions) {
     this.id = opts.id;
@@ -160,6 +168,9 @@ export class Passenger {
     const scale = opts.patienceScale ?? 1;
     this.patienceMax = Math.max(8, opts.archetype.patience * scale);
     this.patienceLeft = this.patienceMax;
+    this.beaconReach = clamp(opts.beaconReach ?? 1, 1, 4);
+    const notice = PASSENGER_TUNING.noticeRadius * clamp(opts.noticeScale ?? 1, 0.5, 4);
+    this.noticeR2 = notice * notice;
   }
 
   /* ------------------------------------------------------------ lifecycle */
@@ -176,6 +187,7 @@ export class Passenger {
 
     const beacon = this.beaconPool.acquire(this.archetype.color);
     beacon.root.position.copy(this.position);
+    beacon.setReach(this.beaconReach);
     parent.add(beacon.root);
     this.beacon = beacon;
   }
@@ -283,7 +295,7 @@ export class Passenger {
     const dz = vz - this.position.z;
     const d2 = dx * dx + dz * dz;
 
-    if (!this.noticed && d2 < PASSENGER_TUNING.noticeRadius * PASSENGER_TUNING.noticeRadius) {
+    if (!this.noticed && d2 < this.noticeR2) {
       this.noticed = true;
     }
 

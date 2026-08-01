@@ -65,6 +65,14 @@ const KEY_SHOTS = new Set([
 ]);
 /** How many device profiles to drive at once. */
 const JOBS = Math.max(1, Number(arg('jobs', '2')));
+/**
+ * Wall-clock window for the layout-cost probe, in ms. Landscape profiles only —
+ * the portrait ones are behind the rotate gate and are not driving. `0` skips
+ * it. Longer is better evidence: under a software renderer 18 s is only a
+ * handful of frames, so bump this to 90000 when you want a real per-frame
+ * number rather than an absolute layout count.
+ */
+const LAYOUT_MS = Math.max(0, Number(arg('layout-ms', '18000')));
 
 /* --------------------------------------------------------------- profiles */
 
@@ -239,6 +247,33 @@ function auditPage(minTarget) {
     }
   }
 
+  /* ---- 1b. the boot splash must never outlive boot ----
+     `#boot` is opaque and paints over the canvas. If it is ever still visible
+     once the game is up, the player is looking at a solid colour and has no
+     way to know the difference between that and a dead GPU. This is the single
+     check that would have caught the reported black screen. */
+  const splash = document.getElementById('boot');
+  if (splash) {
+    const st = getComputedStyle(splash);
+    if (!splash.hidden && st.display !== 'none' && Number(st.opacity) > 0.01) {
+      add(problems, 'boot-splash-visible', {
+        hidden: splash.hidden,
+        display: st.display,
+        opacity: st.opacity,
+        zIndex: st.zIndex,
+      });
+    }
+  }
+  // A boot-error card is `position:fixed; z-index:9999` and opaque; if one is
+  // up after `__loco.ready` the watchdog fired late and has buried a working
+  // game (see docs/TESTING.md).
+  const alert = document.querySelector('[role="alert"]');
+  if (alert && window.__loco?.ready) {
+    add(problems, 'boot-error-overlay-after-ready', {
+      text: (alert.textContent ?? '').trim().slice(0, 120),
+    });
+  }
+
   /* ---- 2. visible UI must stay inside the viewport ---- */
   const seen = new Set();
   const visible = [];
@@ -302,7 +337,7 @@ function auditPage(minTarget) {
   const controls = [];
   const hook = window.__locoTouch;
   if (hook && hook.enabled) {
-    for (const r of hook.rects()) controls.push({ ...r, source: 'touch' });
+    for (const r of hook.rects()) controls.push({ ...r, node: null, source: 'touch' });
   }
   // menu buttons count too — they are the only way off the title screen
   for (const node of document.querySelectorAll('.ll-root button, .ll-root input, .ll-root [role="radio"]')) {
@@ -317,6 +352,7 @@ function auditPage(minTarget) {
       y: b.top,
       w: b.width,
       h: b.height,
+      node,
       source: 'menu',
     });
   }
@@ -324,8 +360,19 @@ function auditPage(minTarget) {
   for (const c of controls) {
     const cx = c.x + c.w / 2;
     const cy = c.y + c.h / 2;
+    // A widget parked below the fold of a *scrollable* dialog is reachable,
+    // just not visible. Worth knowing (a setting you must drag to find is a
+    // setting you never change) but it is not the same bug as a control that
+    // has fallen off the screen with no way back.
+    const scroller = c.node ? scrollableAncestor(c.node) : null;
     if (cx < 0 || cy < 0 || cx > vw || cy > vh) {
-      add(problems, 'control-offscreen', { role: c.role, rect: roundAll(c), vw, vh });
+      add(scroller ? warnings : problems, scroller ? 'control-below-fold' : 'control-offscreen', {
+        role: c.role,
+        rect: roundAll({ x: c.x, y: c.y, w: c.w, h: c.h }),
+        vw,
+        vh,
+        scroller: scroller ? describe(scroller) : undefined,
+      });
       continue;
     }
     if (Math.min(c.w, c.h) < minTarget) {
@@ -341,7 +388,11 @@ function auditPage(minTarget) {
       c.x + c.w > vw - safe.right + 1 ||
       c.y + c.h > vh - safe.bottom + 1
     ) {
-      add(problems, 'control-under-safe-area', { role: c.role, rect: roundAll(c), safe });
+      add(scroller ? warnings : problems, 'control-under-safe-area', {
+        role: c.role,
+        rect: roundAll({ x: c.x, y: c.y, w: c.w, h: c.h }),
+        safe,
+      });
     }
     const hit = document.elementFromPoint(cx, cy);
     if (c.source === 'touch' && hit) {
@@ -350,6 +401,51 @@ function auditPage(minTarget) {
         add(problems, 'control-covered', { role: c.role, coveredBy: describe(hit) });
       }
     }
+  }
+
+  /* ---- 5. the centre band stays clear (ART_REFERENCE §6 R1/R6) ----
+     The driving line runs up the middle of the frame. Nothing opaque — not a
+     HUD chip, not a thumb cluster — may sit in the central 34 % of the width
+     between 30 % and 78 % of the height, or the player is steering blind
+     through the one part of the screen they are actually looking at.
+
+     The band deliberately stops at 78 %: the chase camera puts the taxi's roof
+     around 50 % and its bumper around 78 %, so everything below that is road
+     the player has already driven over. That strip is the only place a wide
+     chip (the passenger card) can go on a phone once both bottom corners
+     belong to thumbs. */
+  const bandX0 = vw * 0.33;
+  const bandX1 = vw * 0.67;
+  const bandY0 = vh * 0.3;
+  const bandY1 = vh * 0.78;
+  const bandAllow = new Set(['ll-nav', 'll-nav__arrow', 'll-pops', 'll-pop', 'll-sub', 'll-hud__arrow']);
+  // Only things that actually put ink on the screen occlude the road. The HUD
+  // corners and the two thumb clusters are transparent positioning boxes whose
+  // *children* paint — flagging the box as well as the chip inside it would
+  // bury the real intrusions in noise.
+  const paints = (node, st) =>
+    st.backgroundImage !== 'none' ||
+    !/^(transparent|rgba\(0, 0, 0, 0\))$/.test(st.backgroundColor) ||
+    st.boxShadow !== 'none' ||
+    (st.borderTopStyle !== 'none' && Number.parseFloat(st.borderTopWidth) > 0) ||
+    (node.childElementCount === 0 && (node.textContent ?? '').trim().length > 0);
+  for (const { node, b, st } of visible) {
+    if (b.width >= vw - 1 && b.height >= vh - 1) continue;
+    if (!paints(node, st)) continue;
+    const cls = typeof node.className === 'string' ? node.className.trim().split(/\s+/) : [];
+    if (cls.some((k) => bandAllow.has(k))) continue;
+    if (node.closest('.ll-nav, .ll-pops, .ll-sub, .ll-rotate, .ll-tcfg, .ll-pause, .ll-settings, .ll-title, .ll-results')) continue;
+    const overlapX = Math.min(b.right, bandX1) - Math.max(b.left, bandX0);
+    const overlapY = Math.min(b.bottom, bandY1) - Math.max(b.top, bandY0);
+    if (overlapX <= 4 || overlapY <= 4) continue;
+    const sel = describe(node);
+    if (seen.has(`band:${sel}`)) continue;
+    seen.add(`band:${sel}`);
+    add(warnings, 'centre-band-intrusion', {
+      el: sel,
+      area: Math.round(overlapX * overlapY),
+      rect: roundAll({ x: b.left, y: b.top, w: b.width, h: b.height }),
+    });
   }
 
   function scrollableAncestor(node) {
@@ -458,7 +554,7 @@ async function touchUp(page, x, y, id = 11) {
  * can drop to ~1 fps, so `waitForTimeout` is not a proxy for "the control had
  * time to integrate". The touch layer's own frame counter is.
  */
-async function waitFrames(page, n = 3, timeout = 60_000) {
+async function waitFrames(page, n = 3, timeout = 150_000) {
   const start = await page.evaluate(() => window.__locoTouch?.counters().frames ?? 0);
   try {
     await page.waitForFunction(
@@ -466,15 +562,113 @@ async function waitFrames(page, n = 3, timeout = 60_000) {
       start + n,
       { timeout },
     );
+    return true;
   } catch {
-    /* the caller's assertion will report what actually happened */
+    // The renderer never got there. Callers use this to downgrade an assertion
+    // to a warning: "steer never reached full lock" means nothing if the
+    // control layer only integrated three of the ten frames it was given.
+    return false;
   }
 }
 
+/**
+ * The centre of a control, in viewport coordinates.
+ *
+ * The spread used to come *after* x/y, which silently put it back to the rect's
+ * top-left corner. Round controls hit-test by radius, so every pedal press
+ * landed at 1.41 r from the centre and missed — the harness reported
+ * `gas-no-throttle` against a gas button that worked perfectly by hand. Order
+ * matters here; do not "tidy" it back.
+ */
 const centreOf = (rects, role) => {
   const r = rects.find((q) => q.role === role);
-  return r ? { x: r.x + r.w / 2, y: r.y + r.h / 2, ...r } : null;
+  return r ? { ...r, x: r.x + r.w / 2, y: r.y + r.h / 2 } : null;
 };
+
+/* ------------------------------------------------------- layout-cost probe */
+
+/**
+ * How many layout passes a second of driving costs.
+ *
+ * This codebase has eaten the "unregistered custom property forces a layout on
+ * every write" bug once already (121 layouts across 121 sampled frames). The
+ * only way to know it has not come back is to hold the controls down, sweep the
+ * stick continuously, and read `Performance.getMetrics` either side.
+ *
+ * The sweep is driven from *inside* the page at 60 Hz. Dispatching each
+ * pointermove over CDP would cap the input rate at the round-trip time and
+ * would itself be the thing being measured.
+ *
+ * Under SwiftShader the game runs at well under a frame per second, so the
+ * headline number to read is the absolute layout delta: clean code produces a
+ * handful of passes across the whole window no matter how many frames fit in
+ * it. `perFrame` is reported too, and is meaningful on real hardware.
+ */
+async function measureLayoutCost(context, page, steer, gas, windowMs) {
+  const cdp = await context.newCDPSession(page);
+  await cdp.send('Performance.enable');
+  const read = async () => {
+    const m = await cdp.send('Performance.getMetrics');
+    return Object.fromEntries(m.metrics.map((x) => [x.name, x.value]));
+  };
+
+  if (gas) await touchDown(page, gas.x, gas.y, 31);
+  await touchDown(page, steer.x, steer.y, 32);
+
+  await page.evaluate(
+    ({ x, y, w }) => {
+      const init = {
+        pointerType: 'touch',
+        isPrimary: true,
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        pointerId: 32,
+        width: 34,
+        height: 34,
+        pressure: 0.6,
+        buttons: 1,
+      };
+      let t = 0;
+      window.__locoSweep = window.setInterval(() => {
+        t += 1;
+        const dx = Math.sin(t / 14) * (w / 2.6);
+        const dy = Math.cos(t / 23) * 14;
+        window.dispatchEvent(
+          new PointerEvent('pointermove', { ...init, clientX: x + dx, clientY: y + dy }),
+        );
+      }, 16);
+    },
+    { x: steer.x, y: steer.y, w: steer.w },
+  );
+
+  const before = await read();
+  const framesBefore = await page.evaluate(() => window.__locoTouch?.counters().frames ?? 0);
+  await page.waitForTimeout(windowMs);
+  const framesAfter = await page.evaluate(() => window.__locoTouch?.counters().frames ?? 0);
+  const after = await read();
+
+  await page.evaluate(() => {
+    if (window.__locoSweep) window.clearInterval(window.__locoSweep);
+    delete window.__locoSweep;
+  });
+  await touchUp(page, steer.x, steer.y, 32);
+  if (gas) await touchUp(page, gas.x, gas.y, 31);
+  await cdp.detach();
+
+  const frames = Math.max(0, framesAfter - framesBefore);
+  const layouts = Math.round(after.LayoutCount - before.LayoutCount);
+  const recalcs = Math.round(after.RecalcStyleCount - before.RecalcStyleCount);
+  return {
+    windowMs,
+    frames,
+    layouts,
+    recalcs,
+    layoutDurationMs: Number(((after.LayoutDuration - before.LayoutDuration) * 1000).toFixed(1)),
+    perFrame: frames > 0 ? Number((layouts / frames).toFixed(3)) : null,
+    perSecond: Number((layouts / (windowMs / 1000)).toFixed(2)),
+  };
+}
 
 /* ------------------------------------------------------------------- runner */
 
@@ -713,6 +907,87 @@ async function runProfile(browser, profile, baseUrl, report) {
       entry.problems.push({ kind: 'input-stuck-after-release', detail: JSON.stringify(released) });
     }
 
+    /* ---- all three steering schemes have to actually steer ----
+       `stick` is the shipped default, but `wheel` and `zones` are offered in
+       the setup panel, and an option that does not reach full lock is worse
+       than no option at all. Drive each one the way its own geometry expects:
+       the stick and the arrows take a horizontal drag, the wheel takes an arc
+       around its hub. */
+    entry.schemes = {};
+    for (const scheme of ['stick', 'wheel', 'zones']) {
+      await page.evaluate((s) => window.__locoTouch.setPrefs({ scheme: s }), scheme);
+      // `setPrefs` only marks the layout dirty; the hit-test cache is rebuilt
+      // at the top of the next `update()`. Waiting on wall-clock time is wrong
+      // here — under SwiftShader 350 ms is often zero frames, and pressing an
+      // arrow against the *stick's* cached rectangle silently resolves to the
+      // steering zone and reports a scheme that "cannot reach lock".
+      await waitFrames(page, 2);
+      const sr = await page.evaluate(() => window.__locoTouch.rects());
+      const target = scheme === 'zones' ? centreOf(sr, 'arrowLeft') : centreOf(sr, 'steer');
+      if (!target) {
+        entry.schemes[scheme] = { error: 'no control' };
+        entry.problems.push({ kind: 'scheme-no-control', detail: scheme });
+        continue;
+      }
+      await touchDown(page, target.x, target.y, 41);
+      if (scheme === 'wheel') {
+        // rotate anticlockwise about the hub, which is what a wheel reads
+        const hub = centreOf(sr, 'wheel') ?? target;
+        const r = Math.max(40, (centreOf(sr, 'wheel')?.w ?? 200) / 2 - 12);
+        for (let i = 1; i <= 10; i++) {
+          const a = -Math.PI / 2 - (i / 10) * 0.95;
+          await touchMove(page, hub.x + Math.cos(a) * r, hub.y + Math.sin(a) * r, 41);
+        }
+      } else if (scheme === 'stick') {
+        for (let i = 1; i <= 8; i++) {
+          await touchMove(page, target.x - (target.w / 2.6) * (i / 8), target.y, 41);
+        }
+      }
+      const settled = await waitFrames(page, 10);
+      const reached = await page.evaluate(() => window.__locoTouch.channel.steer);
+      await touchUp(page, target.x, target.y, 41);
+      const returned = await waitFrames(page, 8);
+      const centred = await page.evaluate(() => window.__locoTouch.channel.steer);
+      entry.schemes[scheme] = {
+        reached: Number(reached.toFixed(3)),
+        afterRelease: Number(centred.toFixed(3)),
+        control: `${Math.round(target.w)}×${Math.round(target.h)}`,
+        framesReady: settled && returned,
+      };
+      // A scheme that never reached lock is only a *bug* if the control layer
+      // actually got the frames to integrate in. Under a software renderer it
+      // often does not, and a spurious failure is worse than no measurement.
+      if (!(reached < -0.5)) {
+        (settled ? entry.problems : entry.warnings).push({
+          kind: settled ? 'scheme-cannot-reach-lock' : 'scheme-starved-of-frames',
+          detail: `${scheme} reached ${reached.toFixed(3)} on a full left input`,
+        });
+      }
+      if (Math.abs(centred) > 0.06) {
+        (returned ? entry.problems : entry.warnings).push({
+          kind: returned ? 'scheme-not-centring' : 'scheme-starved-of-frames',
+          detail: `${scheme} sat at ${centred.toFixed(3)} after release`,
+        });
+      }
+    }
+    await page.evaluate(() => window.__locoTouch.setPrefs({ scheme: 'stick' }));
+    await waitFrames(page, 2);
+
+    /* ---- how much layout a second of driving costs ---- */
+    if (LAYOUT_MS > 0 && steer && !portrait) {
+      entry.layout = await measureLayoutCost(context, page, steer, gas, LAYOUT_MS);
+      // One pass per frame is the signature of the custom-property bug. Two per
+      // frame of headroom, because a legitimate resize or state change may land
+      // inside the window.
+      if (entry.layout.perFrame !== null && entry.layout.perFrame > 0.5) {
+        entry.problems.push({
+          kind: 'layout-per-frame',
+          detail: `${entry.layout.layouts} layouts across ${entry.layout.frames} frames ` +
+            `(${entry.layout.perFrame}/frame) during a continuous steer + throttle sweep`,
+        });
+      }
+    }
+
     /* ---- setup panel ---- */
     await page.evaluate(() => {
       const gear = document.querySelector('.ll-touch__util button[aria-label*="Ajustar"]');
@@ -836,7 +1111,13 @@ async function main() {
       process.stdout.write(
         `◀ ${profile.id}: ${entry.ok ? 'ok' : `${entry.problems.length} problem(s)`}` +
           `${entry.warnings.length ? `, ${entry.warnings.length} warning(s)` : ''}` +
-          `${entry.errors.length ? `, ${entry.errors.length} console error(s)` : ''}\n`,
+          `${entry.errors.length ? `, ${entry.errors.length} console error(s)` : ''}` +
+          `${
+            entry.layout
+              ? `, layout ${entry.layout.layouts}/${entry.layout.frames} frames` +
+                ` (${entry.layout.perFrame ?? 'n/a'}/frame)`
+              : ''
+          }\n`,
       );
       for (const p of entry.problems.slice(0, 8)) {
         process.stdout.write(`    · ${p.step ? `[${p.step}] ` : ''}${p.kind} ${summarise(p)}\n`);

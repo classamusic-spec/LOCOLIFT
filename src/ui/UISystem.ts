@@ -222,9 +222,16 @@ export class UISystem implements System {
     this.toasts = new Toasts(this.theme);
     this.title = new TitleScreen(this.theme, this.save);
     this.pause = new PauseMenu(this.theme);
-    this.settingsMenu = new SettingsMenu(this.theme, this.settingsStore);
     this.results = new ResultsScreen(this.theme);
+    // Built before the settings menu, which takes a bridge to its preferences:
+    // the on-screen-control options are per-device and live in TouchControls'
+    // own storage, not in `SettingsState`.
     this.touch = new TouchControls({ theme: this.theme });
+    this.settingsMenu = new SettingsMenu(this.theme, this.settingsStore, {
+      prefs: () => this.touch.preferences,
+      setPrefs: (patch) => this.touch.setPrefs(patch),
+      canVibrate: () => TouchControls.canVibrate(),
+    });
 
     this.minimap.mount(this.hud.minimapSlot);
     this.arrow.mount(this.hud.arrowSlot);
@@ -271,6 +278,21 @@ export class UISystem implements System {
     // The page's boot splash has done its job the moment a screen is up.
     const splash = document.getElementById('boot');
     if (splash) splash.hidden = true;
+
+    // …and so has the boot watchdog's error card, if it beat us here.
+    //
+    // `main.ts` arms a 45 s watchdog that writes an opaque, `z-index: 9999`
+    // alert into `#ui-root` when `window.__loco.ready` is still false. On a
+    // real phone on a cellular connection, 45 s is not a generous budget for a
+    // 4.1 MB payload plus world generation, and the watchdog can fire while
+    // boot is still perfectly healthy. It writes with `innerHTML`, so the card
+    // is a *sibling* of everything we are about to mount — and it covers all of
+    // it, permanently. A game the player can hear but not see is the same bug
+    // as a black screen. If we are mounting, boot got far enough to be worth
+    // watching, so the card goes.
+    for (const stale of Array.from(this.root.querySelectorAll(':scope > [role="alert"]'))) {
+      stale.remove();
+    }
   }
 
   /** Re-point the UI at a Jeep (e.g. after a respawn rebuild). */
@@ -541,10 +563,18 @@ export class UISystem implements System {
 
     this.theme.apply(scaled);
     this.hud.applySettings(scaled);
-    // The minimap is the single biggest HUD element; on a short screen it gets
-    // capped harder than everything else.
+    // The minimap is the single biggest HUD element, and it sizes its own
+    // canvas in JS — a stylesheet cannot shrink it. On a phone, cap it against
+    // the viewport rather than a fixed 0.75: at 194 px base a 430 px-tall
+    // landscape phone was giving a third of the screen to a disc the
+    // destination arrow already answers for.
     this.minimap.applySettings(
-      this.viewH <= 560 ? { ...scaled, uiScale: Math.min(scaled.uiScale, 0.75) } : scaled,
+      this.viewH <= 560 || this.viewW <= 820
+        ? {
+            ...scaled,
+            uiScale: Math.min(scaled.uiScale, (this.viewH * 0.3) / 194, (this.viewW * 0.24) / 194),
+          }
+        : scaled,
     );
     this.touch.applySettings(scaled);
   }

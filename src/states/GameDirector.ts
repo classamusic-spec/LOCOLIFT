@@ -31,6 +31,7 @@ import type { Progression } from '../scoring/Progression';
 import type { ScoreSystem } from '../scoring/ScoreSystem';
 import { ArcadeShift, type ShiftController } from './ArcadeShift';
 import { Challenges, CHECKPOINT_ARCHETYPE, type ChallengeId } from './Challenges';
+import { DriftMode } from './DriftMode';
 import { buildElTorroRoute, type ElTorroRoute } from './ElTorroRoute';
 import { FreeRide } from './FreeRide';
 import { PARTY_ARCHETYPES, type PartyBusMode } from './PartyBusMode';
@@ -51,6 +52,10 @@ export interface DirectorVehicle {
   readonly speed: number;
   readonly isDrifting: boolean;
   readonly isAirborne: boolean;
+  /** signed chassis slip angle, radians — drift mode scores off this */
+  readonly driftAngle?: number;
+  /** roster id, so drift mode can score a bus like a bus */
+  readonly vehicleId?: string;
   respawn(pos: THREE.Vector3, heading: number): void;
 }
 
@@ -81,6 +86,12 @@ export interface DirectorAction {
   readonly mode?: GameMode;
 }
 
+/**
+ * Which controller a `'freeRide'` start resolves to. Free roam *is* the free
+ * ride mode now — the entry point of the whole game — so there is only one.
+ */
+export type EntryMode = 'freeRoam' | 'arcade' | 'title';
+
 export interface GameDirectorOptions {
   bus: EventBus;
   missions: MissionSystem;
@@ -103,6 +114,13 @@ export interface GameDirectorOptions {
   relationships?: DirectorRelationships | null;
   /** where chapter cards record that they have been seen */
   campaignStore?: CampaignStore | null;
+  /**
+   * What `init` opens on. `'freeRoam'` drops the player straight into the city
+   * with no clock — the game's front door — and `'title'` keeps the menu first.
+   */
+  entry?: EntryMode;
+  /** seconds a drift-mode run lasts */
+  driftSeconds?: number;
 }
 
 /* ------------------------------------------------------------------ class */
@@ -126,8 +144,10 @@ export class GameDirector implements System {
   private readonly countdownSeconds: number;
 
   readonly arcade: ArcadeShift;
+  /** free roam — the untimed entry mode, where a pickup arms the clock */
   readonly freeRide: FreeRide;
   readonly challenges: Challenges;
+  readonly drift: DriftMode;
   readonly story: StoryRun;
   readonly campaign: StoryCampaign;
 
@@ -145,6 +165,9 @@ export class GameDirector implements System {
   private pendingChallenge: ChallengeId = 'drift-marathon';
   /** true while the active controller is the Chinchorreo */
   private inParty = false;
+  /** true while the active controller is Drift Mode */
+  private inDrift = false;
+  private readonly entry: EntryMode;
 
   private countdown = 0;
   private live = false;
@@ -162,10 +185,18 @@ export class GameDirector implements System {
     this.progression = opts.progression ?? null;
     this.party = opts.partyBus ?? null;
     this.relationships = opts.relationships ?? null;
+    this.entry = opts.entry ?? 'freeRoam';
 
     const rng = opts.rng ?? new RNG(0x10c0_d17e);
     this.arcade = new ArcadeShift({ bus: this.bus });
-    this.freeRide = new FreeRide({ bus: this.bus });
+    this.freeRide = new FreeRide({ bus: this.bus, fares: opts.missions });
+    this.drift = new DriftMode({
+      bus: this.bus,
+      vehicle: opts.vehicle ?? FALLBACK_VEHICLE,
+      world: opts.world ?? null,
+      save: opts.save ?? null,
+      duration: opts.driftSeconds,
+    });
     this.challenges = new Challenges({
       bus: this.bus,
       vehicle: opts.vehicle ?? FALLBACK_VEHICLE,
@@ -244,6 +275,29 @@ export class GameDirector implements System {
     this.go('title');
   }
 
+  /**
+   * Open the game the way `entry` says to. Call this once, *after*
+   * `engine.initSystems()`, so the UI has already subscribed to `game:state`
+   * and follows the transition instead of overwriting it in its own `init`.
+   *
+   * Returns the state the game ended up in.
+   */
+  openingMove(): GameStateId {
+    switch (this.entry) {
+      case 'freeRoam':
+        this.startFreeRoam();
+        break;
+      case 'arcade':
+        this.startMode('arcade');
+        break;
+      case 'title':
+      default:
+        this.showTitle();
+        break;
+    }
+    return this.state;
+  }
+
   setUI(ui: DirectorUI | null): void {
     this.ui = ui;
     this.publishArchetypes();
@@ -265,6 +319,7 @@ export class GameDirector implements System {
     this.arcade.dispose();
     this.freeRide.dispose();
     this.challenges.dispose();
+    this.drift.dispose();
     this.story.dispose();
     this.controller = null;
   }
@@ -325,6 +380,20 @@ export class GameDirector implements System {
   }
 
   /**
+   * The front door: San Viejo with no clock on it. Fares stand on the street
+   * under tall beacons and wait; picking one up is what starts the timer.
+   */
+  startFreeRoam(): void {
+    this.beginRun('freeRide', this.freeRide, false);
+  }
+
+  /** The dedicated drift playground — scored zones, chains, per-chassis feel. */
+  startDriftMode(): void {
+    this.drift.setWorld(this.world);
+    this.beginRun(this.drift.mode, this.drift, false);
+  }
+
+  /**
    * Start the Chinchorreo. Returns false when there is no bus wired up yet, so
    * `main` can fall back to the arcade shift rather than dropping the input.
    */
@@ -345,6 +414,7 @@ export class GameDirector implements System {
 
     this.mode = mode;
     this.inParty = party;
+    this.inDrift = controller === this.drift;
     this.ensureWallRoute();
 
     if (this.respawnOnStart && this.vehicle && this.world) {
@@ -422,6 +492,10 @@ export class GameDirector implements System {
       this.startPartyBus();
       return;
     }
+    if (this.inDrift) {
+      this.startDriftMode();
+      return;
+    }
     this.startMode(this.mode, this.pendingChallenge);
   }
 
@@ -454,6 +528,12 @@ export class GameDirector implements System {
       case 'startParty':
         /* no bus yet (not unlocked, not built) — do not drop the input */
         if (!this.startPartyBus()) this.startMode('arcade');
+        break;
+      case 'startFreeRoam':
+        this.startFreeRoam();
+        break;
+      case 'startDrift':
+        this.startDriftMode();
         break;
       case 'startStory':
         this.startStory();
@@ -509,6 +589,7 @@ export class GameDirector implements System {
     });
     this.controller = null;
     this.inParty = false;
+    this.inDrift = false;
     this.go('results');
     this.onPauseChanged?.(false);
   }
@@ -532,6 +613,7 @@ export class GameDirector implements System {
     this.campaign.clearBeats();
     this.controller = null;
     this.inParty = false;
+    this.inDrift = false;
   }
 
   /* ---------------------------------------------------------------- frame */
@@ -544,10 +626,12 @@ export class GameDirector implements System {
       if (this.countdown <= 0) {
         this.countdown = 0;
         this.live = true;
-        this.controller.setRunning(true);
-        this.combo.setActive(true);
-        /* the chinchorreo owns the whole street — no competing street fares */
-        this.missions.setActive(!this.inParty);
+        const c = this.controller;
+        c.setRunning(true);
+        /* drift mode scores and shows its own chain — stand the generic one down */
+        this.combo.setActive(c.ownsCombo !== true);
+        /* the chinchorreo and the drift arena both own the whole street */
+        this.missions.setActive(!this.inParty && c.suppressFares !== true);
       }
       return;
     }
@@ -569,7 +653,11 @@ export class GameDirector implements System {
     if (!ui) return;
     if (this.state === 'playing' || this.state === 'paused') {
       const party = this.inParty ? this.party : null;
-      if (party) {
+      if (this.inDrift) {
+        /* the arenas replace the fare pins; the patience bar becomes the chain */
+        ui.setWaitingFares(this.drift.zoneMarkers);
+        ui.setPassengerPatience(this.drift.chainFraction);
+      } else if (party) {
         /* chinchorro stops on the minimap; the patience bar becomes crowd hype */
         ui.setWaitingFares(party.stopMarkers);
         ui.setPassengerPatience(party.patienceFraction);

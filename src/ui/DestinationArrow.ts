@@ -166,7 +166,12 @@ export class DestinationArrow {
     const turnDeg = (this.shownAngle * 180) / Math.PI;
     if (!(Math.abs(turnDeg - this.lastTurn) < 0.12)) {
       this.lastTurn = turnDeg;
-      this.arrow.style.setProperty('--turn', `${turnDeg.toFixed(2)}deg`);
+      // Written as `transform`, not as a `--turn` custom property. An
+      // *unregistered* custom property is opaque to the style engine, so
+      // Chromium cannot prove it does not feed geometry and schedules a layout
+      // on every write — and this one is written on every frame the car is
+      // moving. Same reasoning as `ScaleSlot` in UITheme.
+      this.arrow.style.transform = `translate(-50%, -50%) rotate(${turnDeg.toFixed(2)}deg)`;
     }
 
     /* distance text ------------------------------------------------------ */

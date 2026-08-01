@@ -63,6 +63,7 @@ Exit code is non-zero if any profile reports a problem.
 | `--shots key\|full` | `key` | 6 decisive screenshots, or all 10 |
 | `--jobs <n>` | `2` | device profiles driven in parallel |
 | `--dpr <n>` | `1` | cap the emulated device pixel ratio |
+| `--layout-ms <n>` | `18000` | window for the layout-cost probe; `0` skips it |
 | `--out <dir>` | `.captures-mobile` | where PNGs and the report land |
 | `--serve <dir>` | `dist` | directory the built-in static server serves |
 | `--file <path>` | — | load a single-file build over `file://` instead |
@@ -93,8 +94,17 @@ simulated notch → title → start a shift → hold **GAS** and check the car
 *moves* → sweep the steering thumbstick fully left, then fully right, then
 release and check it re-centres → press **DRIFT** and **TURBO** together with
 gas still held (three-finger multitouch) → release everything and check nothing
-sticks → open the setup panel → switch to left-handed + wheel steering → tap
-**Pause** → open Settings. Ten screenshots per profile.
+sticks → drive **all three steering schemes** to full lock and back → measure
+the **layout cost** of a sustained sweep → open the setup panel → switch to
+left-handed + wheel steering → tap **Pause** → open Settings. Ten screenshots
+per profile.
+
+`centreOf()` presses the **centre** of a control. This is load-bearing and was
+once wrong: the object spread ran after `x`/`y` and put the coordinates back at
+the rect's top-left corner. Round controls hit-test by radius, so every pedal
+press landed at 1.41 r and missed, and the harness reported `gas-no-throttle`
+against a gas button that worked perfectly by hand. If you refactor that helper,
+re-read the comment above it.
 
 Touch input is dispatched as genuine `PointerEvent`s with `pointerType: 'touch'`
 at coordinates read from `window.__locoTouch.rects()`, so the harness presses
@@ -119,12 +129,65 @@ Runs at every step and reports:
   `text-overflow: ellipsis` or `-webkit-line-clamp`, which is deliberate.
 - **control-too-small** — a touch target under 40 px in either axis.
 - **control-offscreen**, **control-covered** — unreachable by a thumb.
+  Downgraded to the *warning* **control-below-fold** when the widget sits
+  inside a scrollable dialog, where it is reachable, just not visible.
 - **control-under-safe-area** — a control inside the simulated notch, the
   camera housing or the home indicator.
+- **boot-splash-visible** — `#boot` is still painting after the game is up.
+  This is the check that catches a black screen: the splash is opaque and sits
+  over the canvas, so a stalled boot and a dead GPU look identical.
+- **boot-error-overlay-after-ready** — a `role="alert"` card is up even though
+  `window.__loco.ready` is true. `main.ts` arms a 45 s watchdog that writes an
+  opaque `z-index: 9999` card into `#ui-root` with `innerHTML`. 45 s is not a
+  generous budget for a 4.1 MB payload plus world generation on a phone on
+  cellular, so the watchdog can fire while boot is perfectly healthy — and the
+  card then covers the running game forever. `UISystem.init()` removes a stale
+  card when it mounts, which covers the common ordering; this check is the
+  backstop for the rest.
+- **centre-band-intrusion** *(warning)* — something that actually paints (a
+  background, a border, a shadow or a text leaf — transparent positioning boxes
+  are skipped) overlaps the central 34 % of the width between 30 % and 78 % of
+  the height. `ART_REFERENCE` §6 R1/R6: the driving line lives there and it
+  stays clear. The band stops at 78 % because the chase camera puts the taxi's
+  bumper about there, and the strip below it is the only place a wide chip can
+  go once both bottom corners belong to thumbs.
+- **scheme-starved-of-frames** *(warning)* — a steering scheme did not reach
+  lock, but the control layer never got the frames to integrate the input in.
+  A measurement that did not happen, not a bug.
+- **layout-per-frame** — the game is taking a layout pass on more than half of
+  the frames of a continuous steer-and-throttle sweep. See below.
 - **no-rotate-prompt** — a portrait profile that failed to show the rotate gate.
 - **gas-no-throttle / gas-no-motion / steer-\*-failed / steer-not-centring /
-  multitouch-failed / input-stuck-after-release / pause-button-did-nothing** —
-  the control itself is broken, not just the layout.
+  multitouch-failed / input-stuck-after-release / pause-button-did-nothing /
+  scheme-cannot-reach-lock / scheme-not-centring** — the control itself is
+  broken, not just the layout.
+
+### The layout-cost probe
+
+The rule for the HUD and the touch layer is **zero layout per frame**. The way
+that rule gets broken is subtle: writing an *unregistered* CSS custom property
+is opaque to the style engine, which cannot prove the value does not feed
+geometry, so it schedules a layout on every write. A HUD bar that drains over
+four seconds then costs a layout per frame for four seconds. This codebase has
+shipped that bug once (121 layouts across 121 sampled frames); the fix was to
+write `transform`/`opacity` directly on elements that already declare
+`will-change`, which is why `ScaleSlot` in `UITheme.ts` exists and why
+`DestinationArrow` writes a whole `transform` string instead of a `--turn`
+angle.
+
+The probe holds **GAS**, starts a 60 Hz steering sweep *inside the page* (a
+sweep driven over CDP would be capped by the round-trip time and would measure
+the harness instead), and reads `Performance.getMetrics` either side:
+
+```json
+"layout": { "windowMs": 18000, "frames": 6, "layouts": 1,
+            "recalcs": 43, "perFrame": 0.167, "perSecond": 0.06 }
+```
+
+Under SwiftShader the frame count is tiny, so read the **absolute** `layouts`
+number: clean code produces a handful across the whole window regardless of how
+many frames fit into it. `perFrame` is the number that matters on real hardware;
+pass `--layout-ms 90000` when you want it to mean something here.
 
 ### Simulating a notch
 

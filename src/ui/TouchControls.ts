@@ -34,7 +34,32 @@ import {
 } from '../core/Input';
 import { clamp, clamp01, deadzone, expoCurve, moveTowards, wrapAngle } from '../core/MathUtils';
 import type { SettingsState } from '../core/types';
-import { el, FlagSlot, ScaleSlot, svg, type UITheme } from './UITheme';
+import { el, FlagSlot, svg, type UITheme } from './UITheme';
+
+/**
+ * A bottom-anchored bar fill, written as `transform: scaleY()`.
+ *
+ * `ScaleSlot` in UITheme writes `scaleX` — correct for the horizontal HUD bars
+ * it was built for, wrong for the ring that climbs the inside of the TURBO
+ * button. Rather than widen that class (and change every HUD bar's meaning),
+ * the vertical case lives here. Same contract: epsilon-gated, compositor-only,
+ * never a layout.
+ */
+class VFillSlot {
+  private last = Number.NaN;
+
+  constructor(
+    private readonly target: HTMLElement,
+    private readonly epsilon = 0.006,
+  ) {}
+
+  set(value: number): boolean {
+    if (Math.abs(value - this.last) < this.epsilon) return false;
+    this.last = value;
+    this.target.style.transform = `scaleY(${clamp01(value).toFixed(4)})`;
+    return true;
+  }
+}
 
 /* -------------------------------------------------------------- preferences */
 
@@ -198,6 +223,13 @@ interface Held {
 /** Touch slop: fingers land a few px off what the eye aimed at. */
 const SLOP = 6;
 
+/**
+ * Smallest edge any control may have, in CSS px. Apple's HIG says 44, WCAG
+ * 2.5.5 says 44 — the two rarely agree, so when they do it is worth honouring
+ * even on the smallest phone the fit factor can produce.
+ */
+const TARGET_MIN = 46;
+
 /* ------------------------------------------------------------- test surface */
 
 /**
@@ -257,7 +289,7 @@ export class TouchControls {
   private readonly panel: HTMLElement;
   private readonly buttons = new Map<Role, HTMLElement>();
   private readonly pressFlags = new Map<Role, FlagSlot>();
-  private boostFill: ScaleSlot | null = null;
+  private boostFill: VFillSlot | null = null;
   private boostReady: FlagSlot | null = null;
   private boostLive: FlagSlot | null = null;
   private stickLive: FlagSlot;
@@ -431,6 +463,15 @@ export class TouchControls {
     this.applyPrefs(true);
     this.refreshEnabled();
     this.refreshPanel?.();
+    // Rebuild the hit map *now* rather than at the top of the next frame.
+    // Switching scheme swaps which elements exist, so between the write and the
+    // next `update()` the cached rectangles describe controls that are no
+    // longer on screen — a tap on the new arrows would resolve to the old
+    // stick's zone. At 60 Hz that window is 16 ms and invisible; on a phone
+    // that has dropped to 5 fps while the setting is being changed it is a
+    // fifth of a second of dead controls. One forced layout per settings
+    // change is the same price `syncVisibility` already pays.
+    if (this.mounted && !this.el.hidden) this.measure();
   }
 
   /** Show the driving controls (playing) or stow them (menus, results). */
@@ -675,12 +716,17 @@ export class TouchControls {
     s.setProperty('--tc-brake', px(SIZE.brake * this.scale));
     s.setProperty('--tc-boost', px(SIZE.boost * this.scale));
     s.setProperty('--tc-drift', px(SIZE.drift * this.scale));
-    s.setProperty('--tc-small', px(SIZE.small * this.scale));
+    // The two small clusters are the only ones that fall through the 44 px
+    // floor when the fit factor bottoms out: on a 568×320 phone `small` came
+    // out at 40 px and `util` at 36 px. Everything else is comfortably above
+    // it, so the floor is applied here rather than to every size.
+    const smallPx = Math.max(TARGET_MIN, SIZE.small * this.scale);
+    const utilPx = Math.max(TARGET_MIN, SIZE.util * this.scale);
+    s.setProperty('--tc-small', px(smallPx));
     s.setProperty('--tc-gap', px(SIZE.gap * this.scale));
-    s.setProperty('--tc-util', px(SIZE.util * this.scale));
+    s.setProperty('--tc-util', px(utilPx));
     s.setProperty('--tc-stick', px(SIZE.stick * this.scale));
     s.setProperty('--tc-knob', px(SIZE.knob * this.scale));
-    s.setProperty('--tc-wheel', px(SIZE.wheel * this.scale));
     s.setProperty('--tc-arrow-w', px(SIZE.arrow * this.scale));
     s.setProperty('--tc-arrow-h', px(SIZE.arrowH * this.scale));
     s.setProperty('--tc-alpha', this.prefs.opacity.toFixed(2));
@@ -689,12 +735,39 @@ export class TouchControls {
     s.setProperty('--tc-pad-dx', px(this.prefs.padDx));
     s.setProperty('--tc-pad-dy', px(this.prefs.padDy));
 
-    // The HUD needs to know how much of the bottom corners we occupy, and how
-    // wide the utility column is, so its chips can step out of the way.
+    // The wheel is the one control whose *nominal* size can exceed the space it
+    // is given: 232 px at scale 1 against a 430 px-tall landscape phone, minus
+    // safe areas, minus the HUD above it. Left alone it hung 89 px off the
+    // bottom of a 15 Pro Max. Derive it from the steering zone's real height
+    // instead, so it is always a whole, fully-tappable circle.
+    const zoneH = Math.min(this.viewH * 0.56, SIZE.stick * this.scale * 1.75);
+    s.setProperty('--tc-wheel', px(clamp(SIZE.wheel * this.scale, 120, zoneH)));
+
+    /* ------------------------------------------------------ HUD clearance */
+    // The HUD lays out in the same four corners the controls occupy. Publish
+    // exactly how much of each corner is taken so the stylesheet can move HUD
+    // chips out of the way rather than guessing at a media query. Written once
+    // per layout change, on the host — never per frame.
     const host = this.el.parentElement;
     if (host) {
-      host.style.setProperty('--ll-touch-pad-h', px(SIZE.drift * this.scale + SIZE.gas * this.scale + SIZE.gap * this.scale));
-      host.style.setProperty('--ll-touch-util-w', px(SIZE.util * this.scale + 12));
+      const hs = host.style;
+      // Mirrors the pad's grid exactly — three columns, two rows, one gap
+      // between each. `smallPx` rather than `SIZE.small * scale`, so the 44 px
+      // floor is reflected in what the HUD is told to clear.
+      const padW = smallPx + (SIZE.brake + SIZE.gas) * this.scale + SIZE.gap * this.scale * 2;
+      const padH = (SIZE.boost + SIZE.gas) * this.scale + SIZE.gap * this.scale;
+      const steerW = Math.min(this.viewW * 0.42, SIZE.stick * this.scale * 2.5);
+      // A player who drags a cluster *outwards* shrinks its footprint; clamped
+      // at zero so a negative offset can never make the HUD think it has more
+      // room than the screen has.
+      hs.setProperty('--ll-touch-pad-w', px(Math.max(0, padW + this.prefs.padDx)));
+      hs.setProperty('--ll-touch-pad-h', px(Math.max(0, padH + this.prefs.padDy)));
+      hs.setProperty('--ll-touch-steer-w', px(steerW + Math.max(0, this.prefs.steerDx)));
+      hs.setProperty('--ll-touch-steer-h', px(zoneH + Math.max(0, this.prefs.steerDy)));
+      hs.setProperty('--ll-touch-util-w', px(utilPx + 12));
+      // two stacked buttons; the HUD needs the height in portrait, where there
+      // is no room beside the column and the fare has to sit under it
+      hs.setProperty('--ll-touch-util-h', px(utilPx * 2 + SIZE.gap * this.scale * 0.8));
     }
 
     /* ---- hit rectangles ---- */
@@ -946,6 +1019,18 @@ export class TouchControls {
 
   /* ------------------------------------------------------------- haptics */
 
+  /**
+   * Whether this browser can buzz at all.
+   *
+   * `navigator.vibrate` is Android-only — iOS Safari has never shipped it and
+   * has no equivalent from a web page. The settings row says so rather than
+   * offering a switch that silently does nothing.
+   */
+  static canVibrate(): boolean {
+    if (typeof navigator === 'undefined') return false;
+    return typeof (navigator as Navigator & { vibrate?: unknown }).vibrate === 'function';
+  }
+
   /** Buzz, if the device can and the player wants it. */
   haptic(kind: HapticKind): void {
     if (!this.prefs.haptics || !this.enabled) return;
@@ -986,8 +1071,15 @@ export class TouchControls {
     }
     const host = this.el.parentElement;
     if (host) {
-      if (this.enabled) host.dataset.touch = '1';
-      else delete host.dataset.touch;
+      // `data-touch` is what the stylesheet keys the phone HUD off, and
+      // `data-touch-hand` tells it which bottom corner the pedals took.
+      if (this.enabled) {
+        host.dataset.touch = '1';
+        host.dataset.touchHand = this.prefs.hand;
+      } else {
+        delete host.dataset.touch;
+        delete host.dataset.touchHand;
+      }
     }
     if (!show) {
       this.releaseAll();
@@ -1367,7 +1459,7 @@ export class TouchControls {
     if (opts.fill) {
       const fill = el('span', 'll-tbtn__fill');
       b.append(fill);
-      this.boostFill = new ScaleSlot(fill, 0.006);
+      this.boostFill = new VFillSlot(fill, 0.006);
       this.boostReady = new FlagSlot(b, 'is-ready');
       this.boostLive = new FlagSlot(b, 'is-live');
       fill.style.transform = 'scaleY(0)';
@@ -1460,6 +1552,8 @@ export class TouchControls {
     this.el.dataset.hand = this.prefs.hand;
     this.el.dataset.scheme = this.prefs.scheme;
     this.el.style.setProperty('--tc-alpha', this.prefs.opacity.toFixed(2));
+    const host = this.el.parentElement;
+    if (host && this.enabled) host.dataset.touchHand = this.prefs.hand;
     if (remeasure) this.markLayoutDirty();
   }
 }

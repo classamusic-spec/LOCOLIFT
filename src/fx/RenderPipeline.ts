@@ -165,6 +165,9 @@ export class RenderPipeline implements System {
   private readonly sizeProbe = new THREE.Vector2();
   private lastDpr = 1;
 
+  private measureArmed = false;
+  private costSample: { plain: number; withPost: number; overhead: number } | null = null;
+
   constructor(
     renderer: THREE.WebGLRenderer,
     scene: THREE.Scene,
@@ -265,6 +268,25 @@ export class RenderPipeline implements System {
       this.enabled = false;
       for (const p of this.composer.passes) p.enabled = false;
     }
+  }
+
+  /**
+   * QA/debug: measure the chain's exact draw-call overhead.
+   *
+   * Arms a one-shot that renders the *same frame* twice on the next tick —
+   * once as a plain forward render, once through the composer — and reports
+   * the difference. Comparing two separate samples cannot do this honestly:
+   * traffic, pedestrians and the wave field move between them, and on a
+   * software rasteriser a sample is 16 s apart from its partner. Costs one
+   * doubled frame, then disarms itself.
+   */
+  measurePostCost(): void {
+    this.measureArmed = true;
+  }
+
+  /** Result of the last `measurePostCost`, or nulls if it has not run. */
+  get lastCostSample(): { plain: number; withPost: number; overhead: number } | null {
+    return this.costSample;
   }
 
   /* ---------------------------------------------------------------- setup */
@@ -487,6 +509,19 @@ export class RenderPipeline implements System {
     g.uBoost.value = fx.boost * this.screenFX.safetyScale;
     g.uTime.value = time;
 
+    if (this.measureArmed) {
+      this.measureArmed = false;
+      const info = this.renderer.info.render;
+      const c0 = info.calls;
+      this.renderer.setRenderTarget(null);
+      this.renderer.render(this.scene, this.camera);
+      const c1 = info.calls;
+      this.composer.render(step);
+      const c2 = info.calls;
+      this.costSample = { plain: c1 - c0, withPost: c2 - c1, overhead: c2 - c1 - (c1 - c0) };
+      return;
+    }
+
     this.composer.render(step);
   }
 
@@ -531,6 +566,9 @@ export class RenderPipeline implements System {
       impact: Number(this.screenFX.state.impact.toFixed(3)),
       smaa: this.smaaPass.enabled ? 1 : 0,
       cas: this.casPass.enabled ? 1 : 0,
+      costPlain: this.costSample?.plain ?? 0,
+      costWithPost: this.costSample?.withPost ?? 0,
+      costOverhead: this.costSample?.overhead ?? 0,
     };
   }
 }

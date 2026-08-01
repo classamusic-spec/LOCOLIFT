@@ -738,7 +738,7 @@ export class Lighting {
       // street read as lit from 100 m, long after the point lights have fallen
       // off, and — with the env capture no longer crushed — what the wet road
       // has to reflect.
-      this.lampGlobeMat.emissiveIntensity = level * 4.0;
+      this.lampGlobeMat.emissiveIntensity = level * 2.6;
     }
 
     const pool = this.lampLights;

@@ -13,8 +13,25 @@
 import { clamp } from '../core/MathUtils';
 import type { QualityTier, SettingsState } from '../core/types';
 import type { SettingsStore } from '../settings/SettingsStore';
+import type { SteerScheme, TouchHand, TouchMode, TouchPrefs } from './TouchControls';
 import { el, MenuNavigator, svg, UITheme } from './UITheme';
 import type { NavAction, NavigableScreen } from './UITheme';
+
+/**
+ * The on-screen controls' preferences, as the settings menu sees them.
+ *
+ * They deliberately do *not* live in `SettingsState`: they are per-device (a
+ * player's phone and their laptop want different answers) and they are owned by
+ * `TouchControls`, which persists them separately. This two-method bridge is
+ * all the menu needs, and it keeps the two screens from importing each other's
+ * implementation.
+ */
+export interface TouchBridge {
+  prefs(): TouchPrefs;
+  setPrefs(patch: Partial<TouchPrefs>): void;
+  /** true when the device can actually buzz — iOS Safari cannot */
+  canVibrate(): boolean;
+}
 
 type GroupId = 'access' | 'graphics' | 'audio' | 'controls';
 
@@ -44,12 +61,14 @@ export class SettingsMenu implements NavigableScreen {
   private readonly panels = new Map<GroupId, HTMLElement>();
   private readonly tabs = new Map<GroupId, HTMLButtonElement>();
   private readonly refreshers: Refresher[] = [];
+  private touch: TouchBridge | null = null;
   private unsubscribe: (() => void) | null = null;
   private active: GroupId = 'access';
 
-  constructor(theme: UITheme, store: SettingsStore) {
+  constructor(theme: UITheme, store: SettingsStore, touch?: TouchBridge) {
     this.theme = theme;
     this.store = store;
+    this.touch = touch ?? null;
 
     const root = el('div', 'll-screen ll-settings');
     root.setAttribute('role', 'dialog');
@@ -451,7 +470,100 @@ export class SettingsMenu implements NavigableScreen {
         (s) => s.showSpeedUnits,
         (v) => this.store.set('showSpeedUnits', v),
       ),
-      controlsReference(),
+    );
+    this.buildTouchRows(panel);
+    panel.append(controlsReference());
+  }
+
+  /**
+   * On-screen controls.
+   *
+   * These also live in the gear panel you can reach mid-shift, but that panel
+   * only exists while driving and only on a device that auto-detected as
+   * touch. Without a copy here there is no way to turn the overlay *on* for a
+   * touchscreen laptop, and no way to turn it *off* for someone who has a
+   * gamepad plugged into a tablet — the mode was reachable only through a
+   * `?touch=` URL parameter.
+   */
+  private buildTouchRows(panel: HTMLElement): void {
+    const t = this.touch;
+    if (!t) return;
+
+    const write = (patch: Partial<TouchPrefs>): void => {
+      t.setPrefs(patch);
+      // The touch prefs are not in `SettingsState`, so nothing else is going to
+      // tell the rows they changed.
+      this.refresh(this.store.current);
+    };
+
+    panel.append(
+      el('div', 'll-settings__legend', 'CONTROLES EN PANTALLA · On-screen controls'),
+      this.segmented<TouchMode>(
+        'Controles táctiles',
+        'Touch controls',
+        'Automático los muestra solo en pantallas táctiles.',
+        [
+          { value: 'auto', label: 'AUTO' },
+          { value: 'on', label: 'SIEMPRE' },
+          { value: 'off', label: 'NUNCA' },
+        ],
+        () => t.prefs().mode,
+        (v) => write({ mode: v }),
+      ),
+      this.segmented<TouchHand>(
+        'Mano',
+        'Handedness',
+        'Dónde va la dirección: a la izquierda para diestros.',
+        [
+          { value: 'right', label: 'DIESTRO' },
+          { value: 'left', label: 'ZURDO' },
+        ],
+        () => t.prefs().hand,
+        (v) => write({ hand: v }),
+      ),
+      this.segmented<SteerScheme>(
+        'Dirección táctil',
+        'Touch steering',
+        'Palanca flotante, volante, o dos flechas grandes.',
+        [
+          { value: 'stick', label: 'PALANCA' },
+          { value: 'wheel', label: 'VOLANTE' },
+          { value: 'zones', label: 'FLECHAS' },
+        ],
+        () => t.prefs().scheme,
+        (v) => write({ scheme: v }),
+      ),
+      this.slider(
+        'Tamaño de los botones',
+        'Control size',
+        'Se ajusta también al tamaño de la pantalla.',
+        0.8,
+        1.4,
+        0.05,
+        () => t.prefs().scale,
+        (v) => write({ scale: v }),
+        (v) => `${Math.round(v * 100)}%`,
+      ),
+      this.slider(
+        'Opacidad de los controles',
+        'Control opacity',
+        'Cuánto tapan la ciudad cuando no los estás tocando.',
+        0.3,
+        1,
+        0.05,
+        () => t.prefs().opacity,
+        (v) => write({ opacity: v }),
+        (v) => `${Math.round(v * 100)}%`,
+      ),
+      this.toggle(
+        'Vibración',
+        'Haptics',
+        t.canVibrate()
+          ? 'Un toque corto al pulsar y al derrapar.'
+          : 'Este navegador no puede vibrar (Safari en iPhone nunca lo permite).',
+        () => t.prefs().haptics,
+        (v) => write({ haptics: v }),
+      ),
     );
   }
 

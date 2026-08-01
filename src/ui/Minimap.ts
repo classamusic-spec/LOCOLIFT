@@ -136,7 +136,10 @@ export class Minimap {
   applySettings(s: SettingsState): void {
     this.rotates = s.minimapRotates;
     this.el.dataset.rotates = s.minimapRotates ? '1' : '0';
-    const next = Math.round(BASE_SIZE * clamp(s.uiScale, 0.75, 1.5));
+    // The floor used to be 0.75. A landscape phone needs to go below that —
+    // `UISystem` hands us a viewport-derived scale there — but not so far that
+    // the road lines stop resolving, which is what 0.42 (≈82 px) protects.
+    const next = Math.round(BASE_SIZE * clamp(s.uiScale, 0.42, 1.5));
     if (next !== this.size) {
       this.size = next;
       this.resize();

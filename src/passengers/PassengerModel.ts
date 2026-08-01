@@ -1177,6 +1177,17 @@ export class HailBeacon {
     this.urgency = clamp01(u);
   }
 
+  /**
+   * How far the column has to carry. Free roam runs this above 1 so a hail is
+   * legible from the far side of a plaza — the whole mode is about spotting one
+   * without a HUD arrow telling you where to look. `update` only touches the
+   * mesh's scale, so the root's is safe to own from out here.
+   */
+  setReach(scale: number): void {
+    const s = Number.isFinite(scale) ? clamp(scale, 1, 4) : 1;
+    this.root.scale.set(1, s, 1);
+  }
+
   update(dt: number): void {
     this.t += dt;
     const rate = 2.2 + this.urgency * 5.5;
@@ -1212,6 +1223,7 @@ export class BeaconPool {
 
   release(b: HailBeacon): void {
     b.root.removeFromParent();
+    b.setReach(1);
     this.live = Math.max(0, this.live - 1);
     if (this.free.length < 12) this.free.push(b);
     else b.dispose();
