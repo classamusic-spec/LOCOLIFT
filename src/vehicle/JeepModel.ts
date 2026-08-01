@@ -1267,7 +1267,10 @@ export class JeepModel {
     this.materials.push(meterMat);
 
     const meterPod = new THREE.Group();
-    meterPod.position.set(0.16, 0.735, -0.5);
+    /* Sited to clear the HUD. The bottom-right of the screen belongs to the
+     * boost bar and the speedometer chip; a meter parked there is a meter
+     * nobody ever reads. Up and inboard puts it above them. */
+    meterPod.position.set(0.06, 0.79, -0.53);
     meterPod.rotation.set(-0.36, -0.34, 0);
     this.cockpit.add(meterPod);
     const meterShell = new Shell();
@@ -1283,7 +1286,7 @@ export class JeepModel {
     meterMesh.position.z = 0.001;
     meterPod.add(meterMesh);
     /* the stalk down to the scuttle */
-    metal.add(tube(0.16, 0.735, -0.55, 0.16, 0.63, -0.56, 0.014, 6));
+    metal.add(tube(0.06, 0.79, -0.57, 0.08, 0.63, -0.58, 0.014, 6));
 
     /* ---- switch strip on the fascia ------------------------------------- */
     const strip = makeSwitchStrip(['LUZ', 'AIRE', 'RADIO', 'AUX'], '#2fa8a0');
