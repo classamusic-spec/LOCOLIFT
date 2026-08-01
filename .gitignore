@@ -6,3 +6,12 @@ dist-standalone/
 *.local
 .DS_Store
 .vercel
+
+# Scratch diagnostics and integration handoff notes. An underscore prefix marks
+# a throwaway: `tools/_diag-boot.mjs` answers one question during one
+# investigation, unlike `tools/glsl-lint.mjs`, which is a real check the build
+# depends on and is tracked. Same for `docs/_handoff-*.md`, which carry wiring
+# notes between a parallel worker and the integrator and are obsolete once
+# applied.
+tools/_*
+docs/_*
