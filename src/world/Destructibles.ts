@@ -234,12 +234,26 @@ const FLY_TIMEOUT = 7.5;
 /** Metres a body must move from rest before the visual starts following it. */
 const DISTURB_DISTANCE = 0.035;
 
-/** Extra impulse per m/s of impact, as a multiple of the prop's own mass. */
-const KICK_PER_SPEED = 1.35;
-/** Fraction of the kick redirected upward, so props fly rather than skid. */
-const KICK_LIFT = 0.55;
-/** Random tumble, N·m·s per kg. */
-const KICK_SPIN = 0.9;
+/**
+ * The launch is authored as a **velocity**, not as an impulse, and then
+ * multiplied by the prop's mass. Impulse-per-kilogram reads fine on a market
+ * stall and sends a 3 kg café chair off at 40 m/s — faster than the car that
+ * hit it, out of frame before anybody sees it. Bounding the velocity means a
+ * chair and a planter both leave at a speed the player can actually watch,
+ * while the planter still needs far more energy to move.
+ */
+const KICK_SPEED_PER_IMPACT = 0.82;
+const KICK_SPEED_BASE = 2.5;
+const KICK_SPEED_MIN = 4;
+const KICK_SPEED_MAX = 23;
+/** Upward component, same treatment. This is what makes props *fly*. */
+const KICK_LIFT_PER_IMPACT = 0.3;
+const KICK_LIFT_BASE = 2.2;
+const KICK_LIFT_MIN = 2.5;
+const KICK_LIFT_MAX = 11;
+/** Tumble, rad/s. Converted to a torque impulse through the box's own inertia. */
+const KICK_SPIN_MIN = 4;
+const KICK_SPIN_MAX = 15;
 
 /** Score bonus at ramming speed, as a fraction of the prop's base points. */
 const SPEED_BONUS = 0.6;
@@ -858,18 +872,37 @@ export class Destructibles {
     } else {
       const body = rec.body;
       if (body) {
-        const k = s.mass * (impact * KICK_PER_SPEED + 2.4);
+        const out = clamp(
+          impact * KICK_SPEED_PER_IMPACT + KICK_SPEED_BASE,
+          KICK_SPEED_MIN,
+          KICK_SPEED_MAX,
+        );
+        const up = clamp(
+          impact * KICK_LIFT_PER_IMPACT + KICK_LIFT_BASE,
+          KICK_LIFT_MIN,
+          KICK_LIFT_MAX,
+        );
         body.wake();
+        // applied above the centre of mass, so the prop is flipped as well as
+        // thrown — the point of impact is the bumper, not the middle of a chair
         body.applyImpulse(
-          this.tmpV.set(nx * k, k * KICK_LIFT + s.mass * 2.2, nz * k),
+          this.tmpV.set(nx * out * s.mass, up * s.mass, nz * out * s.mass),
           this.tmpV2.set(rec.x, atY + s.hy * 0.6, rec.z),
         );
-        const spin = s.mass * KICK_SPIN * (0.6 + impact * 0.06);
+        // …plus an explicit tumble, priced through the box's own inertia so a
+        // chair and a bench spin at comparable rates instead of comparable
+        // torques. I = m/3 · (h² + h²) for a solid box, as the physics layer uses.
+        const w = clamp(
+          KICK_SPIN_MIN + impact * 0.35,
+          KICK_SPIN_MIN,
+          KICK_SPIN_MAX,
+        );
+        const k = s.mass / 3;
         body.applyTorqueImpulse(
           this.tmpV.set(
-            (Math.random() - 0.5) * spin,
-            (Math.random() - 0.5) * spin,
-            (Math.random() - 0.5) * spin,
+            (Math.random() - 0.5) * 2 * w * k * (s.hy * s.hy + s.hz * s.hz),
+            (Math.random() - 0.5) * 2 * w * k * (s.hx * s.hx + s.hz * s.hz),
+            (Math.random() - 0.5) * 2 * w * k * (s.hx * s.hx + s.hy * s.hy),
           ),
         );
       }

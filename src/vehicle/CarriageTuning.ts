@@ -592,8 +592,8 @@ export const CARRIAGE_WHEEL_LAYOUT: readonly WheelPlacement[] = [
  * a kerb, so there is no launch assist at all.
  */
 export const CARRIAGE_TERRAIN: TerrainTuning = {
-  surfaceSensitivity: 1.15,
-  surfaceDragForce: 2600,
+  surfaceSensitivity: 1.05,
+  surfaceDragForce: 1100,
   kerbStep: 0.06,
   kerbMinSpeed: 99,
   kerbKick: 0,

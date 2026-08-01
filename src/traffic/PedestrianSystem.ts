@@ -1302,6 +1302,29 @@ export class PedestrianSystem implements System {
       this.minEverPlayerDist = Infinity;
       this.safetyFrames = 0;
     };
+    // the pedestrian system is the one place holding a `WorldAPI` reference,
+    // so it is the cheapest place to expose the ground query the QA harness
+    // needs to drop the vehicle onto a real surface instead of into a hill
+    bag.groundHeight = (x: number, z: number): number => this.world.groundHeight(x, z);
+    bag.nearestPeds = (
+      x: number,
+      z: number,
+      n = 8,
+    ): Array<{ x: number; y: number; z: number; d: number; state: number }> => {
+      const out: Array<{ x: number; y: number; z: number; d: number; state: number }> = [];
+      for (const ped of this.peds) {
+        if (!ped.active) continue;
+        out.push({
+          x: ped.pos.x,
+          y: ped.pos.y,
+          z: ped.pos.z,
+          d: Math.hypot(ped.pos.x - x, ped.pos.z - z),
+          state: ped.state,
+        });
+      }
+      out.sort((a, b) => a.d - b.d);
+      return out.slice(0, n);
+    };
   }
 
   /* ------------------------------------------------------------ rendering */

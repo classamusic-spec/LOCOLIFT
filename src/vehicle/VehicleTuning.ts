@@ -372,8 +372,11 @@ export interface TerrainTuning {
   readonly surfaceSensitivity: number;
   /**
    * Extra rolling drag per wheel on a loose surface, N at `SURFACE_GRIP.drag`
-   * = 1. Sand costs the Jeep about 1.3 kN a corner, which is what caps beach
-   * speed below road speed without making the beach feel like treacle.
+   * = 1. Sand costs the Jeep about 0.9 kN a corner: measured, that is 50.3 m/s
+   * on cobble against 39 m/s on the beach, and 0-30 in 3.56 s against 5.4 s.
+   * Enough that the beach is a different place to drive, not so much that it
+   * feels like treacle — the *sliding* is meant to be the challenge, not the
+   * lack of speed.
    */
   readonly surfaceDragForce: number;
 
@@ -397,7 +400,7 @@ export interface TerrainTuning {
 
 export const TERRAIN: TerrainTuning = {
   surfaceSensitivity: 1,
-  surfaceDragForce: 6000,
+  surfaceDragForce: 4200,
   kerbStep: 0.055,
   kerbMinSpeed: 7,
   kerbKick: 62,

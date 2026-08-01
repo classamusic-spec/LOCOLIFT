@@ -35,6 +35,9 @@ import { ScoreSystem } from './scoring/ScoreSystem';
 import { GameDirector } from './states/GameDirector';
 import { RenderPipeline } from './fx/RenderPipeline'; // LOCOFX-TEMP-WIRING
 
+/** How long boot may take before we tell the player something is wrong. */
+const BOOT_WATCHDOG_MS = 45_000;
+
 /**
  * Steps the solver. Registered last so every system has already applied its
  * impulses for this tick — stepping first would delay all vehicle forces by a
@@ -78,6 +81,31 @@ declare global {
   }
 }
 
+/** Hide the page's boot splash. Safe to call more than once. */
+function hideBootSplash(): void {
+  const el = document.getElementById('boot');
+  if (el) el.hidden = true;
+}
+
+/**
+ * Report a fatal boot problem *on top of* the splash.
+ *
+ * The splash is `z-index: 1` and opaque, so an overlay without a higher stack
+ * position is invisible underneath it — a crash and a hang both present as a
+ * black screen otherwise.
+ */
+function showBootError(title: string, detail: string): void {
+  hideBootSplash();
+  const el = document.getElementById('ui-root');
+  if (!el) return;
+  el.innerHTML =
+    `<div role="alert" style="position:fixed;inset:0;z-index:9999;display:grid;` +
+    `place-items:center;font:14px/1.6 system-ui,sans-serif;color:#fff6e8;` +
+    `background:#0b1d2a;padding:2rem;text-align:center">` +
+    `<div style="max-width:46rem"><h1 style="margin:0 0 .75rem;font-size:1.4rem">${title}</h1>` +
+    `<pre style="white-space:pre-wrap;opacity:.85;text-align:left">${detail}</pre></div></div>`;
+}
+
 /** Boot-stage timing, so a hang or a slow build is attributable at a glance. */
 function stage(name: string, t0: number): number {
   const now = performance.now();
@@ -87,6 +115,17 @@ function stage(name: string, t0: number): number {
 
 async function boot(): Promise<void> {
   let t = performance.now();
+  // If boot neither finishes nor throws, say so instead of showing black.
+  const watchdog = setTimeout(() => {
+    if (!window.__loco?.ready) {
+      showBootError(
+        'Loco Lift is taking longer than expected',
+        'The world is still building. If this persists, your browser may not ' +
+          'support the WebGL2 features the game needs.\n\nOpen the console for ' +
+          'the [boot] stage timings to see which stage is stalling.',
+      );
+    }
+  }, BOOT_WATCHDOG_MS);
   const canvas = document.getElementById('gl') as HTMLCanvasElement | null;
   if (!canvas) throw new Error('missing #gl canvas');
 
@@ -243,11 +282,18 @@ async function boot(): Promise<void> {
 
   await engine.initSystems();
   t = stage('initSystems', t);
+  // Defence in depth: UISystem.init() also hides this, but it is registered
+  // last, so any earlier system that stalls or throws would otherwise leave the
+  // game permanently behind an opaque overlay — indistinguishable from a black
+  // screen. Hide it here too, as soon as the loop is genuinely up.
+  hideBootSplash();
   camera.snapToTarget();
   engine.timeOfDay = 15.5;
   engine.start();
 
+  clearTimeout(watchdog);
   installTestHook(engine, input, world, vehicle, camera, save, audio, director);
+  hideBootSplash();
 }
 
 function installTestHook(
@@ -363,14 +409,8 @@ function installTestHook(
   window.__loco = hook;
 }
 
-boot().catch((err) => {
+boot().catch((err: unknown) => {
   console.error('[LocoLift] boot failed:', err);
-  const el = document.getElementById('ui-root');
-  if (el) {
-    el.innerHTML =
-      `<div style="position:fixed;inset:0;display:grid;place-items:center;` +
-      `font:16px/1.5 system-ui;color:#fff;background:#0b1d2a;padding:2rem;text-align:center">` +
-      `<div><h1 style="margin:0 0 .5rem">Loco Lift failed to start</h1>` +
-      `<pre style="white-space:pre-wrap;opacity:.8">${String(err)}</pre></div></div>`;
-  }
+  const detail = err instanceof Error ? `${err.message}\n\n${err.stack ?? ''}` : String(err);
+  showBootError('Loco Lift failed to start', detail);
 });

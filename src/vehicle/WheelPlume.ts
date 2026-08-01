@@ -21,9 +21,12 @@ import * as THREE from 'three';
 import { clamp01, lerp } from '../core/MathUtils';
 import type { QualityTier } from '../core/types';
 
-/** Puffs alive at once, per tier. Zero on `low`: it is a pure garnish. */
+/**
+ * Puffs alive at once, per tier. Even `low` keeps some: this is the only thing
+ * that tells the player the beach is not the plaza, and it is one draw call.
+ */
 const PLUME_COUNT: Record<QualityTier, number> = {
-  low: 0,
+  low: 48,
   medium: 90,
   high: 160,
   ultra: 240,

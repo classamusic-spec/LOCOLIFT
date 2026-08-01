@@ -244,6 +244,27 @@ export class RenderPipeline implements System {
     this.applyQuality();
     renderer.getSize(this.sizeProbe);
     this.setSize(this.sizeProbe.x, this.sizeProbe.y);
+
+    /* QA hook, mirroring `window.__loco`. The harness needs to A/B the chain
+     * at runtime — measuring the post cost by rebuilding twice measures the
+     * rest of the district drifting under it as well. */
+    if (typeof window !== 'undefined') {
+      (window as unknown as { __locoFx?: RenderPipeline }).__locoFx = this;
+    }
+  }
+
+  /**
+   * QA/debug: force the whole chain off (`false`) or back to whatever the
+   * current tier and settings allow (`true`). Not a settings path — the
+   * settings path is `postProcessing`, which `applyQuality` reads.
+   */
+  setEnabledForTest(on: boolean): void {
+    if (on) {
+      this.applyQuality();
+    } else {
+      this.enabled = false;
+      for (const p of this.composer.passes) p.enabled = false;
+    }
   }
 
   /* ---------------------------------------------------------------- setup */
