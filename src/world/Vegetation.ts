@@ -34,7 +34,13 @@ import { RNG, valueNoise2D } from '../core/RNG';
 import { SEA_LEVEL } from './CityLayout';
 import { coastModel, sampleSpan, GeoBuilder, COAST_DENSITY } from './Coast';
 import type { CoastModel } from './Coast';
-import { LodField, bucketByCell, bucketFootprint } from './LodGrid';
+import {
+  LodField,
+  SHADOW_CASTER_CUT,
+  TALL_SHADOW_CUT,
+  bucketByCell,
+  bucketFootprint,
+} from './LodGrid';
 import type { CityLayout, WorldLayer, WorldOpts } from './WorldTypes';
 
 /* ------------------------------------------------------------------ tuning */
@@ -95,6 +101,18 @@ const FROND_FAR_SEGMENTS = 3;
  * is frustum culling a whole stand, which a 240 m cell already delivers.
  */
 const PALM_CELL = 240;
+
+/**
+ * Trunk shapes a single stand draws from, out of `trunkVariants`.
+ *
+ * Each variant is its own baked sweep, so it is also its own draw call per
+ * cell: six variants × two species × every cell on the shore is a draw-call
+ * bill the triangle saving does not justify. Neighbouring cells take
+ * *different* pairs, so the district still shows all six leans while any one
+ * stand costs two meshes — and within a stand the yaw and scale jitter is
+ * doing more of the work than the lean is anyway.
+ */
+const PALM_VARIANTS_PER_CELL = 2;
 
 /** Cell size for the understorey, which is denser and much cheaper per mesh. */
 const SHRUB_CELL = 180;
@@ -492,10 +510,19 @@ export class Vegetation implements WorldLayer {
         const cell = cells[c];
         const foot = bucketFootprint(cell, PALM_SPREAD);
 
+        const nVar = detail.trunkVariants;
+        const perCell = Math.min(PALM_VARIANTS_PER_CELL, nVar);
         const byVariant: PalmSite[][] = trunkGeos.map(() => []);
-        for (const s of cell.items) byVariant[s.variant % detail.trunkVariants].push(s);
+        for (const s of cell.items) {
+          // rotate the subset by cell so the shore does not repeat
+          const v = (c * perCell + (s.variant % perCell)) % nVar;
+          // the frond crown is placed off `crowns[variant]`, so the site has to
+          // carry the variant it was actually built with
+          s.variant = v;
+          byVariant[v].push(s);
+        }
 
-        for (let v = 0; v < detail.trunkVariants; v++) {
+        for (let v = 0; v < nVar; v++) {
           const b = byVariant[v];
           if (b.length === 0) continue;
           // `applyPalmInstances` attaches per-instance wind to the geometry, so
@@ -792,10 +819,13 @@ export class Vegetation implements WorldLayer {
           sc.setScalar(it.scale);
           m.compose(p, q, sc);
           mesh.setMatrixAt(i, m);
-          // seeded off the world position, not the array index, so splitting
-          // the list into cells does not reshuffle which plant sways when
-          phase[i] = (it.x * 0.031 + it.z * 0.017) % 1;
-          stiffness[i] = stiff * (0.82 + ((it.x * 0.577 + it.z * 0.331) % 1) * 0.36);
+          // Seeded off the world position, not the array index, so splitting
+          // the list into cells does not reshuffle which plant sways when.
+          // `fract` rather than `%`: half the district has negative x and z,
+          // and JS `%` keeps the sign, which would push stiffness below the
+          // authored floor for everything west of the origin.
+          phase[i] = fract(it.x * 0.031 + it.z * 0.017);
+          stiffness[i] = stiff * (0.82 + fract(it.x * 0.577 + it.z * 0.331) * 0.36);
           if (bloomCol) {
             col.setHex(palette[it.tint % palette.length], THREE.SRGBColorSpace);
             bloomCol[i * 3] = col.r;
@@ -901,10 +931,14 @@ export class Vegetation implements WorldLayer {
      * kind of "cheaper but worse" the budget must not buy. What the grid does
      * buy is that a stand behind the camera, or across the bay, is no longer
      * transformed and no longer re-submitted into the shadow map. */
-    this.lodTall.update(cameraPos, budget.drawDistance);
+    this.lodTall.update(cameraPos, budget.drawDistance, TALL_SHADOW_CUT[this.quality]);
     // Dune tufts and bougainvillea are 0.6–1.4 m; past a couple of hundred
     // metres they are below a pixel and read as noise on the sand either way.
-    this.lodSmall.update(cameraPos, Math.max(240, budget.propDetailDistance * 1.6));
+    this.lodSmall.update(
+      cameraPos,
+      Math.max(240, budget.propDetailDistance * 1.6),
+      SHADOW_CASTER_CUT[this.quality],
+    );
 
     /* Frond LOD. Same crowns, same droop, same wind — a third of the segments.
      * Swapped per stand rather than per palm so the change is one event at the
@@ -987,6 +1021,11 @@ interface PalmSite {
 }
 
 const UP = new THREE.Vector3(0, 1, 0);
+
+/** Positive fractional part. JS `%` keeps the sign of the dividend. */
+function fract(v: number): number {
+  return v - Math.floor(v);
+}
 
 function makeSite(species: PalmSpecies, x: number, y: number, z: number, rng: RNG): PalmSite {
   const spec = species === 'coconut' ? COCONUT : ROYAL;

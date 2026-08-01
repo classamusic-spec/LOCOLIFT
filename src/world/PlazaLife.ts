@@ -28,14 +28,19 @@
  *
  * ## Cost
  *
- * Twelve draw calls for every square in the city. Anything repeated more than
- * about thirty times is an `InstancedMesh`; everything rarer — the fountain,
- * the bandstand, the paving, the kerbs, the flagpoles, the tree grates, the
- * stone benches and the pigeons — merges into one mesh per material, because
- * below that count a whole draw call costs more than the duplicated vertices. Distance culling is in the vertex shader — see
- * {@link ./PropKit} — so nothing here rasterises past `propDetailDistance`,
- * with the fountain and the bandstand given a landmark multiplier so the
- * square still reads from the other end of a *calle larga*.
+ * Anything repeated more than about thirty times is an `InstancedMesh`;
+ * everything rarer — the fountain, the bandstand, the paving, the kerbs, the
+ * flagpoles, the tree grates, the stone benches and the pigeons — merges into
+ * one mesh per material, because below that count a whole draw call costs more
+ * than the duplicated vertices.
+ *
+ * Distance culling is in the vertex shader — see {@link ./PropKit} — so nothing
+ * here rasterises past `propDetailDistance`, with the fountain and the
+ * bandstand given a landmark multiplier so the square still reads from the
+ * other end of a *calle larga*. The instanced furniture is additionally split
+ * **per square** ({@link PLAZA_CELL}), because one mesh holding every bench in
+ * the district spans the map: three could never frustum-cull it and the sun's
+ * shadow camera re-submitted all of it from anywhere on the island.
  */
 import * as THREE from 'three';
 import { QUALITY_BUDGET } from '../core/Config';
@@ -77,6 +82,7 @@ import {
   triCount,
 } from './PropKit';
 import type { ClusterRange, DressPlacement, WetnessSource } from './PropKit';
+import { LodField, SHADOW_CASTER_CUT, bucketByCell, bucketFootprint } from './LodGrid';
 import { destructibles } from './Destructibles';
 import type { CityLayout, OpenArea, WorldLayer, WorldOpts } from './WorldTypes';
 
@@ -104,6 +110,12 @@ const FURNITURE_CULL = 1.15;
 
 /** Raster cell for the free-space map, metres. */
 const CELL = 1.0;
+
+/**
+ * Cell size for the plaza LOD grid, metres. A square is 40–70 m across, so one
+ * cell holds one square and its immediate street furniture.
+ */
+const PLAZA_CELL = 110;
 
 /** Minimum free cells for a flood-filled component to count as an island. */
 const MIN_ISLAND_CELLS = 26;
@@ -157,6 +169,8 @@ export class PlazaLife implements WorldLayer {
 
   private geometries: THREE.BufferGeometry[] = [];
   private meshes: THREE.Object3D[] = [];
+  /** the per-square instanced meshes, culled together every frame */
+  private lod = new LodField();
   private bodies: BodyHandle[] = [];
   private _stats = { instances: 0, triangles: 0, trees: 0, benches: 0, islands: 0, fountains: 0 };
 
@@ -725,18 +739,20 @@ export class PlazaLife implements WorldLayer {
       this.blooms,
       'plaza/treeBloom',
     );
-    const benchMesh = this.addInstanced(buildBench(), kit.solid, this.benches, 'plaza/bench');
+    const benchMeshes = this.addInstanced(buildBench(), kit.solid, this.benches, 'plaza/bench');
     // cast iron, not painted plastic — see `DressKit.metal`. Same mesh, same
     // draw call, different BRDF.
     this.addInstanced(buildLampPost(true), kit.metal, this.lamps, 'plaza/lampPost');
     this.addInstanced(buildLampGlobe(true), kit.glow, this.lamps, 'plaza/lampGlobe');
-    const potMesh = this.addInstanced(buildDoorwayPot(rng.fork(0x14), true), kit.foliage, this.pots, 'plaza/pot');
-    const palmMesh = this.addInstanced(buildPottedPalm(rng.fork(0x15)), kit.foliage, this.palms, 'plaza/palm');
+    const potMeshes = this.addInstanced(buildDoorwayPot(rng.fork(0x14), true), kit.foliage, this.pots, 'plaza/pot');
+    const palmMeshes = this.addInstanced(buildPottedPalm(rng.fork(0x15)), kit.foliage, this.palms, 'plaza/palm');
 
-    /* --- what the square is willing to lose when a taxi comes through --- */
-    destructibles.registerInstanced(this, benchMesh, 'bench', this.benches);
-    destructibles.registerInstanced(this, potMesh, 'bigPot', this.pots);
-    destructibles.registerInstanced(this, palmMesh, 'palm', this.palms);
+    /* --- what the square is willing to lose when a taxi comes through ---
+     * Registered per cell: `Destructibles` addresses a prop by `(mesh, index)`,
+     * and each cell's placements are in the order they were instanced. */
+    for (const b of benchMeshes) destructibles.registerInstanced(this, b.mesh, 'bench', b.items);
+    for (const b of potMeshes) destructibles.registerInstanced(this, b.mesh, 'bigPot', b.items);
+    for (const b of palmMeshes) destructibles.registerInstanced(this, b.mesh, 'palm', b.items);
     // The kerbside planters are merged into the shared solid mesh, so they
     // collapse in place rather than tumbling — a stone box does not bounce.
     if (solidGeo) {
@@ -786,44 +802,70 @@ export class PlazaLife implements WorldLayer {
     this._stats.triangles += triCount(geo);
   }
 
+  /**
+   * One `InstancedMesh` per prop **per plaza**, not one for the district.
+   *
+   * There are three or four squares scattered across the old town; a single
+   * mesh holding every bench in all of them spans the map, so per-object
+   * frustum culling never rejected it and the sun's shadow camera re-submitted
+   * the lot from anywhere. A cell the size of a square fixes both.
+   */
   private addInstanced(
     geo: THREE.BufferGeometry,
     mat: THREE.Material,
     list: DressPlacement[],
     name: string,
-  ): THREE.InstancedMesh | null {
-    const mesh = dressInstanced(geo, mat, list, name);
-    if (!mesh) {
+  ): Array<{ mesh: THREE.InstancedMesh; items: DressPlacement[] }> {
+    const out: Array<{ mesh: THREE.InstancedMesh; items: DressPlacement[] }> = [];
+    if (list.length === 0) {
       geo.dispose();
-      return null;
+      return out;
     }
-    this.group.add(mesh);
-    this.meshes.push(mesh);
-    this.geometries.push(mesh.geometry);
-    this._stats.instances += mesh.count;
-    this._stats.triangles += triCount(mesh.geometry) * mesh.count;
-    return mesh;
+    const cells = bucketByCell(list, PLAZA_CELL, (p) => p);
+    for (let c = 0; c < cells.length; c++) {
+      const cell = cells[c];
+      // `dressInstanced` hangs the per-instance cull multiplier on the
+      // geometry, so cells cannot share one
+      const g = cells.length === 1 ? geo : geo.clone();
+      const mesh = dressInstanced(g, mat, cell.items, `${name}/${c}`);
+      if (!mesh) {
+        g.dispose();
+        continue;
+      }
+      this.group.add(mesh);
+      this.meshes.push(mesh);
+      this.geometries.push(mesh.geometry);
+      this._stats.instances += mesh.count;
+      this._stats.triangles += triCount(mesh.geometry) * mesh.count;
+      let mul = 1;
+      for (const it of cell.items) mul = Math.max(mul, it.cull ?? 1);
+      const f = bucketFootprint(cell, 6);
+      this.lod.add(mesh, f.cx, f.cz, f.radius, mul);
+      out.push({ mesh, items: cell.items });
+    }
+    if (cells.length !== 1) geo.dispose();
+    return out;
   }
 
   /* -------------------------------------------------------------- runtime */
 
   update(cameraPos: THREE.Vector3, dt: number, timeOfDay: number): void {
-    this.kit?.update(
-      dt,
-      nightRamp(timeOfDay),
-      cameraPos,
-      QUALITY_BUDGET[this.quality].propDetailDistance,
-      this,
-    );
+    const cut = QUALITY_BUDGET[this.quality].propDetailDistance;
+    this.kit?.update(dt, nightRamp(timeOfDay), cameraPos, cut, this);
+    // Same cut the vertex shader already applies, so a hidden cell was drawing
+    // nothing anyway. Landmarks carry `LANDMARK_CULL` on their placements and
+    // the cell inherits the largest multiplier it holds.
+    this.lod.update(cameraPos, cut, SHADOW_CASTER_CUT[this.quality]);
   }
 
   onQualityChange(tier: QualityTier): void {
     this.quality = tier;
     const d = QUALITY_BUDGET[tier].propDetailDistance;
-    for (const m of this.meshes) {
-      if (m.name === 'plaza/pigeon') m.visible = d >= 100;
-      else if (m.name === 'plaza/pot' || m.name === 'plaza/palm') m.visible = d >= 90;
-    }
+    this.lod.setEnabled((m) => m.name.startsWith('plaza/pigeon'), d >= 100);
+    this.lod.setEnabled(
+      (m) => m.name.startsWith('plaza/pot') || m.name.startsWith('plaza/palm'),
+      d >= 90,
+    );
   }
 
   stats(): Record<string, number> {
@@ -841,6 +883,7 @@ export class PlazaLife implements WorldLayer {
 
   dispose(): void {
     destructibles.unregisterOwner(this);
+    this.lod.clear();
     for (const g of this.geometries) g.dispose();
     this.geometries.length = 0;
     for (const m of this.meshes) {

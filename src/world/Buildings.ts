@@ -27,6 +27,7 @@ import {
   type BuildingPlan,
 } from './Facades';
 import { getFacadeAtlas, type FacadeAtlas } from './FacadeTextures';
+import { SHADOW_CASTER_CUT } from './LodGrid';
 import { sharedWetness } from './Materials';
 import { Roofs, type RoofStats } from './Roofs';
 import type { TextureFactory } from './TextureFactory';
@@ -193,7 +194,22 @@ export class Buildings implements WorldLayer {
     }
 
     /* ---------------- pass 2: geometry, merged per block ---------------- */
-    const registry = new InstanceRegistry(layout.bounds, 4, 3);
+    /* 6 × 4 regions, not 4 × 3.
+     *
+     * The registry's job is to give the repeated façade detail — 29 285
+     * balcony rails, pots, laundry lines and shutters — a bounding sphere small
+     * enough for three to reject. At 4 × 3 a region was 225 × 233 m with a
+     * 162 m sphere, which intersects the sun's 112 m shadow box from almost
+     * anywhere in the district: measured, every one of the 191 instanced meshes
+     * was re-submitted into the shadow map every frame, 547 k triangles of it,
+     * on top of the main pass.
+     *
+     * 6 × 4 is 150 × 175 m with a 115 m sphere — small enough that only the
+     * ring of regions around the player reaches the shadow box, and coarse
+     * enough that the region count does not turn 16 instance definitions into
+     * a draw-call problem. 7 × 5 was measured too: it saves a further ~40 k
+     * triangles and costs ~90 draw calls, which is the wrong trade at 594. */
+    const registry = new InstanceRegistry(layout.bounds, 6, 4);
     const balconies = new BalconyFactory(registry, this.atlas);
     const roofs = new Roofs(registry, this.atlas, balconies);
 
@@ -536,11 +552,35 @@ export class Buildings implements WorldLayer {
       near.visible = inRange && useNear;
       if (far) far.visible = inRange && !useNear;
     }
-    // Instanced detail (balconies, pots, laundry) reads at much shorter range.
-    const detailLimit = budget.propDetailDistance * 2.2;
+    /* Instanced detail (balconies, pots, laundry) reads at much shorter range.
+     *
+     * The shadow test is separate and much tighter, because it is the most
+     * expensive thing in the frame: measured on `high` at street level, the
+     * instanced façade detail alone put 673 k triangles into the sun's shadow
+     * map every frame — more than the whole main pass paid for the district's
+     * façades. A balcony rail is 4 cm of iron and a pot is 30 cm; from beyond
+     * `SHADOW_CASTER_CUT` neither can put a texel inside a 112 m box that is
+     * centred on the car, and what it would put there lands on a wall the
+     * player is looking at from 200 m through two intervening blocks. */
+    /* 1.6 × the prop cut, not 2.2 ×. At `high` that is 304 m instead of 418 m.
+     * §R5 puts the far depth plane at 160 m and fog-desaturates everything past
+     * it; a 4 cm balcony rail or a 30 cm pot at 300 m is under two pixels and
+     * arrives through that fog. The near-shell twin has already been swapped
+     * for its flat LOD at 130 m, so what is lost out there is applied relief on
+     * a façade that is drawing painted openings anyway. Measured: 117 k
+     * triangles and ~50 draw calls off the elevated wide viewpoint. */
+    /* …but never *inside* the shell swap. `propDetailDistance` is 70 m on
+     * `low`, and 1.6 × that is 112 m — in front of `SHELL_LOD_DISTANCE`, so the
+     * ironwork would come off a façade that is still drawing its full 3-D
+     * reveals and cornices. A balcony must outlive the detailed shell it is
+     * bolted to, whatever the tier says about props. */
+    const detailLimit = Math.max(budget.propDetailDistance * 1.6, SHELL_LOD_DISTANCE * 1.5);
+    const shadowLimit = SHADOW_CASTER_CUT[this.quality];
     for (const m of this.instanced) {
       const s = m.boundingSphere ?? m.geometry.boundingSphere;
-      m.visible = s ? cameraPos.distanceTo(s.center) - s.radius < detailLimit : true;
+      const d = s ? cameraPos.distanceTo(s.center) - s.radius : 0;
+      m.visible = d < detailLimit;
+      m.castShadow = d < shadowLimit;
     }
   }
 

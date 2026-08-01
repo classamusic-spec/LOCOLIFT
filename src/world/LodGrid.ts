@@ -40,6 +40,37 @@
  * down. Matching the shader's XZ metric makes the cull provably invisible.
  */
 import type * as THREE from 'three';
+import type { QualityTier } from '../core/types';
+
+/* ----------------------------------------------------------- shadow reach */
+
+/**
+ * Metres past which a **small** prop stops being worth submitting to the sun's
+ * shadow map.
+ *
+ * `Lighting` fits a single ortho cascade of half-width `SHADOW_EXTENT` (62 /
+ * 82 / 112 / 145 m by tier) centred 40 % of that extent ahead of the camera.
+ * A pot, a plastic chair, a festoon bulb or a balcony rail is under a metre;
+ * from beyond about 1.6 × the extent its shadow cannot reach the box, and what
+ * it would draw there is a texel or two landing on the far side of intervening
+ * façades. Turning `castShadow` off out there costs nothing visible and saves
+ * the triangles **and** the draw call, which matters twice over because
+ * `renderer.info.render.calls` counts the shadow submission separately.
+ */
+export const SHADOW_CASTER_CUT: Record<QualityTier, number> = {
+  low: 100,
+  medium: 130,
+  high: 180,
+  ultra: 235,
+};
+
+/** The same, for things with a real vertical: palms, shade trees, boats. */
+export const TALL_SHADOW_CUT: Record<QualityTier, number> = {
+  low: 170,
+  medium: 210,
+  high: 285,
+  ultra: 360,
+};
 
 /* ------------------------------------------------------------- bucketing */
 
@@ -89,6 +120,30 @@ export function bucketByCell<T>(
     if (p.z > b.maxZ) b.maxZ = p.z;
   }
   return [...map.values()];
+}
+
+/**
+ * The whole list as a single bucket, for prop types too cheap to be worth
+ * splitting. Still gives the caller a real footprint, so the one mesh it makes
+ * is culled by the same rule as everything else.
+ */
+export function wholeBucket<T extends { x: number; z: number }>(
+  items: readonly T[],
+): CellBucket<T> {
+  const b: CellBucket<T> = {
+    items: [...items],
+    minX: Infinity,
+    maxX: -Infinity,
+    minZ: Infinity,
+    maxZ: -Infinity,
+  };
+  for (const p of items) {
+    if (p.x < b.minX) b.minX = p.x;
+    if (p.x > b.maxX) b.maxX = p.x;
+    if (p.z < b.minZ) b.minZ = p.z;
+    if (p.z > b.maxZ) b.maxZ = p.z;
+  }
+  return b;
 }
 
 /** Centre and XZ radius of a bucket, padded by the prop's own reach. */

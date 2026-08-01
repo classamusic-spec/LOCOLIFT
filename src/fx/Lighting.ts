@@ -27,7 +27,8 @@
  *    straight down the calles largas whatever seed the layout was built with.
  *
  * Night lighting deliberately does **not** use 200 real point lights. Every
- * lamp is an instanced emissive mesh (2 draw calls for the whole city), and a
+ * lamp is an instanced emissive mesh — a post and a lantern per spatial cell,
+ * culled at `windowLightDistance` — and a
  * small fixed-size pool of real `PointLight`s is re-targeted at the lamps
  * nearest the player each frame. The pool size never changes, so the renderer
  * never recompiles a program mid-drive; the emissive globes carry the look at
@@ -133,11 +134,22 @@ const LAMP_SPACING = 21;
 
 /**
  * Cell size for the lamp field's LOD grid, metres. Lamps follow the road graph,
- * so a cell holds one junction's worth of street; 150 m keeps the live set to a
- * handful of cells at `windowLightDistance` without paying a draw call per
- * block.
+ * so a cell holds a few blocks of street. Coarse on purpose: the posts do not
+ * cast, so a cell is one draw call rather than two, but 380 lamps over a
+ * fine grid would still turn two calls into forty for 30 k triangles.
  */
-const LAMP_LOD_CELL = 150;
+const LAMP_LOD_CELL = 240;
+
+/**
+ * Share of `windowLightDistance` the lamp field survives to — 300 m on `high`.
+ *
+ * Post and lantern cull **together**. Dropping the 144-triangle iron post
+ * before the 24-triangle globe is tempting and wrong: it leaves a lit lantern
+ * floating 4.6 m up with nothing under it, which in daylight is a small dark
+ * cylinder hanging in the air. What carries a lit city at range is the
+ * per-vertex window glow on the façades, which has no distance cull at all.
+ */
+const LAMP_CUT_FRACTION = 0.75;
 
 /**
  * Candela for a street lantern. The reference's "4.0" predates three dropping
@@ -794,8 +806,8 @@ export class Lighting {
       post.computeBoundingSphere();
       globe.computeBoundingSphere();
       const foot = bucketFootprint(cell, 5);
-      this.lampLod.add(post, foot.cx, foot.cz, foot.radius);
-      this.lampLod.add(globe, foot.cx, foot.cz, foot.radius);
+      this.lampLod.add(post, foot.cx, foot.cz, foot.radius, LAMP_CUT_FRACTION);
+      this.lampLod.add(globe, foot.cx, foot.cz, foot.radius, LAMP_CUT_FRACTION);
       this.lampMeshes.push(post, globe);
       this.group.add(post, globe);
     }

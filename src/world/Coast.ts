@@ -39,6 +39,10 @@ import { RoadNetworkImpl } from './RoadNetwork';
 import { SURFACE_GRIP, setSurfaceProbe } from './Surfaces';
 import type { SurfaceGrip, SurfaceKind } from './Surfaces';
 import type { CityLayout, OpenArea, WorldLayer, WorldOpts } from './WorldTypes';
+import { LodField, TALL_SHADOW_CUT, bucketByCell, bucketFootprint } from './LodGrid';
+
+/** Cell size for the boulder/riprap LOD grid, metres. */
+const ROCK_CELL = 160;
 
 /* ========================================================================== *
  *  public types
@@ -1315,6 +1319,9 @@ export class Coast implements WorldLayer {
 
   private materials: THREE.Material[] = [];
   private geometries: THREE.BufferGeometry[] = [];
+  /** per-cell riprap and boulder meshes, culled together */
+  private rocks: THREE.InstancedMesh[] = [];
+  private rockLod = new LodField();
   private textures: THREE.Texture[] = [];
   private bodies: BodyHandle[] = [];
   private physics: WorldOpts['physics'] | null = null;
@@ -1711,17 +1718,32 @@ export class Coast implements WorldLayer {
         geos[v].dispose();
         continue;
       }
-      const inst = new THREE.InstancedMesh(geos[v], mat, list.length);
-      inst.name = `coast/rocks${v}`;
-      for (let i = 0; i < list.length; i++) inst.setMatrixAt(i, list[i]);
-      inst.instanceMatrix.needsUpdate = true;
-      inst.castShadow = true;
-      inst.receiveShadow = true;
-      inst.frustumCulled = true;
-      inst.computeBoundingSphere();
-      this.group.add(inst);
+      /* One mesh per variant *per cell*. The riprap runs the length of the
+       * shore, so a single mesh per variant has a district-sized bounding
+       * sphere and is drawn — and shadow-cast — from anywhere on the map. */
+      const cells = bucketByCell(list, ROCK_CELL, (m) => ({
+        x: m.elements[12],
+        z: m.elements[14],
+      }));
+      for (let c = 0; c < cells.length; c++) {
+        const cell = cells[c];
+        const inst = new THREE.InstancedMesh(geos[v], mat, cell.items.length);
+        inst.name = `coast/rocks${v}/${c}`;
+        for (let i = 0; i < cell.items.length; i++) inst.setMatrixAt(i, cell.items[i]);
+        inst.instanceMatrix.needsUpdate = true;
+        inst.castShadow = true;
+        inst.receiveShadow = true;
+        inst.frustumCulled = true;
+        inst.computeBoundingSphere();
+        this.group.add(inst);
+        this.rocks.push(inst);
+        const foot = bucketFootprint(cell, 4);
+        this.rockLod.add(inst, foot.cx, foot.cz, foot.radius);
+        this._stats.rocks += cell.items.length;
+      }
+      // the variant geometry is shared by every cell that uses it; it carries
+      // no per-instance attribute, so one copy is enough
       this.geometries.push(geos[v]);
-      this._stats.rocks += list.length;
       const tri = (geos[v].index?.count ?? geos[v].getAttribute('position').count) / 3;
       this._stats.triangles += tri * list.length;
     }
@@ -1729,18 +1751,21 @@ export class Coast implements WorldLayer {
 
   /* -------------------------------------------------------------- runtime */
 
-  update(_cameraPos: THREE.Vector3, dt: number): void {
+  update(cameraPos: THREE.Vector3, dt: number): void {
     this.uniforms.uTime.value += dt;
+    // Boulders read as the shore's silhouette, so they hold to `drawDistance`
+    // rather than the prop cut; the win here is the frustum, not the range.
+    this.rockLod.update(
+      cameraPos,
+      QUALITY_BUDGET[this.quality].drawDistance,
+      TALL_SHADOW_CUT[this.quality],
+    );
   }
 
   onQualityChange(tier: QualityTier): void {
     this.quality = tier;
     const d = QUALITY_BUDGET[tier].propDetailDistance;
-    for (const child of this.group.children) {
-      if (child instanceof THREE.InstancedMesh && child.name.startsWith('coast/rocks')) {
-        child.visible = d > 60;
-      }
-    }
+    this.rockLod.setEnabled(() => true, d > 60);
   }
 
   stats(): Record<string, number> {
@@ -1755,6 +1780,9 @@ export class Coast implements WorldLayer {
 
   dispose(): void {
     setSurfaceProbe(null);
+    this.rockLod.clear();
+    for (const m of this.rocks) m.dispose();
+    this.rocks.length = 0;
     for (const g of this.geometries) g.dispose();
     this.geometries.length = 0;
     for (const m of this.materials) m.dispose();

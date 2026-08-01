@@ -87,8 +87,18 @@ const COCKPIT = {
   podX: -0.37,
   /** how far the instrument pod leans back, radians (≈26°, square to the eye) */
   podTilt: 0.46,
-  /** how far the hands are carried round the rim before they stop, radians */
-  handLock: 1.0,
+  /**
+   * How far the hands are carried round the rim before they stop, radians.
+   *
+   * 0.6 rad ≈ 34°, which keeps them within a hand's width of nine-and-three
+   * at every steering angle. It was 1.0 to begin with, and at full lock that
+   * swung the right arm horizontally across the whole frame and buried the
+   * taxi meter behind it. Real drivers shuffle; this is the cheap version of
+   * that, and it is invisible because the rim is a torus — only the spokes and
+   * the marker reveal the true wheel angle, and both of those are still
+   * turning the full 121°.
+   */
+  handLock: 0.6,
   /** needle damping rate, 1/s — a hairspring, not a debug readout */
   needleRate: 7.5,
   /** the meter's flag drop, dollars */
@@ -956,7 +966,14 @@ export class JeepModel {
     const dz = -0.16 - -0.5;
     const len = Math.hypot(dy, dz);
     const g = new THREE.PlaneGeometry(1.4, len - 0.05);
-    g.rotateX(Math.atan2(dz, dy) - Math.PI / 2);
+    /* A plane's height axis is its local +Y, so raking it to run from the base
+     * of the screen to the top means rotating +Y onto that direction — i.e.
+     * `atan2(dz, dy)`, full stop. This carried an extra −90°, which rotates the
+     * plane's *normal* onto the screen direction instead and leaves the glass
+     * lying flat: a translucent shelf across the cabin at eye height. Invisible
+     * from outside, because the pane is thin and 26% opaque. Extremely visible
+     * from the driver's seat, which is how it was finally found. */
+    g.rotateX(Math.atan2(dz, dy));
     g.translate(0, 0.5 + dy * 0.5, -0.5 + dz * 0.5);
     this.geometries.push(g);
     const mesh = new THREE.Mesh(g, matGlass);
@@ -1157,6 +1174,11 @@ export class JeepModel {
     dark.add(box(1.46, 0.2, 0.02, 0, 0.55, -0.412));
     dark.add(box(1.46, 0.035, 0.09, 0, 0.452, -0.45, 0.5));
 
+    /* a teal band along the fascia — the same accent as the flares and the
+     * rock rails, and the one thing that stops the whole lower frame reading
+     * as an undifferentiated black slab */
+    trim.add(box(1.42, 0.035, 0.02, 0, 0.632, -0.404));
+
     /* glovebox lid + latch, passenger side */
     trim.add(box(0.42, 0.15, 0.02, 0.4, 0.55, -0.402));
     metal.add(cyl(0.018, 0.018, 0.03, 8, 0.4, 0.55, -0.39, 'z'));
@@ -1166,15 +1188,20 @@ export class JeepModel {
      * square to the eye. Everything inside it is authored in the pod's own
      * frame, which is why the gauges need no individual aiming. */
     const pod = new THREE.Group();
-    pod.position.set(COCKPIT.podX, 0.745, -0.575);
+    pod.position.set(COCKPIT.podX, 0.72, -0.575);
     pod.rotation.x = -COCKPIT.podTilt;
     this.cockpit.add(pod);
 
     const podShell = new Shell();
-    podShell.add(box(0.54, 0.28, 0.17, 0, 0, -0.086));
-    /* the visor that keeps the sun off the dials */
-    podShell.add(box(0.58, 0.028, 0.15, 0, 0.152, 0.028, -0.34));
-    podShell.addMirrored(box(0.022, 0.19, 0.12, 0.276, 0.03, 0.012));
+    podShell.add(box(0.54, 0.27, 0.17, 0, 0, -0.086));
+    /* A brow, not a visor. The first version of this had a proper hooded sun
+     * visor over the dials, 0.15 m deep — and from the seat it turned into a
+     * horizontal black bar across the middle of the windscreen that hid the
+     * entire bonnet. On a vehicle with no roof there is nothing to hood the
+     * dials from anyway. What is left is a 3 cm lip that reads as a moulding
+     * and blocks nothing. */
+    podShell.add(box(0.56, 0.022, 0.04, 0, 0.142, 0.028, -0.34));
+    podShell.addMirrored(box(0.022, 0.19, 0.12, 0.276, 0.02, 0.012));
     const podGeo = podShell.build();
     if (podGeo) {
       this.geometries.push(podGeo);
@@ -1197,8 +1224,8 @@ export class JeepModel {
     });
     const speedGauge = buildGauge(0.098, speedFace, 0xff5a4a, parts);
     const rpmGauge = buildGauge(0.084, rpmFace, 0xffd166, parts);
-    speedGauge.group.position.set(-0.118, 0.012, 0.008);
-    rpmGauge.group.position.set(0.13, 0.006, 0.008);
+    speedGauge.group.position.set(-0.118, 0.026, 0.008);
+    rpmGauge.group.position.set(0.13, 0.02, 0.008);
     pod.add(speedGauge.group, rpmGauge.group);
     this.needleSpeed = speedGauge.needle;
     this.needleRpm = rpmGauge.needle;
@@ -1307,21 +1334,14 @@ export class JeepModel {
     knob2.translate(0.22, 0.42, 0.08);
     trim.add(knob2);
 
-    /* ---- rear-view mirror on the windscreen header ---------------------- */
-    metal.add(tube(0, MODEL.yWindscreenTop - 0.02, -0.19, 0, 0.955, -0.245, 0.014, 6));
-    dark.add(box(0.3, 0.085, 0.028, 0, 0.94, -0.25, 0.1));
-    const mirrorMat = new THREE.MeshStandardMaterial({
-      color: 0x8fa6b8,
-      metalness: 1,
-      roughness: 0.08,
-      envMapIntensity: 1.6,
-    });
-    this.materials.push(mirrorMat);
-    const glassG = new THREE.PlaneGeometry(0.27, 0.068);
-    glassG.rotateX(Math.PI + 0.1);
-    glassG.translate(0, 0.94, -0.236);
-    this.geometries.push(glassG);
-    this.cockpit.add(new THREE.Mesh(glassG, mirrorMat));
+    /* ---- no interior mirror ---------------------------------------------
+     * There was one, hanging off the windscreen header, and it was a mistake.
+     * This screen's top rail is at y = 1.04 and the driver's eye is at 1.00,
+     * so anything slung under the header lands *at eye level* — a 0.30 m black
+     * rectangle straight through the middle of the road ahead. A chopped-screen
+     * off-roader would not carry one anyway: the two wing mirrors already on
+     * the screen frame are visible from the seat and do the job.
+     */
 
     /* ---- hands ----------------------------------------------------------
      * Parented to a node that copies the wheel's pose, not to the wheel

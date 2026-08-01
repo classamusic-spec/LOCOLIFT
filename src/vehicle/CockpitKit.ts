@@ -431,7 +431,7 @@ export function buildHands(
   parts: CockpitParts,
   skin = 0xb27a52,
   sleeve = 0xf1ece0,
-  forearm = 0.34,
+  forearm = 0.6,
 ): THREE.Group {
   const group = new THREE.Group();
   const skinMat = new THREE.MeshStandardMaterial({ color: skin, metalness: 0, roughness: 0.82 });
@@ -469,10 +469,6 @@ export function buildHands(
     thumb.translate(hx - sign * tubeRadius * 1.4, tubeRadius * 1.5, tubeRadius * 0.8);
     grip.push(thumb);
 
-    const handGeo = mergeGeometries(grip, false);
-    for (const p of grip) p.dispose();
-    if (handGeo) hands.push(handGeo);
-
     /* Wrist + forearm.
      *
      * The direction is the fiddly part and it is worth spelling out. The arm
@@ -487,22 +483,56 @@ export function buildHands(
      * belonging to a body rather than to nothing.
      *
      * `forearm` is an absolute length in metres for the same reason: a real
-     * forearm is ~0.34 m whether it is holding a Jeep's 0.30 m wheel or a
+     * arm is the same length whether it is holding a Jeep's 0.30 m wheel or a
      * bus's 0.50 m one, and scaling it with the rim gave the bus driver arms
-     * like a gibbon. */
+     * like a gibbon. The default is deliberately *longer* than a forearm — it
+     * runs all the way to the shoulder, because an arm that stops halfway
+     * leaves a visible cut end floating in the middle of the frame, and the
+     * far end of this one is behind the camera where nobody can see it.
+     *
+     * The arm itself is **skin**, not sleeve. A full-length cream sleeve was
+     * the brightest object in the entire frame and pulled the eye straight off
+     * the road; a short-sleeved guayabera is both what people wear here and
+     * far quieter, so the cuff is a 9 cm ring two-thirds of the way up and
+     * everything below it is forearm. */
     const wristX = hx + sign * tubeRadius * 0.4;
-    const arm = taperTube(
-      wristX,
-      -tubeRadius * 0.4,
-      tubeRadius * 1.2,
-      hx * 0.95,
-      -forearm,
-      rimRadius * 0.55,
-      tubeRadius * 1.55,
-      tubeRadius * 2.15,
-      7,
+    const ex = hx * 0.95;
+    const ey = -forearm;
+    const ez = rimRadius * 0.55;
+    grip.push(
+      taperTube(
+        wristX,
+        -tubeRadius * 0.4,
+        tubeRadius * 1.2,
+        ex,
+        ey,
+        ez,
+        tubeRadius * 1.3,
+        tubeRadius * 1.7,
+        7,
+      ),
     );
-    sleeves.push(arm);
+
+    const handGeo = mergeGeometries(grip, false);
+    for (const p of grip) p.dispose();
+    if (handGeo) hands.push(handGeo);
+
+    /* the cuff, sitting proud of the arm it wraps */
+    const t0 = 0.6;
+    const t1 = 0.78;
+    sleeves.push(
+      taperTube(
+        wristX + (ex - wristX) * t0,
+        -tubeRadius * 0.4 + (ey + tubeRadius * 0.4) * t0,
+        tubeRadius * 1.2 + (ez - tubeRadius * 1.2) * t0,
+        wristX + (ex - wristX) * t1,
+        -tubeRadius * 0.4 + (ey + tubeRadius * 0.4) * t1,
+        tubeRadius * 1.2 + (ez - tubeRadius * 1.2) * t1,
+        tubeRadius * 1.72,
+        tubeRadius * 1.88,
+        7,
+      ),
+    );
   };
 
   build(1);

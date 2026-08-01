@@ -50,6 +50,9 @@
       import { JeepModel } from '/src/vehicle/JeepModel.ts';
       import { BusModel } from '/src/vehicle/BusModel.ts';
       import { CarriageModel } from '/src/vehicle/CarriageModel.ts';
+      import { MODEL as JEEP_GEO } from '/src/vehicle/VehicleTuning.ts';
+      import { BUS_GEO } from '/src/vehicle/BusTuning.ts';
+      import { CARRIAGE_GEO } from '/src/vehicle/CarriageTuning.ts';
 
       const q = new URLSearchParams(location.search);
       const which = q.get('v') ?? 'jeep';
@@ -119,11 +122,9 @@
       model.object3d.position.y = -groundLocalY(which);
 
       function groundLocalY(id) {
-        /* mirrors each model's MODEL.groundLocalY without importing three sets
-         * of tuning constants into a debug page */
-        if (id === 'bus') return -1.02;
-        if (id === 'carriage') return -0.94;
-        return -0.6747;
+        if (id === 'bus') return BUS_GEO.groundLocalY;
+        if (id === 'carriage') return CARRIAGE_GEO.groundLocalY;
+        return JEEP_GEO.groundLocalY;
       }
 
       const camera = new THREE.PerspectiveCamera(fov, 1, 0.3, 800);

@@ -31,11 +31,19 @@
  *
  * ## Cost
  *
- * Fourteen draw calls for the whole city. Anything repeated hundreds of times
- * is instanced; the wires, bunting, market stalls and painted boards merge into
- * one mesh per material. The
+ * Anything repeated hundreds of times is instanced; the wires, bunting, market
+ * stalls and painted boards merge into one mesh per material. The
  * vertex-shader distance cull in {@link ./PropKit} means nothing here
- * rasterises past `propDetailDistance`, so the dressing is free at range.
+ * *rasterises* past `propDetailDistance`.
+ *
+ * It still had to be *submitted*, though, and that is what the spatial grid
+ * below fixes. One district-wide mesh per prop has a district-wide bounding
+ * sphere, so three could never frustum-cull it and the sun's shadow camera
+ * re-rendered all of it every frame: measured on `high`, 190 k triangles drawn
+ * plus 169 k shadow-cast, identically, from every viewpoint in the game — all
+ * of it already collapsed to a point by the shader. The heavy prop types are
+ * now one `InstancedMesh` per {@link DRESS_CELL} cell, culled at exactly the
+ * shader's own radius, and stop casting at {@link SHADOW_CASTER_CUT}.
  */
 import * as THREE from 'three';
 import { QUALITY_BUDGET } from '../core/Config';
@@ -77,7 +85,7 @@ import {
   wireRibbon,
 } from './PropKit';
 import type { ClusterRange, DressPlacement, DressSign, FrontEdge, WetnessSource } from './PropKit';
-import { LodField, bucketByCell, bucketFootprint } from './LodGrid';
+import { LodField, SHADOW_CASTER_CUT, bucketByCell, bucketFootprint, wholeBucket } from './LodGrid';
 import type { PropSpecId } from './Destructibles';
 import type { CityLayout, DistrictZone, Lot, OpenArea, WorldLayer, WorldOpts } from './WorldTypes';
 
@@ -139,12 +147,19 @@ const FESTOON_Y = 5.35;
  * Sized against `propDetailDistance` (70 m on `low`, 190 m on `high`) rather
  * than against the district: the live set is a disc a couple of cells across,
  * so a cell much finer than the cull radius buys draw calls and no triangles.
- * 130 m keeps the working set to roughly a 3 × 3 neighbourhood at `high`.
+ * 165 m keeps the working set to roughly a 3 × 3 neighbourhood at `high`.
  */
-const DRESS_CELL = 130;
+const DRESS_CELL = 165;
 
 /** Slack on a cell's footprint: prop reach plus the shader's fade band. */
 const DRESS_PAD = 6;
+
+/**
+ * A prop type below this many triangles district-wide stays one mesh. See
+ * {@link StreetDressing.addInstanced} — below the threshold the grid costs more
+ * in draw calls than it returns in triangles.
+ */
+const DRESS_BUCKET_MIN_TRIS = 9000;
 
 export interface StreetDressingOptions {
   density?: number;
@@ -690,7 +705,21 @@ export class StreetDressing implements WorldLayer {
       geo.dispose();
       return out;
     }
-    const buckets = bucketByCell(list, DRESS_CELL, (p) => p);
+    /* Only split what is worth splitting.
+     *
+     * `renderer.info.render.calls` counts the shadow submission as its own
+     * call, so every extra mesh costs up to two. Splitting `street/umbrella`
+     * (35 instances, 2 870 triangles) across ten cells buys 2 k triangles for
+     * twenty calls; splitting `street/pot` (763 instances, 39 676 triangles)
+     * buys thirty. Above the threshold the grid pays for itself several times
+     * over, below it the single district-wide mesh is cheaper — and the vertex
+     * cull still stops it rasterising.
+     */
+    const total = triCount(geo) * list.length;
+    const buckets =
+      total >= DRESS_BUCKET_MIN_TRIS
+        ? bucketByCell(list, DRESS_CELL, (p) => p)
+        : [wholeBucket(list)];
     for (let b = 0; b < buckets.length; b++) {
       const bucket = buckets[b];
       // Each bucket needs its own `aCullMul`, which `dressInstanced` attaches
@@ -702,6 +731,10 @@ export class StreetDressing implements WorldLayer {
         g.dispose();
         continue;
       }
+      // A festoon bulb is a 4 cm emissive sphere on a wire six metres up. It
+      // has never cast a shadow anyone could see, and there are 738 of them —
+      // 19 k triangles and a shadow draw call per cell, for nothing.
+      if (name === 'street/bulb') mesh.castShadow = false;
       this.group.add(mesh);
       this.meshes.push(mesh);
       this.geometries.push(mesh.geometry);
@@ -820,7 +853,7 @@ export class StreetDressing implements WorldLayer {
      * leaves the frame, only the transform cost does. The shadow pass needs no
      * separate rule: three frustum-tests every caster against the sun's box,
      * and a cell-sized bounding sphere finally makes that test say no. */
-    this.lod.update(cameraPos, cut);
+    this.lod.update(cameraPos, cut, SHADOW_CASTER_CUT[this.quality]);
   }
 
   onQualityChange(tier: QualityTier): void {

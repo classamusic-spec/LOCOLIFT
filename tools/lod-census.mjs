@@ -129,7 +129,27 @@ async function main() {
        * `renderer.info` directly — the same counters, with no dependency on how
        * many frames elapsed. Wait long enough for two or three frames so the
        * per-layer LOD passes have run against the new camera before reading. */
-      await page.waitForTimeout(11_000);
+      /* Park it first. `respawn` leaves the Jeep with whatever momentum the
+       * last viewpoint gave it, and a chase camera still swinging through a
+       * turn is a different frustum from a parked one — enough to move the
+       * triangle count by 30 % between two runs of the same viewpoint. */
+      await page.waitForTimeout(6000);
+      await page
+        .waitForFunction(() => (window.__loco.stats().speed ?? 9) < 0.25, null, {
+          timeout: 240_000,
+        })
+        .catch(() => {});
+      await page.waitForTimeout(9000);
+      /* A frame can take four seconds under SwiftShader, and `renderer.info`
+       * holds the *previous* frame's counters until the next one lands — read
+       * too early and one viewpoint reports its neighbour's numbers. Wait for
+       * the engine clock to move on by several frames before trusting it. */
+      const t0 = (await page.evaluate(() => window.__loco.stats())).elapsed;
+      await page
+        .waitForFunction((t) => (window.__loco.stats().elapsed ?? 0) > t + 0.28, t0, {
+          timeout: 120_000,
+        })
+        .catch(() => {});
       const s = await page.evaluate(() => window.__loco.stats());
       const perf = {
         drawCalls: s.drawCalls,

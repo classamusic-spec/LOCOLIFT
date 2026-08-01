@@ -311,24 +311,38 @@ const ARCH_R1 = G.zRearAxle + G.archRadius;
 /**
  * The driver's station, in one block.
  *
- * `eye` is derived, not guessed. The driver's cushion top sits at
- * `yFloor + 0.60 = 0.92`, and a seated adult's eye is ~0.78 m above it in a
- * bus's upright seating position — hence y = 1.70, which lands the eye 0.32 m
- * above the wheel's hub and 0.19 m above the fascia's crash roll, i.e. looking
- * *over* the dash rather than through it. z = −3.55 sits a head's depth ahead
- * of the seat back at −3.62, which puts the nearest point of that enormous
- * 0.5 m wheel 0.47 m away — comfortably outside `CONFIG.camera.near`. x
- * matches the steering column at −0.66: a school bus is left-hand drive with
- * the door on the opposite side, which is why the aisle opens to your right.
+ * `eye` is derived, then corrected against what the cab can actually show.
+ *
+ * The driver's cushion top is at `yFloor + 0.60 = 0.92` and a seated adult's
+ * eye is 0.64–0.80 m above the cushion, so anything from 1.56 to 1.72 is
+ * defensible. It ended up at the low end, 1.62, and the reason is worth
+ * recording: this cab's usable glass is a *band*, bounded below by the dash's
+ * top edge and above by the destination board let into the windscreen, and at
+ * 1.70 the eye sat so high in that band that the instrument pod — which has to
+ * live below the dash line — fell almost entirely out of the bottom of a 68°
+ * frame. Dropping 8 cm buys 14° of cluster and costs nothing: the eye is still
+ * 0.30 m above the wheel's hub and 0.19 m above the dash, i.e. looking over it
+ * rather than through it.
+ *
+ * z = −3.45 puts the eye a head's depth in front of the (relocated) seat back
+ * at −3.32 and 0.85 m back from the windscreen. Both halves of that mattered.
+ * Sitting *behind* the backrest — which the first pass did — cut the top edge
+ * of the seat across the bottom of the frame 14 cm from the lens, inside the
+ * near plane, so it clipped into a hole. Sitting too close to the glass made
+ * the route board 100° wide. From here the nearest point of that enormous
+ * 0.5 m wheel is 0.44 m away, outside `CONFIG.camera.near` (0.30) with room
+ * for shake. x matches the steering
+ * column at −0.66: a school bus is left-hand drive with the door on the
+ * opposite side, which is why the aisle opens to your right.
  */
 const BUS_COCKPIT = {
-  eye: /* @__PURE__ */ new THREE.Vector3(-0.66, 1.7, -3.55),
+  eye: /* @__PURE__ */ new THREE.Vector3(-0.66, 1.62, -3.45),
   /** the cluster sits on the column centreline */
   podX: -0.66,
   /** how far the cluster leans back, radians (≈22°) */
   podTilt: 0.38,
   /** how far the hands travel round the rim before they stop, radians */
-  handLock: 1.05,
+  handLock: 0.6,
   needleRate: 6.5,
   /** the meter's flag drop, dollars — a bus fare, so lower than the Jeep's */
   fareFlag: 2.0,
@@ -1000,8 +1014,12 @@ export class BusModel implements VehicleModel {
 
     /* front header panel above the windscreen — carries the painted script */
     body.add(box(2.3, G.yRoofCrown - G.yWindscreenTop, 0.1, 0, (G.yWindscreenTop + G.yRoofCrown) * 0.5, z0 + 0.02));
-    /* and the destination-sign housing let into it */
-    matte.add(box(1.5, 0.3, 0.06, 0, G.yWindscreenTop - 0.2, z0 - 0.02));
+    /* And the destination-sign housing let into it. Raised: at
+     * `yWindscreenTop − 0.2` it hung 35 cm down into the glass, which reads
+     * fine from the street and puts an opaque black board across the top
+     * third of the driver's view. It still overlaps the screen — a guagua's
+     * route board always does — just by a route board's worth. */
+    matte.add(box(1.5, 0.3, 0.06, 0, G.yWindscreenTop - 0.04, z0 - 0.02));
   }
 
   /** Red hood, chrome grille, twin round headlights, heavy bumper, mirrors. */
@@ -1214,12 +1232,21 @@ export class BusModel implements VehicleModel {
     /* a longitudinal ceiling rail */
     chrome.addMirrored(cyl(0.026, 0.026, SIDE_LEN - 1.6, 6, 0.5, G.yWindowTop - 0.06, SIDE_MID, 'z'));
 
-    /* --- driver's station --- */
-    matte.add(box(1.0, 0.16, 0.5, -0.66, G.yFloor + 0.52, G.zCowl + 0.42));
-    matte.add(box(1.0, 0.66, 0.14, -0.66, G.yFloor + 0.9, G.zCowl + 0.68, -0.1));
-    /* dash and instrument binnacle */
-    matte.add(box(1.5, 0.26, 0.34, -0.5, 1.38, G.zCowl + 0.12));
-    matte.add(box(0.46, 0.18, 0.2, -0.62, 1.54, G.zCowl + 0.16, -0.3));
+    /* --- driver's station ---
+     * The seat sits 0.30 m further back than it first did. At `zCowl + 0.42`
+     * the driver's chest was 0.42 m from the windscreen — physically absurd for
+     * a conventional hood-forward bus, and from the driver's own seat it put
+     * the route board on the glass at arm's length and 100° wide. Moving it
+     * back is invisible from outside (it is seen through a window from ten
+     * metres) and is the difference between a cab and a cupboard. */
+    matte.add(box(1.0, 0.16, 0.5, -0.66, G.yFloor + 0.52, G.zCowl + 0.72));
+    matte.add(box(1.0, 0.66, 0.14, -0.66, G.yFloor + 0.9, G.zCowl + 0.98, -0.1));
+    /* The dash. Its TOP EDGE is the bottom of everything the driver can see,
+     * so it is deliberately low: at 1.51 it sat 19 cm under the eye and ate
+     * 14° of windscreen. There is no separate binnacle here any more either —
+     * `buildCockpit` puts a proper instrument pod in its place, and two
+     * overlapping binnacles is one too many. */
+    matte.add(box(1.5, 0.26, 0.34, -0.5, 1.3, G.zCowl + 0.12));
     /* the fare box by the door */
     matte.add(box(0.28, 0.7, 0.28, 0.62, 0.7, G.zDoorRear - 0.1));
     chrome.add(box(0.3, 0.06, 0.3, 0.62, 1.06, G.zDoorRear - 0.1));
@@ -1260,7 +1287,10 @@ export class BusModel implements VehicleModel {
     const shell = new Shell();
     for (const s of [-1, 1]) {
       const g = new THREE.PlaneGeometry(1.06, len - 0.04);
-      g.rotateX(Math.atan2(dz, dy) - Math.PI / 2);
+      /* `atan2(dz, dy)`, with no −90°: see the same fix in `JeepModel`. The
+       * extra quarter turn laid both windscreen panes flat across the cab at
+       * the driver's eye height. */
+      g.rotateX(Math.atan2(dz, dy));
       g.translate(s * 0.57, G.yHood + 0.12 + dy * 0.5, G.zCowl - 0.06 + dz * 0.5);
       shell.add(g);
     }
@@ -1595,11 +1625,18 @@ export class BusModel implements VehicleModel {
     const zDash = G.zCowl + 0.12; // -4.18, matching the exterior dash box
     const yDash = 1.38;
 
-    /* ---- fascia: a full-width steel panel with a padded crash roll ------- */
-    steelShell.add(box(2.32, 0.5, 0.06, -0.1, yDash - 0.06, zDash - 0.14));
-    padShell.add(box(2.4, 0.09, 0.4, -0.1, yDash + 0.19, zDash + 0.02));
-    /* the kick panel down to the floor, so the fascia is not floating */
-    steelShell.add(box(2.32, 0.72, 0.05, -0.1, 0.95, zDash - 0.1));
+    /* ---- fascia -----------------------------------------------------------
+     *
+     * There is deliberately **no crash roll and no second dash panel** here.
+     * The first version had both, and from the seat they turned the whole
+     * lower half of the windscreen into a black ledge: this cab's usable glass
+     * runs from the exterior dash's top edge to the bottom of the destination
+     * board let into the screen, and every extra centimetre of trim above the
+     * dash comes straight out of the only place the driver can see the road.
+     * All that is left is the kick panel below the dash, which is out of the
+     * sightline entirely. */
+    steelShell.add(box(2.32, 0.72, 0.05, -0.1, 0.92, zDash - 0.1));
+    steelShell.add(box(2.3, 0.05, 0.34, -0.1, 1.28, zDash));
 
     /* ---- the doghouse: the engine cover a school bus driver sits beside -- */
     houseShell.add(box(0.86, 1.0, 1.0, 0.66, G.yFloor + 0.5, G.zCowl + 0.86));
@@ -1612,13 +1649,17 @@ export class BusModel implements VehicleModel {
      * in the game has, and the one that says "this thing weighs eight tonnes".
      */
     const pod = new THREE.Group();
-    pod.position.set(BUS_COCKPIT.podX, yDash + 0.14, zDash + 0.16);
+    pod.position.set(BUS_COCKPIT.podX, 1.34, G.zCowl + 0.12);
     pod.rotation.x = -BUS_COCKPIT.podTilt;
     this.cockpit.add(pod);
 
     const podShell = new Shell();
-    podShell.add(box(0.86, 0.4, 0.2, 0, 0, -0.1));
-    podShell.add(box(0.92, 0.03, 0.2, 0, 0.216, 0.052, -0.3));
+    /* Height is the load-bearing number, not width. The pod's top edge is the
+     * bottom of the driver's sightline, so every centimetre of it is a
+     * centimetre of road they cannot see; it is sized so the brow lands 12 cm
+     * under the eye, which puts the horizon a clear 14° above it. */
+    podShell.add(box(0.74, 0.26, 0.2, 0, 0, -0.11));
+    podShell.add(box(0.8, 0.026, 0.06, 0, 0.145, 0.03, -0.3));
     const podGeo = podShell.build();
     if (podGeo) {
       this.geometries.push(podGeo);
@@ -1646,12 +1687,12 @@ export class BusModel implements VehicleModel {
       accent: '#8bc34a',
       face: '#141a16',
     });
-    const speedGauge = buildGauge(0.14, speedFace, 0xff5a4a, parts);
-    const rpmGauge = buildGauge(0.1, rpmFace, 0xffd166, parts);
-    const airGauge = buildGauge(0.074, airFace, 0x8bc34a, parts);
-    speedGauge.group.position.set(-0.19, 0.0, 0.01);
-    rpmGauge.group.position.set(0.06, 0.03, 0.01);
-    airGauge.group.position.set(0.27, -0.06, 0.01);
+    const speedGauge = buildGauge(0.118, speedFace, 0xff5a4a, parts);
+    const rpmGauge = buildGauge(0.082, rpmFace, 0xffd166, parts);
+    const airGauge = buildGauge(0.062, airFace, 0x8bc34a, parts);
+    speedGauge.group.position.set(-0.13, 0.0, 0.012);
+    rpmGauge.group.position.set(0.098, 0.026, 0.012);
+    airGauge.group.position.set(0.265, -0.028, 0.012);
     pod.add(speedGauge.group, rpmGauge.group, airGauge.group);
     this.needleSpeed = speedGauge.needle;
     this.needleRpm = rpmGauge.needle;
@@ -1675,13 +1716,13 @@ export class BusModel implements VehicleModel {
       this.materials.push(stripMat);
       const g = new THREE.PlaneGeometry(0.62, 0.116);
       g.rotateX(-0.35);
-      g.translate(0.24, yDash + 0.02, zDash + 0.14);
+      g.translate(-0.2, 1.3, zDash + 0.04);
       this.geometries.push(g);
       this.cockpit.add(new THREE.Mesh(g, stripMat));
     }
     /* the long chromed door lever, the most bus-specific control there is */
-    chromeShell.add(tube(0.2, yDash - 0.16, zDash + 0.2, 0.46, yDash + 0.34, zDash + 0.52, 0.02, 6));
-    chromeShell.add(cyl(0.035, 0.035, 0.07, 8, 0.47, yDash + 0.37, zDash + 0.55, 'y'));
+    chromeShell.add(tube(0.26, 1.16, zDash + 0.22, 0.52, 1.6, zDash + 0.56, 0.02, 6));
+    chromeShell.add(cyl(0.035, 0.035, 0.07, 8, 0.53, 1.63, zDash + 0.59, 'y'));
 
     /* ---- the taxi meter, on the fascia by the driver's right hand -------- */
     this.meter = new MeterDisplay();
@@ -1697,14 +1738,14 @@ export class BusModel implements VehicleModel {
     });
     this.materials.push(meterMat);
     const meterPod = new THREE.Group();
-    meterPod.position.set(0.14, yDash + 0.4, zDash + 0.3);
-    meterPod.rotation.set(-0.3, -0.42, 0);
+    meterPod.position.set(-0.26, 1.5, G.zCowl + 0.1);
+    meterPod.rotation.set(-0.34, -0.34, 0);
     this.cockpit.add(meterPod);
-    const meterCase = new THREE.BoxGeometry(0.28, 0.19, 0.12);
+    const meterCase = new THREE.BoxGeometry(0.25, 0.17, 0.12);
     meterCase.translate(0, 0, -0.06);
     this.geometries.push(meterCase);
     meterPod.add(new THREE.Mesh(meterCase, pad));
-    const meterFace = new THREE.PlaneGeometry(0.238, 0.149);
+    const meterFace = new THREE.PlaneGeometry(0.212, 0.132);
     meterFace.translate(0, 0, 0.002);
     this.geometries.push(meterFace);
     meterPod.add(new THREE.Mesh(meterFace, meterMat));
@@ -1714,12 +1755,19 @@ export class BusModel implements VehicleModel {
     padShell.add(box(2.5, 0.13, 0.14, 0, G.yWindscreenTop - 0.03, zWs + 0.06));
     steelShell.add(box(0.09, 0.72, 0.1, 0, 1.7, zWs + 0.04));
     steelShell.addMirrored(box(0.1, 0.74, 0.12, 1.19, 1.7, zWs + 0.08));
-    /* sun visor, folded down over the driver's half */
-    padShell.add(box(1.06, 0.02, 0.24, -0.58, G.yWindscreenTop - 0.14, zWs + 0.16, -0.5));
+    /* Sun visor, right up under the header.
+     *
+     * It was 0.24 m deep and hung 0.14 m below the header, which put a black
+     * board 0.53 m from the eye subtending 45° of the frame — most of the
+     * upper half of the view. A visor is meant to be at the very edge of
+     * vision until you need it. */
+    padShell.add(box(0.94, 0.02, 0.15, -0.6, G.yWindscreenTop - 0.07, zWs + 0.12, -0.32));
 
-    /* ---- the interior mirror, angled back down the aisle ----------------- */
-    chromeShell.add(tube(-0.12, G.yWindscreenTop - 0.09, zWs + 0.1, -0.12, 1.88, zWs + 0.3, 0.018, 6));
-    padShell.add(box(0.6, 0.15, 0.04, -0.12, 1.86, zWs + 0.32, 0.24, 0.2, 0));
+    /* ---- the interior mirror, angled back down the aisle -----------------
+     * Kept small and high for the same reason: at 0.6 m wide and 0.16 m above
+     * the eye it filled a third of the windscreen. */
+    chromeShell.add(tube(-0.12, G.yWindscreenTop - 0.06, zWs + 0.1, -0.12, 1.93, zWs + 0.26, 0.016, 6));
+    padShell.add(box(0.38, 0.11, 0.04, -0.12, 1.92, zWs + 0.28, 0.24, 0.2, 0));
     const mirrorMat = new THREE.MeshStandardMaterial({
       color: 0x93a9bb,
       metalness: 1,
@@ -1727,10 +1775,10 @@ export class BusModel implements VehicleModel {
       envMapIntensity: 1.8,
     });
     this.materials.push(mirrorMat);
-    const mirrorGlass = new THREE.PlaneGeometry(0.56, 0.13);
+    const mirrorGlass = new THREE.PlaneGeometry(0.35, 0.095);
     mirrorGlass.rotateY(Math.PI + 0.2);
     mirrorGlass.rotateX(-0.24);
-    mirrorGlass.translate(-0.12, 1.86, zWs + 0.35);
+    mirrorGlass.translate(-0.12, 1.92, zWs + 0.31);
     this.geometries.push(mirrorGlass);
     this.cockpit.add(new THREE.Mesh(mirrorGlass, mirrorMat));
 
@@ -1740,8 +1788,8 @@ export class BusModel implements VehicleModel {
     padShell.add(box(1.0, 0.03, 0.5, -0.7, G.yFloor + 0.03, zDash + 0.42));
 
     /* ---- the driver's own seat, in the lower periphery ------------------- */
-    padShell.add(box(0.07, 0.4, 0.5, -1.12, 1.2, G.zCowl + 0.6, -0.1));
-    padShell.add(box(0.07, 0.4, 0.5, -0.2, 1.2, G.zCowl + 0.6, -0.1));
+    padShell.add(box(0.07, 0.4, 0.5, -1.14, 1.22, G.zCowl + 0.62, -0.1));
+    padShell.add(box(0.07, 0.4, 0.5, -0.18, 1.22, G.zCowl + 0.62, -0.1));
 
     /* ---- interior festoons: the party, seen from the driver's seat -------
      * The exterior strings run outside the body where the street can see
