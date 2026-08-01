@@ -283,8 +283,13 @@ async function main() {
         `  cockpit: draws ${r.cockpit?.drawCalls} tris ${r.cockpit?.triangles} mode ${r.cockpit?.camMode} interior ${r.cockpit?.interior}\n` +
         `           Δ ${dc} draws, ${tri} tris\n` +
         `  fast   : draws ${r.cockpitFast?.drawCalls} tris ${r.cockpitFast?.triangles} speed ${r.cockpitFast?.speed}\n` +
-        `  shader failures: ${r.shaderFailures.length}\n` +
-        `  console errors : ${r.errors.length}${r.errors.length ? '\n    ' + r.errors.slice(0, 5).join('\n    ') : ''}` +
+        /* A vehicle whose budget ran out before it booted has no arrays at all.
+         * The summary is the one part of a bounded harness that must never
+         * throw — a crash here loses the partial result the bound exists to
+         * preserve, and reports as a tool failure rather than as a timeout. */
+        `  shader failures: ${r.shaderFailures?.length ?? 0}\n` +
+        `  console errors : ${r.errors?.length ?? 0}` +
+        (r.errors?.length ? '\n    ' + r.errors.slice(0, 5).join('\n    ') : '') +
         (r.fatal ? `\n  FATAL: ${r.fatal}` : ''),
     );
     if (r.fatal || (r.shaderFailures?.length ?? 0) > 0) ok = false;

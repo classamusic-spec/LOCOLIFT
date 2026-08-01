@@ -71,6 +71,9 @@ export class WheelPlume {
   private readonly q = new THREE.Quaternion();
   private readonly s = new THREE.Vector3();
   private readonly col = new THREE.Color();
+  /** where the lens is this frame, for the near-plane guard below */
+  private readonly eye = new THREE.Vector3();
+  private nearGuard = 0.55;
 
   constructor(quality: QualityTier) {
     this.quality = quality;
@@ -165,8 +168,19 @@ export class WheelPlume {
     const mesh = this.mesh;
     if (!mesh) return;
     const colors = mesh.instanceColor;
-    if (camera) camera.getWorldQuaternion(this.q);
-    else this.q.identity();
+    if (camera) {
+      camera.getWorldQuaternion(this.q);
+      camera.getWorldPosition(this.eye);
+      /* The straddle condition is `centreDistance < near + halfDiagonal`, plus
+       * 15% on the near plane so a puff drifting onto it is caught a frame
+       * early. Kept tight on purpose: the front wheels are only about 1.5 m
+       * from the jeep driver's eye, and a generous guard would delete the dust
+       * from the one view where you are closest to it. */
+      const near = (camera as THREE.PerspectiveCamera).near;
+      this.nearGuard = Number.isFinite(near) && near > 0 ? near * 1.15 : 0.35;
+    } else {
+      this.q.identity();
+    }
 
     let live = 0;
     for (let i = 0; i < this.puffs.length; i++) {
@@ -187,6 +201,37 @@ export class WheelPlume {
 
       const k = clamp01(p.t / p.life);
       const scale = lerp(p.size, p.grow, Math.sqrt(k));
+
+      /* Never draw a puff the camera is standing in.
+       *
+       * Chase views sit metres behind the contact patch, so for most of this
+       * game's life every puff was comfortably in front of the lens. The
+       * cockpit view is the first camera to sit among them, and a metre-wide
+       * billboard centred *on* the near plane clips to w ≈ 0, where the
+       * perspective divide interpolates attributes towards infinity.
+       *
+       * Honest provenance: this was written while hunting a non-finite pixel
+       * that turned out to be a clearcoat lobe overflowing half-float, not
+       * this — hiding the plume looked like it helped for two runs and then
+       * stopped, which is what a coin flip looks like when you sample it once
+       * per condition. So this is not a bug fix. It is a guard that should
+       * have been here from the day something could stand inside the dust:
+       * half the quad's diagonal is `scale * 0.71`, anything inside that plus
+       * the near plane can straddle it, and a puff that close is a screenful
+       * of flat colour that nobody wants to see anyway. */
+      if (camera) {
+        const dx = p.x - this.eye.x;
+        const dy = p.y - this.eye.y;
+        const dz = p.z - this.eye.z;
+        const guard = scale * 0.71 + this.nearGuard;
+        if (dx * dx + dy * dy + dz * dz < guard * guard) {
+          this.m.compose(HIDDEN, this.q, ZERO);
+          mesh.setMatrixAt(i, this.m);
+          live++;
+          continue;
+        }
+      }
+
       this.p.set(p.x, p.y, p.z);
       this.s.set(scale, scale, scale);
       this.m.compose(this.p, this.q, this.s);

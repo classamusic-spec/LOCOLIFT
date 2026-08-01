@@ -131,7 +131,7 @@ export class TitleScreen implements NavigableScreen {
     logo.append(buildLogotype());
     const ribbon = el('div', 'll-logo__ribbon');
     ribbon.append(
-      el('span', 'll-logo__ribbon-text', 'VIEJO SAN JUAN'),
+      el('span', 'll-logo__ribbon-text', 'SAN VIEJO'),
       el('span', 'll-logo__dot', '·'),
       el('span', 'll-logo__ribbon-text', 'PUERTO RICO'),
     );
@@ -324,7 +324,7 @@ export class TitleScreen implements NavigableScreen {
     };
     body.append(
       block('LOCO LIFT', [
-        'Un taxi arcade en el Viejo San Juan, Puerto Rico.',
+        'Un taxi arcade en San Viejo, Puerto Rico.',
         'Motor: Three.js · Rapier3D · TypeScript · Vite.',
       ]),
       block('Construido por', [

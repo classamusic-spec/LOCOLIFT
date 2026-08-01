@@ -40,7 +40,7 @@ import {
   needleAngle,
   setPanelLights,
 } from './CockpitKit';
-import { MODEL, SUSPENSION, WHEEL_LAYOUT } from './VehicleTuning';
+import { MODEL, SUSPENSION, WHEEL_LAYOUT, safeClearcoatRoughness, setPaintForInterior } from './VehicleTuning';
 
 /* ------------------------------------------------------------------ palette */
 
@@ -293,7 +293,7 @@ function makeLiveryTexture(): THREE.CanvasTexture | null {
 
   g.fillStyle = '#2fa8a0';
   g.font = 'bold 22px "Trebuchet MS", sans-serif';
-  g.fillText('VIEJO SAN JUAN  ·  24 HORAS', 256, 100);
+  g.fillText('SAN VIEJO  ·  24 HORAS', 256, 100);
 
   /* a little rose flourish under the wordmark */
   g.strokeStyle = '#ef476f';
@@ -628,6 +628,7 @@ export class JeepModel {
     if (on === this.cockpitOn) return;
     this.cockpitOn = on;
     this.cockpit.visible = on;
+    setPaintForInterior(this.materials, on);
   }
 
   /**
@@ -726,7 +727,13 @@ export class JeepModel {
     };
     const m = this.lowDetail
       ? new THREE.MeshStandardMaterial(base)
-      : new THREE.MeshPhysicalMaterial({ ...base, clearcoat, clearcoatRoughness });
+      : new THREE.MeshPhysicalMaterial({
+          ...base,
+          clearcoat,
+          clearcoatRoughness: safeClearcoatRoughness(clearcoatRoughness),
+        });
+    /* tags this as a painted panel for `setPaintForInterior` */
+    m.userData.isVehiclePaint = true;
     this.materials.push(m);
     return m;
   }

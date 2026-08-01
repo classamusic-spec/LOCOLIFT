@@ -318,7 +318,7 @@ function paintMeter(
 
   g.fillStyle = '#7f8798';
   g.textAlign = 'right';
-  g.fillText('VIEJO SAN JUAN', W - 18, 135);
+  g.fillText('SAN VIEJO', W - 18, 135);
 }
 
 /** A labelled rocker-switch strip — the filler that sells a real dashboard. */

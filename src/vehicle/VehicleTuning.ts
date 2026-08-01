@@ -1002,3 +1002,115 @@ export interface VehicleModel {
    */
   setInstruments?(rpmNorm: number, speedNorm: number, gear: number): void;
 }
+
+/* -------------------------------------------------------------- paint safety */
+
+/**
+ * Smallest clearcoat roughness a vehicle panel may use.
+ *
+ * A clear-lacquer lobe is a GGX distribution whose peak value is
+ * `1 / (π · clearcoatRoughness⁴)`. That has no upper bound as the roughness
+ * falls, and all three vehicles were authored at 0.05–0.07, where the peak is
+ * ~13 000. Multiply by a sun of intensity 3.9 and the Fresnel and visibility
+ * terms and a single fragment reaches ~1.4 × 10⁵ — measured, not estimated:
+ * a float read-back of the scene buffer from the bus cockpit returned
+ * `maxChannel = 136 499` with one pixel past 65 504, which is the largest
+ * number a half-float render target can hold.
+ *
+ * On its own that pixel is harmless; ACES tone-maps it to ordinary grey, which
+ * is why it went unnoticed for as long as the only cameras were outside. Bloom
+ * is what makes it fatal. Its high-pass reads the raw linear buffer, the
+ * overflowed texel becomes `Inf`, and every mip level of the blur pyramid
+ * averages that `Inf` into a wider and wider neighbourhood until the whole
+ * frame is non-finite — presenting as an orange white-out on one frame and as
+ * black on the next, depending on how the composite resolves.
+ *
+ * It took a cockpit to expose it: the peak of a mirror-sharp lobe is only ever
+ * sampled when the eye sits on the reflection vector of a large painted panel,
+ * and a chase camera never does. The bus was first because its driver looks
+ * straight down two metres of bonnet, but the jeep and the carriage are the
+ * same material at the same roughness and were one heading away from it.
+ *
+ * 0.18 takes the lobe's own peak from ~13 000 to ~300, and the measured
+ * brightest pixel in the frame from 136 499 to ~3 400 — a ~19× margin below
+ * half-float overflow, enough that the blur's neighbourhood sums stay in range
+ * too. It is still a glossy coat; the highlight is a little broader, and on a
+ * hand-painted público that is if anything the more honest look.
+ *
+ * The `low` tier drops to `MeshStandardMaterial` and has no clearcoat at all,
+ * which is exactly why an entire verification pass run at `low` came back clean
+ * while the default tier was broken.
+ */
+export const MIN_CLEARCOAT_ROUGHNESS = 0.18;
+
+/** Roughness floor for painted panels seen from inside the vehicle. */
+export const INTERIOR_PAINT_ROUGHNESS = 0.62;
+
+/** Clamp an authored clearcoat roughness to something bloom can survive. */
+export function safeClearcoatRoughness(r: number): number {
+  return r < MIN_CLEARCOAT_ROUGHNESS ? MIN_CLEARCOAT_ROUGHNESS : r;
+}
+
+/**
+ * Flatten a vehicle's paint while the camera is inside it.
+ *
+ * `MIN_CLEARCOAT_ROUGHNESS` stops the lacquer lobe overflowing a half-float
+ * buffer, but it does not make it *reasonable*. Measured from the bus driver's
+ * seat at 15:30, the brightest pixel anywhere in the frame was 3 400 with the
+ * floor applied and 140 with the coat removed entirely — against 13.5 for the
+ * jeep cockpit, whose peak is sunlit stucco and is what the rest of the
+ * district actually costs. Bloom thresholds at 1.23, so a 3 400-nit texel sits
+ * about eleven stops over it; by the time the blur pyramid has spread that
+ * across five mip levels the whole frame is an even fawn wash with no geometry
+ * visible in it at all.
+ *
+ * The cause is not a bug in the paint — it is that a driver looks straight down
+ * a large panel of his own vehicle, which is the one viewpoint that sits on the
+ * mirror direction of a low sun. A chase camera never does, which is why this
+ * was invisible for as long as every camera was outside.
+ *
+ * So the paint keeps its coat for everyone who can see it and loses it for the
+ * one viewpoint that cannot: from the driver's seat the only painted panels in
+ * frame are a bonnet and two corner posts a half-metre from your face, where a
+ * lacquer lobe reads as glare and nothing else. Restoring is exact — the
+ * authored values are stashed on the material the first time it is flattened,
+ * so this survives being toggled every time the player presses `V`.
+ */
+export function setPaintForInterior(materials: readonly THREE.Material[], inside: boolean): void {
+  for (const mat of materials) {
+    const m = mat as THREE.MeshStandardMaterial & { clearcoat?: number };
+    /* Opaque painted panels only. The first version of this walked every
+     * material with a `roughness` and duly frosted the windscreen to 0.62 — the
+     * glare went away because you could no longer see out. Glass and chrome are
+     * not the problem, and glass in particular goes through the same `paint()`
+     * helper on the jeep, so the tag alone is not enough: a transparent panel is
+     * something the driver is meant to be looking *through*. */
+    if (m.userData?.isVehiclePaint !== true) continue;
+    if (m.transparent || m.roughness === undefined) continue;
+    const store = m.userData as { paintCoat?: number; paintRough?: number };
+    if (inside) {
+      if (store.paintRough === undefined) {
+        store.paintRough = m.roughness;
+        store.paintCoat = m.clearcoat ?? 0;
+      }
+      /* 0.62 puts the base lobe's peak at ~22 nits, the same order as the
+       * sunlit walls the rest of the frame is made of. */
+      const rough = store.paintRough < INTERIOR_PAINT_ROUGHNESS ? INTERIOR_PAINT_ROUGHNESS : store.paintRough;
+      if (m.roughness !== rough) {
+        m.roughness = rough;
+        m.needsUpdate = true;
+      }
+      if (m.clearcoat !== undefined && m.clearcoat !== 0) {
+        m.clearcoat = 0;
+        m.needsUpdate = true;
+      }
+    } else if (store.paintRough !== undefined) {
+      m.roughness = store.paintRough;
+      if (m.clearcoat !== undefined) m.clearcoat = store.paintCoat ?? 0;
+      store.paintRough = undefined;
+      store.paintCoat = undefined;
+      m.needsUpdate = true;
+    }
+  }
+}
+

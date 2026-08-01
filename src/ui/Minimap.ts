@@ -107,7 +107,7 @@ export class Minimap {
     this.theme = theme;
     this.el = el('div', 'll-minimap');
     this.el.setAttribute('role', 'img');
-    this.el.setAttribute('aria-label', 'Minimap of Old San Juan');
+    this.el.setAttribute('aria-label', 'Minimap of San Viejo');
 
     this.canvas = document.createElement('canvas');
     this.canvas.className = 'll-minimap__canvas';

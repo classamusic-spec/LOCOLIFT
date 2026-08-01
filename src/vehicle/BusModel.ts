@@ -49,6 +49,7 @@ import {
   needleAngle,
   setPanelLights,
 } from './CockpitKit';
+import { safeClearcoatRoughness, setPaintForInterior } from './VehicleTuning';
 import type { BeatSource, VehicleModel } from './VehicleTuning';
 
 const UP = /* @__PURE__ */ new THREE.Vector3(0, 1, 0);
@@ -262,7 +263,7 @@ function makeSignTexture(): THREE.CanvasTexture | null {
   g.font = 'bold 46px "Trebuchet MS", sans-serif';
   g.textAlign = 'center';
   g.textBaseline = 'middle';
-  g.fillText('365  VIEJO SAN JUAN', 256, 34);
+  g.fillText('365  SAN VIEJO', 256, 34);
 
   g.fillStyle = '#ff7bc0';
   g.font = 'bold 30px "Trebuchet MS", sans-serif';
@@ -309,6 +310,12 @@ const ARCH_F0 = G.zFrontAxle - G.archRadius;
 const ARCH_F1 = G.zFrontAxle + G.archRadius;
 const ARCH_R0 = G.zRearAxle - G.archRadius;
 const ARCH_R1 = G.zRearAxle + G.archRadius;
+
+/**
+ * How far the hue-cycling ceiling glow drops while the cockpit camera is live.
+ * 0.4 puts its beat peak just under the bloom threshold.
+ */
+const COCKPIT_GLOW_SCALE = 0.4;
 
 /**
  * The driver's station, in one block.
@@ -603,6 +610,7 @@ export class BusModel implements VehicleModel {
     if (on === this.cockpitOn) return;
     this.cockpitOn = on;
     this.cockpit.visible = on;
+    setPaintForInterior(this.materials, on);
   }
 
   /**
@@ -746,8 +754,18 @@ export class BusModel implements VehicleModel {
     const hue = ((this.beatIndex + phase) / 8) % 1;
     this.tmpColor.setHSL(hue, 0.72, 0.55);
     this.matInterior.emissive.copy(this.tmpColor);
+    /* The ceiling glow is authored to read from the street at night, where it
+     * is a coloured wash seen through the windows across ten metres of air. The
+     * driver sits directly underneath it at arm's length, and at ~2.0 emissive
+     * it is comfortably over the 1.23 bloom threshold: measured from the seat at
+     * 15:30, hiding this one mesh took the frame from 0.25–0.36 luma down to a
+     * flat 0.24, which is the bloom-off reference. So it comes down when the
+     * camera is inside — far enough to sit under the threshold, not so far that
+     * the party stops being visible from the aisle. */
     this.matInterior.emissiveIntensity =
-      G.interiorIntensity * (1 - depth * 0.6 + depth * 0.6 * (0.4 + punch * 1.5));
+      G.interiorIntensity *
+      (1 - depth * 0.6 + depth * 0.6 * (0.4 + punch * 1.5)) *
+      (this.cockpitOn ? COCKPIT_GLOW_SCALE : 1);
 
     /* ---- underglow: off-beat, and the boost floods it ---- */
     const off = beatPunch((phase + 0.5) % 1);
@@ -823,7 +841,13 @@ export class BusModel implements VehicleModel {
     const base = { color, metalness: 0.05, roughness, envMapIntensity: 1 };
     const m = this.lowDetail
       ? new THREE.MeshStandardMaterial(base)
-      : new THREE.MeshPhysicalMaterial({ ...base, clearcoat, clearcoatRoughness });
+      : new THREE.MeshPhysicalMaterial({
+          ...base,
+          clearcoat,
+          clearcoatRoughness: safeClearcoatRoughness(clearcoatRoughness),
+        });
+    /* tags this as a painted panel for `setPaintForInterior` */
+    m.userData.isVehiclePaint = true;
     this.materials.push(m);
     return m;
   }
@@ -1787,13 +1811,25 @@ export class BusModel implements VehicleModel {
      * and the first thing the eye goes to. Every bus lines them. */
     padShell.addMirrored(box(0.05, 0.62, 0.34, 0.95, 1.78, zWs + 0.24));
     padShell.addMirrored(box(0.22, 0.6, 0.05, 1.06, 1.78, zWs + 0.4));
-    /* Sun visor, right up under the header.
+    /* Sun visor, full width, tucked up under the header.
      *
-     * It was 0.24 m deep and hung 0.14 m below the header, which put a black
-     * board 0.53 m from the eye subtending 45° of the frame — most of the
-     * upper half of the view. A visor is meant to be at the very edge of
-     * vision until you need it. */
-    padShell.add(box(0.94, 0.02, 0.15, -0.6, G.yWindscreenTop - 0.07, zWs + 0.12, -0.32));
+     * Three versions of this were wrong in three different ways, and the third
+     * is the one worth recording. Version one was a 0.24 m board hanging 0.14 m
+     * below the header — a black bar over most of the upper half of the frame.
+     * Version two was 3 cm of trim that looked right and occluded nothing.
+     * Version three was sized from the geometry to cut in at 21°, below the
+     * afternoon sun's 24°, on the theory that the glare washing the frame out
+     * was the sun coming in over the header — and it worked, in the sense that
+     * it removed the glare by removing the road with it. The windscreen was
+     * simply gone.
+     *
+     * The glare was never the sun *disc*. It was the sun's specular reflection
+     * in the bus's own paint, and `setPaintForInterior` deals with that at the
+     * material where it belongs, without spending a single degree of the view.
+     * So the visor goes back to being a visor: a strip at the edge of vision,
+     * full width now rather than only over the driver, because the bus turns
+     * and a visor over one shoulder only helps on one heading. */
+    padShell.add(box(2.3, 0.022, 0.16, 0, G.yWindscreenTop - 0.06, zWs + 0.11, -0.3));
 
     /* ---- the interior mirror, angled back down the aisle -----------------
      * Kept small and high for the same reason: at 0.6 m wide and 0.16 m above

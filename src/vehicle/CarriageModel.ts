@@ -58,6 +58,7 @@ import {
   taperTube,
 } from './CockpitKit';
 import { HorseRig } from './HorseRig';
+import { safeClearcoatRoughness, setPaintForInterior } from './VehicleTuning';
 import type { VehicleModel } from './VehicleTuning';
 
 /** metres above the road → local Y */
@@ -851,6 +852,7 @@ export class CarriageModel implements VehicleModel {
     this.cockpitOn = on;
     this.cockpit.visible = on;
     this.driver.visible = !on;
+    setPaintForInterior(this.materials, on);
   }
 
   /** The coachman's eye, in body-local metres, through the cosmetic lean. */
@@ -1056,7 +1058,13 @@ export class CarriageModel implements VehicleModel {
     const base = { color, metalness, roughness, envMapIntensity: 1 };
     const m = this.lowDetail
       ? new THREE.MeshStandardMaterial(base)
-      : new THREE.MeshPhysicalMaterial({ ...base, clearcoat, clearcoatRoughness });
+      : new THREE.MeshPhysicalMaterial({
+          ...base,
+          clearcoat,
+          clearcoatRoughness: safeClearcoatRoughness(clearcoatRoughness),
+        });
+    /* tags this as a painted panel for `setPaintForInterior` */
+    m.userData.isVehiclePaint = true;
     this.materials.push(m);
     return m;
   }
