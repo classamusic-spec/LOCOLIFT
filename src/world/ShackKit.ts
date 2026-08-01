@@ -1472,25 +1472,40 @@ export function buildThicket(rng: RNG): THREE.BufferGeometry {
  *
  * Shape language matters more than leaf count here: sea grape is *wide and
  * low*, a flattened dome that spreads further than it rises, so it reads as a
- * horizontal green mass under the vertical palm trunks. Two horizontal leaf
- * planes through the crown stop it going hollow when the camera lifts over a
- * crest, and the oldest leaves take the rust-red the species is known for.
+ * horizontal green mass under the vertical palm trunks. The oldest leaves take
+ * the rust-red the species is known for.
+ *
+ * Two deliberate choices, both learned from looking at the first build:
+ *
+ *  - **No horizontal leaf plane.** A ground-parallel card through the crown
+ *    seems like a cheap way to stop the plant reading hollow from above, and
+ *    it is a catastrophe: it catches the key light flat, so a 4 m pale-green
+ *    sheet floats over every bush and the verge reads as scattered debris.
+ *    The chase camera is low. The crown does not need a lid.
+ *  - **A UV sub-rect, not the full leaf card.** The shared leaf texture is a
+ *    seven-blade fan that is mostly *transparent* near the top, so a full-card
+ *    sample reads as isolated spikes — fine for agave, wrong for a broadleaf.
+ *    Sampling the dense overlapping base of the fan gives sea grape the solid
+ *    leafy mass it needs without a second texture.
  */
+const SEAGRAPE_UV: UVRect = { u0: 0.13, v0: 0.0, u1: 0.87, v1: 0.54 };
+
 export function buildSeaGrape(rng: RNG): THREE.BufferGeometry {
   const g = new GeoBuilder().enableAux();
   const cards = 8;
   const wave = new THREE.Vector3();
   const phase = rng.next();
-  const spread = rng.range(1.5, 2.4);
-  const top = rng.range(1.1, 1.9);
+  const spread = rng.range(1.1, 1.7);
+  const top = rng.range(1.0, 1.7);
   const leaf = [0x4c7a34, 0x3d6b2c, 0x6b8f36, 0x8a5f30] as const;
   for (let i = 0; i < cards; i++) {
     const ang = (i / cards) * Math.PI * 2 + rng.range(-0.3, 0.3);
-    const rad = rng.range(0.25, 1.0) * spread;
+    const rad = rng.range(0.2, 0.85) * spread;
     // the crown thins and drops as it spreads — a dome, not a cylinder
-    const h = top * rng.range(0.62, 1.0) * (1 - rad / (spread * 2.6));
-    const w = rng.range(1.3, 2.1);
-    const y0 = rng.range(0.02, 0.3);
+    const h = top * rng.range(0.66, 1.0) * (1 - rad / (spread * 3.2));
+    // wider than tall: the horizontal read is the whole point of the species
+    const w = rng.range(1.5, 2.3);
+    const y0 = rng.range(0.02, 0.26);
     const cx = Math.cos(ang) * rad;
     const cz = Math.sin(ang) * rad;
     const dx = Math.cos(ang + 1.57);
@@ -1505,21 +1520,7 @@ export function buildSeaGrape(rng: RNG): THREE.BufferGeometry {
       // one leaf in eight goes rusty; any more and it reads as a dying plant
       i === 3 ? leaf[3] : leaf[i % 3],
       wave,
-    );
-  }
-  for (let k = 0; k < 2; k++) {
-    const r = spread * (k === 0 ? 0.95 : 0.55);
-    const y = top * (k === 0 ? 0.52 : 0.86);
-    wave.set(0.07, phase, 0.1);
-    quadUV(
-      g,
-      new THREE.Vector3(-r, y, -r),
-      new THREE.Vector3(r, y, -r),
-      new THREE.Vector3(r, y, r),
-      new THREE.Vector3(-r, y, r),
-      FULL_UV,
-      shade(leaf[k], 0.9),
-      wave,
+      SEAGRAPE_UV,
     );
   }
   return finish(g, true);

@@ -26,7 +26,7 @@ import { ChaseCamera } from './camera/ChaseCamera';
 import { AudioSystem } from './audio/AudioSystem';
 import { TrafficSystem } from './traffic/TrafficSystem';
 import { PedestrianSystem } from './traffic/PedestrianSystem';
-import { isVehicleId, DEFAULT_VEHICLE_ID } from './vehicle/VehicleRoster';
+import { isVehicleId, DEFAULT_VEHICLE_ID, getVehicleDefinition } from './vehicle/VehicleRoster';
 import type { VehicleId } from './vehicle/VehicleRoster';
 import { UISystem } from './ui/UISystem';
 import { MissionSystem } from './passengers/MissionSystem';
@@ -137,9 +137,10 @@ async function boot(): Promise<void> {
   t = stage('vehicle', t);
 
   const camera = new ChaseCamera(engine.camera, vehicle, physics, engine.bus);
-  // The camera tuning is authored against the 4.7m Jeep; the 11m bus needs a
-  // proportionally larger rig or the eye ends up sitting on its roof.
-  camera.setRigScale(vehicleId === 'bus' ? 1.95 : 1);
+  // The camera tuning is authored against the 4.7m Jeep; anything larger needs
+  // a proportionally bigger rig or the eye ends up inside the vehicle. Each
+  // roster entry carries its own scale rather than main hard-coding a list.
+  camera.setRigScale(getVehicleDefinition(vehicleId).cameraRigScale);
 
   const audio = new AudioSystem({ seed: CONFIG.worldSeed });
   audio.setVehicle(vehicle);

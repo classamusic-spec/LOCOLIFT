@@ -58,16 +58,22 @@ import {
   puertoRicanFlag,
   buildBannerFlag,
   buildBarrelTable,
+  buildBeachGrass,
+  buildBloomBush,
   buildBollard,
   buildChinchorro,
   buildCooler,
+  buildDrinkBoard,
+  buildFernClump,
   buildFestoonBulb,
   buildParkedCar,
   buildPicnicBench,
   buildPlasticChair,
   buildPlasticTable,
   buildRock,
+  buildSeaGrape,
   buildSmokePlume,
+  buildSpeakerStack,
   buildThicket,
   buildUmbrella,
   bunting,
@@ -82,6 +88,14 @@ import {
   type ShackSpec,
   type SignKey,
 } from './ShackKit';
+import {
+  PinonesLife,
+  faceYaw,
+  queueAnchors,
+  ringAnchors,
+  type CrowdAnchor,
+  type PinonesSite,
+} from './PinonesLife';
 import type { CityLayout, DistrictZone, OpenArea, WorldLayer, WorldOpts } from './WorldTypes';
 
 /* ========================================================================== *
@@ -194,8 +208,16 @@ const RAMPS: readonly RampSpec[] = [
   { s: 640, len: 17, height: 3.6, drift: 5.0, halfW: 2.6 },
 ];
 
-/** Station of each chinchorro cluster — also where the gravel apron widens. */
-const CLUSTERS: readonly number[] = [92, 208, 322, 436, 560, 660];
+/**
+ * Station of each chinchorro cluster — also where the gravel apron widens.
+ *
+ * Eight of them over ~740 m, so the strip reads as a *place* rather than six
+ * lonely kiosks: roughly 85 m of open coast between clusters, which at 45 m/s
+ * is under two seconds of quiet before the next wall of colour, music and
+ * people. The spacing is deliberately uneven — a real chinchorro strip grew,
+ * it was not laid out.
+ */
+const CLUSTERS: readonly number[] = [88, 168, 244, 322, 402, 486, 572, 660];
 
 /** Sand kickers at the tideline. `[station, lateral fraction of the beach]`. */
 const KICKERS: ReadonlyArray<readonly [number, number]> = [
@@ -507,10 +529,16 @@ export class Pinones implements WorldLayer {
   /** palms and understorey, from the shared `Vegetation` layer */
   private plantGroup = new THREE.Group();
 
+  /** people, from the shared `PedestrianModel` fleets */
+  private lifeGroup = new THREE.Group();
+
   private quality: QualityTier;
   private options: PinonesOptions;
   private kit: PropKit | null = null;
   private vegetation: Vegetation | null = null;
+  private life: PinonesLife | null = null;
+  /** where a person can plausibly stand, derived from the props as they land */
+  private crowdAnchors: CrowdAnchor[] = [];
 
   private stations: Station[] = [];
   private layout: CityLayout | null = null;
@@ -535,7 +563,7 @@ export class Pinones implements WorldLayer {
     uTime: { value: 0 },
     uSeaLevel: { value: SEA_LEVEL },
     uWetness: { value: 0 },
-    uSand: { value: new THREE.Color().setHex(0xd2b483, THREE.SRGBColorSpace) },
+    uSand: { value: new THREE.Color().setHex(0xd8b57e, THREE.SRGBColorSpace) },
     uSandWet: { value: new THREE.Color().setHex(0x7a6443, THREE.SRGBColorSpace) },
     uFoam: { value: new THREE.Color().setHex(0xf6fbfa, THREE.SRGBColorSpace) },
     uAsphalt: { value: new THREE.Color().setHex(0x45443f, THREE.SRGBColorSpace) },
@@ -564,7 +592,8 @@ export class Pinones implements WorldLayer {
     this.deckGroup.name = 'pinones/deck';
     this.propGroup.name = 'pinones/props';
     this.plantGroup.name = 'pinones/planting';
-    this.group.add(this.deckGroup, this.propGroup, this.plantGroup);
+    this.lifeGroup.name = 'pinones/life';
+    this.group.add(this.deckGroup, this.propGroup, this.plantGroup, this.lifeGroup);
   }
 
   /* --------------------------------------------------------------- build */
@@ -584,8 +613,37 @@ export class Pinones implements WorldLayer {
     const rng = opts.rng.fork(0x9151);
     this.buildProps(rng);
     if (this.options.planting !== false) this.buildPlanting(layout, opts);
+    this.buildLife(opts.rng.fork(0x71fe));
 
     this._stats.drawCalls = this.countDrawCalls();
+  }
+
+  /**
+   * Hand the crowd the strip's geometry and the anchor list the props just
+   * generated. Nothing about a pedestrian is re-implemented here — see
+   * `PinonesLife`'s header for why the traffic layer's kit drops straight in.
+   */
+  private buildLife(rng: RNG): void {
+    if (this.crowdAnchors.length === 0) return;
+    const site: PinonesSite = {
+      height: (x, z) => this.surfaceHeight(x, z),
+      at: (s, v, out) => {
+        const st = this.stationAtS(s);
+        out.set(st.x + st.nx * v, this.profile(st, v), st.z + st.nz * v);
+        // the rig faces −Z at yaw 0, so hand back a heading in that convention
+        return faceYaw(st.tx, st.tz);
+      },
+      length: this.stations[this.stations.length - 1]?.s ?? 0,
+    };
+    const life = new PinonesLife(this.quality, {
+      density: this.options.density ?? 1,
+      cullDistance: this.options.propDistance ?? QUALITY_BUDGET[this.quality].propDetailDistance * 2.4,
+    });
+    life.build(site, this.crowdAnchors, rng);
+    this.lifeGroup.add(life.group);
+    this.life = life;
+    // the list has done its job; it is pure bookkeeping and can be large
+    this.crowdAnchors.length = 0;
   }
 
   /* ------------------------------------------------------------ geometry */
@@ -1273,7 +1331,12 @@ export class Pinones implements WorldLayer {
             /* ---------------- sand ---------------- */
             'float pnGrain = pnFbm( pnW * 3.2 ) * 0.16 + pnNoise( pnW * 11.0 ) * 0.07;',
             'float pnDrift = pnFbm( pnW * 0.055 );',
-            'vec3 pnSandC = uSand * mix( vec3( 0.76, 0.82, 0.97 ), vec3( 1.16, 1.07, 0.86 ), pnDrift );',
+            // Both ends of the drift stay WARM. The old low end was
+            // ( 0.76, 0.82, 0.97 ) — a blue-white — so wherever the drift noise
+            // dipped, Piñones sand went cool grey and the whole beach read
+            // washed out under a midday key. Caribbean sand shifts warm-to-warm:
+            // pale shell at the top end, damp ochre at the bottom.
+            'vec3 pnSandC = uSand * mix( vec3( 0.86, 0.83, 0.74 ), vec3( 1.18, 1.09, 0.90 ), pnDrift );',
             'float pnRip = sin( ( pnV - vBeach.z * 0.02 ) * 1.5 + pnFbm( pnW * 0.3 ) * 7.0 ) * 0.5 + 0.5;',
             'pnSandC *= 1.0 + ( pnGrain - 0.11 ) * 1.15 + pnRip * 0.07;',
             // wind-combed ridges running up the beach, the coarse scale that stops
@@ -1329,7 +1392,11 @@ export class Pinones implements WorldLayer {
             // nothing and the sea grape comes right up to the white line
             'float pnInl = smoothstep( 3.5, 11.0, -pnV );',
             'float pnTuft = pnFbm( pnW * 0.62 + 3.0 ) + 0.15;',
-            'float pnCover = smoothstep( 0.34, 0.6, pnTuft ) * mix( 0.5, 1.0, pnInl );',
+            // cover was gated so tightly that the dune bench read as pale sand
+            // with a few dark blobs on it rather than as planted ground. Widen
+            // the ramp and lift the floor: bare sand still shows through between
+            // tussocks, but the band underneath a hundred sea grapes is green.
+            'float pnCover = smoothstep( 0.20, 0.52, pnTuft ) * mix( 0.72, 1.0, pnInl );',
             'vec3 pnGrassC = mix( vec3( 0.3, 0.47, 0.13 ), vec3( 0.62, 0.72, 0.24 ), pnNoise( pnW * 2.6 ) );',
             'pnGrassC *= 0.86 + 0.3 * pnFbm( pnW * 1.4 + 7.0 );',
             'vec3 pnScrubC = mix( pnSandC * 0.93, pnGrassC, pnCover );',
@@ -1530,11 +1597,26 @@ export class Pinones implements WorldLayer {
     const thickets: Placement[] = [];
     const smoke: Placement[] = [];
     const bulbs: Placement[] = [];
+    const seagrape: Placement[] = [];
+    const ferns: Placement[] = [];
+    const grass: Placement[] = [];
+    const blooms: Placement[] = [];
+    const boards: Placement[] = [];
+    const speakers: Placement[] = [];
 
     const total = this.stations[this.stations.length - 1].s;
     const put = (st: Station, v: number, out = new THREE.Vector3()): THREE.Vector3 =>
       out.set(st.x + st.nx * v, this.profile(st, v), st.z + st.nz * v);
     const p = new THREE.Vector3();
+
+    /* --- the crowd's view of the set dressing ---------------------------- *
+     * Anchors are pushed as the props that justify them are placed, so a
+     * sitter is always on a real chair and a queue always faces a real hatch.
+     * The crowd cannot drift out of register with the strip because it is
+     * derived from it. */
+    const anchorHeight = (x: number, z: number): number => this.surfaceHeight(x, z);
+    const anchorJitter = (a: number, b: number): number => rng.range(a, b);
+    const crowd = this.crowdAnchors;
 
     const SHACK_SIGNS: SignKey[] = ['ancla', 'carmen', 'frituras', 'pinchos', 'coco', 'marAzul', 'mofongo', 'pescado'];
     const BOARDS: SignKey[] = ['cerveza', 'malta', 'refresco', 'mabi', 'empanadillas', 'piraguas', 'abierto', 'musica'];
@@ -1576,8 +1658,36 @@ export class Pinones implements WorldLayer {
         this._stats.shacks++;
         anchors.push(new THREE.Vector3(p.x, p.y + 2.9, p.z));
 
+        /* --- a queue at the hatch. This is the single most important crowd
+               in Piñones: a chinchorro with nobody waiting at it is a shed. */
+        queueAnchors(
+          crowd,
+          p.x + Math.sin(spec.yaw) * spec.depth * 0.5,
+          p.z + Math.cos(spec.yaw) * spec.depth * 0.5,
+          spec.yaw,
+          rng.int(2, 4),
+          anchorHeight,
+          anchorJitter,
+        );
+
         // a fryer plume off every second shack
         if (k % 2 === 0) smoke.push({ x: p.x, y: p.y + 2.6, z: p.z, yaw: rng.range(0, 6.28), scale: rng.range(0.85, 1.3) });
+
+        /* --- a painted drink board propped against the flank, and on the
+               noisy shacks a speaker on a stand with dancers round it --- */
+        if (rng.bool(0.62)) {
+          const bv = v - side * rng.range(2.2, 3.4);
+          const bst = this.stationAtS(s + rng.range(-2.4, 2.4));
+          put(bst, bv, p);
+          boards.push({ x: p.x, y: p.y, z: p.z, yaw: spec.yaw + rng.range(-0.4, 0.4) });
+        }
+        if (spec.speaker) {
+          const sv = v - side * rng.range(3.0, 4.2);
+          const sst = this.stationAtS(s + rng.range(-3, 3));
+          put(sst, sv, p);
+          speakers.push({ x: p.x, y: p.y, z: p.z, yaw: spec.yaw + Math.PI + rng.range(-0.5, 0.5) });
+          ringAnchors(crowd, p.x, p.z, rng.range(1.9, 2.9), rng.int(3, 5), 'dance', anchorHeight, anchorJitter);
+        }
 
         // stacked coolers and a banner beside the counter
         for (let c = 0; c < rng.int(1, 2); c++) {
@@ -1597,7 +1707,7 @@ export class Pinones implements WorldLayer {
       }
 
       /* --- the terrace in front: umbrellas, tables, chairs, benches --- */
-      const terrace = Math.round(rng.int(3, 5) * density);
+      const terrace = Math.round(rng.int(4, 6) * density);
       for (let t = 0; t < terrace; t++) {
         const s = cs + rng.range(-18, 18);
         const st = this.stationAtS(s);
@@ -1606,32 +1716,71 @@ export class Pinones implements WorldLayer {
         put(st, v, p);
         umbrellas.push({ x: p.x, y: p.y, z: p.z, yaw: rng.range(0, 6.28), scale: rng.range(0.92, 1.12) });
         tables.push({ x: p.x, y: p.y, z: p.z, yaw: rng.range(0, 6.28) });
-        const seats = rng.int(2, 4);
+        const seats = rng.int(3, 4);
         for (let c = 0; c < seats; c++) {
           const a = (c / seats) * Math.PI * 2 + rng.range(-0.4, 0.4);
           const r = rng.range(0.72, 0.95);
           const cx = p.x + Math.cos(a) * r;
           const cz = p.z + Math.sin(a) * r;
-          chairs.push({ x: cx, y: this.surfaceHeight(cx, cz), z: cz, yaw: -a + Math.PI * 0.5 + rng.range(-0.3, 0.3) });
+          const cy = this.surfaceHeight(cx, cz);
+          // the chair's own seat looks along +Z of its yaw, so turn it to face
+          // the table rather than away from it
+          chairs.push({
+            x: cx,
+            y: cy,
+            z: cz,
+            yaw: Math.atan2(-Math.cos(a), -Math.sin(a)) + rng.range(-0.22, 0.22),
+          });
+          // roughly two chairs in three have somebody in them — an empty
+          // terrace beside a full one is what a real strip looks like
+          if (rng.bool(0.66)) {
+            crowd.push({ x: cx, y: cy, z: cz, yaw: faceYaw(-Math.cos(a), -Math.sin(a)), kind: 'seat' });
+          }
         }
       }
-      for (let t = 0; t < Math.round(2 * density); t++) {
+      for (let t = 0; t < Math.round(3 * density); t++) {
         const st = this.stationAtS(cs + rng.range(-16, 16));
         if (!st) continue;
         put(st, inland ? -rng.range(8.4, 9.6) : lerp(SHOULDER + 1.2, st.bermV, rng.range(0.2, 0.8)), p);
-        if (rng.bool(0.5)) barrels.push({ x: p.x, y: p.y, z: p.z, yaw: rng.range(0, 6.28) });
-        else benches.push({ x: p.x, y: p.y, z: p.z, yaw: Math.atan2(st.tx, st.tz) + rng.range(-0.3, 0.3) });
+        if (rng.bool(0.5)) {
+          barrels.push({ x: p.x, y: p.y, z: p.z, yaw: rng.range(0, 6.28) });
+          // a barrel table is a standing bar: people round it, drinks in hand
+          ringAnchors(crowd, p.x, p.z, rng.range(0.78, 1.0), rng.int(2, 3), 'stand', anchorHeight, anchorJitter);
+        } else {
+          const byaw = Math.atan2(st.tx, st.tz) + rng.range(-0.3, 0.3);
+          const cx0 = p.x;
+          const cz0 = p.z;
+          benches.push({ x: cx0, y: p.y, z: cz0, yaw: byaw });
+          /* Both benches, turned in toward the table top. The seat planks sit
+             at local z = ±0.62, and the instance is rotated about Y by `byaw`,
+             so that maps to a world offset of ±0.62·(sin, cos) of the yaw. */
+          for (const sgn of [-1, 1]) {
+            if (!rng.bool(0.72)) continue;
+            const px = cx0 + sgn * 0.62 * Math.sin(byaw);
+            const pz = cz0 + sgn * 0.62 * Math.cos(byaw);
+            crowd.push({
+              x: px,
+              y: this.surfaceHeight(px, pz),
+              z: pz,
+              yaw: faceYaw(cx0 - px, cz0 - pz),
+              kind: 'bench',
+            });
+          }
+        }
       }
 
-      /* --- a flagpole at the head of the cluster (§7.4) --- */
-      {
-        const st = this.stationAtS(cs - 14);
-        if (st) {
-          const v = inland ? -rng.range(9, 11) : SHOULDER + rng.range(1.6, 3.2);
-          put(st, v, p);
-          kb.wood.cylinder(p.x, p.y, p.z, 0.075, 0.055, 6.2, 7, KIT.woodPale);
-          puertoRicanFlag(kb.cloth, p.x, p.y + 5.9, p.z, 1.5, Math.atan2(st.tx, st.tz), rng.next());
-        }
+      /* --- flagpoles at each end of the cluster (§7.4). The monoestrellada is
+             the strongest single cultural read on this road, so every cluster
+             flies one at the approach and most fly a second at the exit. --- */
+      for (const fs of [cs - 14, cs + 15]) {
+        if (fs !== cs - 14 && !rng.bool(0.7)) continue;
+        const st = this.stationAtS(fs);
+        if (!st) continue;
+        const v = inland ? -rng.range(9, 11) : SHOULDER + rng.range(1.6, 3.2);
+        put(st, v, p);
+        const poleH = rng.range(5.6, 6.8);
+        kb.wood.cylinder(p.x, p.y, p.z, 0.075, 0.055, poleH, 7, KIT.woodPale);
+        puertoRicanFlag(kb.cloth, p.x, p.y + poleH - 0.3, p.z, rng.range(1.35, 1.7), Math.atan2(st.tx, st.tz), rng.next());
       }
 
       /* --- festoon lights: shack to shack, and a second run out over the
@@ -1738,12 +1887,26 @@ export class Pinones implements WorldLayer {
       put(st, v, p);
       if (p.y < SEA_LEVEL + 0.45) continue;
       umbrellas.push({ x: p.x, y: p.y, z: p.z, yaw: rng.range(0, 6.28), scale: rng.range(0.9, 1.15) });
+      // beach chairs face the water, because that is what they are for
+      const seaward = faceYaw(st.nx, st.nz);
       for (let c = 0; c < rng.int(1, 3); c++) {
         const a = rng.range(0, 6.28);
         const r = rng.range(0.9, 1.6);
         const cx = p.x + Math.cos(a) * r;
         const cz = p.z + Math.sin(a) * r;
-        chairs.push({ x: cx, y: this.surfaceHeight(cx, cz), z: cz, yaw: rng.range(0, 6.28) });
+        const cy = this.surfaceHeight(cx, cz);
+        chairs.push({ x: cx, y: cy, z: cz, yaw: Math.atan2(st.nx, st.nz) + rng.range(-0.5, 0.5) });
+        if (rng.bool(0.45)) {
+          crowd.push({ x: cx, y: cy, z: cz, yaw: seaward + rng.range(-0.4, 0.4), kind: 'seat' });
+        }
+      }
+      // and a few people standing at the tideline looking at the Atlantic
+      if (rng.bool(0.5)) {
+        const wv = lerp(v, st.waterV - 1.5, rng.range(0.4, 0.95));
+        put(st, wv, p);
+        if (p.y > SEA_LEVEL + 0.15) {
+          crowd.push({ x: p.x, y: p.y, z: p.z, yaw: seaward + rng.range(-0.6, 0.6), kind: 'shore' });
+        }
       }
     }
 
@@ -1764,28 +1927,100 @@ export class Pinones implements WorldLayer {
         scaleY: rng.range(0.4, 1.0),
       });
     }
-    /**
-     * Sea grape. Piñones is not a road across a lawn — it is a road cut through
-     * a thicket, and what sells that at 45 m/s is a *wall* of foliage crowding
-     * the back of the bench and climbing the bluff. Six two-sided cards each,
-     * so seven hundred of them cost less than one building.
+    /* ----------------------------------------- 4a. the layered understorey *
+     *
+     * Piñones is not a road across a lawn — it is a road cut through a
+     * thicket, and what sells that at 45 m/s is *depth*: three or four
+     * distinct plant silhouettes stacked between the white line and the
+     * canopy, not one shrub repeated.
+     *
+     * `Vegetation` cannot supply this. Its `buildUnderstorey` keys off
+     * `model.spans` and `model.promenade`, both of which are empty for the
+     * projected layout this layer hands it, so Piñones gets the palms and
+     * nothing beneath them — which is exactly why the verge read flat and
+     * patchy. The palms stay `Vegetation`'s; everything under them is placed
+     * here, in bands measured from the centreline.
      */
-    const thicketCount = Math.round(660 * density);
+
+    /** Metres from the nearest chinchorro cluster centre. */
+    const distToCluster = (s: number): number => {
+      let d = Infinity;
+      for (const cs of CLUSTERS) d = Math.min(d, Math.abs(s - cs));
+      return d;
+    };
+
+    /**
+     * One planting pass: `n` plants scattered over a lateral band.
+     *
+     * `clearCluster` keeps a band off the parking aprons — between the
+     * clusters the scrub is allowed right up to the white line, but planting a
+     * bush in the middle of somebody's parking is how you get a hedge growing
+     * through a car.
+     */
+    const scatter = (
+      list: Placement[],
+      n: number,
+      v0: number,
+      v1: number,
+      s0: number,
+      s1: number,
+      lo: number,
+      hi: number,
+      clearCluster = 0,
+    ): void => {
+      for (let i = 0; i < n; i++) {
+        const s = rng.range(s0, Math.max(s0 + 1, s1));
+        if (clearCluster > 0 && distToCluster(s) < clearCluster) continue;
+        const st = this.stationAtS(s);
+        if (!st) continue;
+        const v = rng.range(v0, v1);
+        put(st, v, p);
+        if (p.y < SEA_LEVEL + 0.7) continue;
+        list.push({
+          x: p.x,
+          y: p.y - 0.1,
+          z: p.z,
+          yaw: rng.range(0, 6.28),
+          scale: rng.range(lo, hi),
+        });
+      }
+    };
+
+    const S0 = 6;
+    const S1 = total - 6;
+
+    /* --- midstorey: sea grape is the signature plant of this coast and the
+           mass that actually crowds the road. Densest right behind the bench,
+           thinning as it climbs, plus a belt holding the dune crest. --- */
+    scatter(seagrape, Math.round(300 * density), -13, -30, S0, S1, 1.0, 1.9);
+    scatter(seagrape, Math.round(90 * density), -30, -58, S0, S1, 0.8, 1.5);
+    scatter(seagrape, Math.round(70 * density), 8.5, 15, S0, S1, 0.7, 1.25);
+    // and a hedge crowding the white line itself, wherever there is no apron
+    // to keep clear: this is what makes the road feel *cut through* something
+    scatter(seagrape, Math.round(130 * density), -7.6, -12.5, S0, S1, 0.7, 1.3, 34);
+
+    /* --- understorey: ferns in the shade the bluff throws, tall grass on the
+           open dune and the sunlit verge where nothing shades it out --- */
+    scatter(ferns, Math.round(240 * density), -26, -74, S0, S1, 0.8, 1.6);
+    scatter(grass, Math.round(300 * density), -10.5, -24, S0, S1, 0.7, 1.5);
+    scatter(grass, Math.round(240 * density), 7.2, 16, S0, S1, 0.6, 1.35);
+    scatter(grass, Math.round(150 * density), -7.2, -11, S0, S1, 0.55, 1.1, 30);
+
+    /* --- flowering shrubs: the magenta and coral §3.2 wants, kept to the
+           roadside where they read against the green at speed --- */
+    scatter(blooms, Math.round(120 * density), -11, -26, S0, S1, 0.8, 1.5);
+
+    /* --- and the original thicket, now a supporting player rather than the
+           whole planting: broken clumps up the bluff face --- */
+    const thicketCount = Math.round(260 * density);
     for (let i = 0; i < thicketCount; i++) {
-      const st = this.stationAtS(rng.range(6, total - 6));
+      const st = this.stationAtS(rng.range(S0, S1));
       if (!st) continue;
       const roll = rng.next();
-      // 62 % the hedge line behind the bench, 26 % up the bluff, 12 % on the dune
-      const v =
-        roll < 0.62
-          ? -rng.range(15, 34)
-          : roll < 0.88
-            ? -rng.range(34, 96)
-            : st.bermV + rng.range(-4, 4);
+      const v = roll < 0.45 ? -rng.range(16, 34) : -rng.range(34, 96);
       put(st, v, p);
       if (p.y < SEA_LEVEL + 0.7) continue;
-      // the hedge line is the densest and tallest; scrub thins as it climbs
-      const scale = roll < 0.62 ? rng.range(1.2, 2.3) : roll < 0.88 ? rng.range(0.85, 1.8) : rng.range(0.6, 1.2);
+      const scale = roll < 0.45 ? rng.range(1.2, 2.3) : rng.range(0.85, 1.8);
       thickets.push({ x: p.x, y: p.y - 0.12, z: p.z, yaw: rng.range(0, 6.28), scale });
     }
 
@@ -1860,6 +2095,12 @@ export class Pinones implements WorldLayer {
     addInstanced(buildBannerFlag('cerveza'), kit.sign, banners, 'pinones/banners');
     addInstanced(buildRock(rng.fork(0x0c)), kit.paint, rocks, 'pinones/rocks');
     addInstanced(buildThicket(rng.fork(0x1d)), kit.foliage, thickets, 'pinones/thickets');
+    addInstanced(buildSeaGrape(rng.fork(0x3f)), kit.foliage, seagrape, 'pinones/seagrape');
+    addInstanced(buildFernClump(rng.fork(0x4a)), kit.foliage, ferns, 'pinones/ferns');
+    addInstanced(buildBeachGrass(rng.fork(0x5b)), kit.foliage, grass, 'pinones/grass');
+    addInstanced(buildBloomBush(rng.fork(0x6c), KIT.bloom[0]), kit.foliage, blooms, 'pinones/blooms');
+    addInstanced(buildDrinkBoard('cerveza'), kit.sign, boards, 'pinones/boards');
+    addInstanced(buildSpeakerStack(), kit.paint, speakers, 'pinones/speakers');
     addInstanced(buildFestoonBulb(), kit.glow, bulbs, 'pinones/festoon');
     addInstanced(buildSmokePlume(rng.fork(0x2e)), kit.foliage, smoke, 'pinones/smoke');
 
@@ -1954,6 +2195,7 @@ export class Pinones implements WorldLayer {
 
   update(cameraPos: THREE.Vector3, dt: number, timeOfDay: number): void {
     this.uniforms.uTime.value += dt;
+    this.elapsed += dt;
     this.kit?.update(dt, nightFactor(timeOfDay));
     // Vegetation only sways; it does not read the clock.
     this.vegetation?.update?.(cameraPos, dt);
@@ -1971,7 +2213,16 @@ export class Pinones implements WorldLayer {
     this.propGroup.visible = near < propCut;
     this.plantGroup.visible = near < propCut * 2.1;
     this.deckGroup.visible = near < 1500;
+
+    // the crowd rides the props' cull: there is no reason to pay for a hundred
+    // instance writes when the shacks they are queuing at are not being drawn
+    const crowdOn = near < propCut;
+    this.life?.setVisible(crowdOn);
+    if (crowdOn) this.life?.update(cameraPos, dt, this.elapsed);
   }
+
+  /** Wall clock since build, for the crowd's per-person phase offsets. */
+  private elapsed = 0;
 
   private distanceToRoad(p: THREE.Vector3): number {
     let best = Infinity;
@@ -1986,11 +2237,13 @@ export class Pinones implements WorldLayer {
   onQualityChange(tier: QualityTier): void {
     this.quality = tier;
     this.vegetation?.onQualityChange?.(tier);
+    this.life?.onQualityChange(tier);
   }
 
   private countDrawCalls(): number {
     let n = this.deckGroup.children.length + this.propGroup.children.length;
     if (this.vegetation) n += this.vegetation.group.children.length;
+    if (this.life) n += this.life.drawCalls;
     return n;
   }
 
@@ -2007,12 +2260,15 @@ export class Pinones implements WorldLayer {
       pinonesColliderTriangles: this._stats.colliderTriangles,
       pinonesDrawCalls: this._stats.drawCalls,
       pinonesLength: Math.round(this._stats.length),
+      ...(this.life?.stats() ?? {}),
     };
   }
 
   dispose(): void {
     if (this.physics) for (const b of this.bodies) this.physics.removeBody(b);
     this.bodies.length = 0;
+    this.life?.dispose();
+    this.life = null;
     this.vegetation?.dispose();
     this.vegetation = null;
     for (const g of this.geometries) g.dispose();

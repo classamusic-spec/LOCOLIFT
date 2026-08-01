@@ -14,11 +14,13 @@
 import type { QualityTier } from '../core/types';
 import { BusModel } from './BusModel';
 import { BUS_TUNING } from './BusTuning';
+import { CarriageModel } from './CarriageModel';
+import { CARRIAGE_TUNING } from './CarriageTuning';
 import { JeepModel } from './JeepModel';
 import { JEEP_TUNING, type VehicleModel, type VehicleTuningSet } from './VehicleTuning';
 
 /** Stable, persistable identifiers. Never renumber or rename these. */
-export type VehicleId = 'jeep' | 'bus';
+export type VehicleId = 'jeep' | 'bus' | 'carriage';
 
 /**
  * Coarse 0..1 bars for the vehicle-select screen. These are hand-authored
@@ -47,6 +49,22 @@ export interface VehicleDefinition {
   readonly createModel: (quality: QualityTier) => VehicleModel;
   /** how many fares it can advertise carrying, for flavour and future modes */
   readonly seats: number;
+
+  /**
+   * How much bigger than the Jeep the chase rig needs to be. `ChaseCamera`
+   * already takes this through `setRigScale`; the boot code should read it from
+   * here rather than branching on the id, so a fourth vehicle needs no wiring.
+   * Jeep 1 (the rig was authored against it), bus 1.95, carriage 1.25.
+   */
+  readonly cameraRigScale: number;
+
+  /**
+   * Fare multiplier for a ride in this vehicle. A carriage ride across the old
+   * city is a *scenic* ride and is priced like one; the Jeep and the bus are
+   * transport. Data only — the mission and score systems own whether and how
+   * they read it.
+   */
+  readonly farePremium: number;
 }
 
 export const VEHICLE_ROSTER: readonly VehicleDefinition[] = [
@@ -63,6 +81,8 @@ export const VEHICLE_ROSTER: readonly VehicleDefinition[] = [
     tuning: JEEP_TUNING,
     createModel: (quality) => new JeepModel(quality),
     seats: 2,
+    cameraRigScale: 1,
+    farePremium: 1,
   },
   {
     id: 'bus',
@@ -78,6 +98,30 @@ export const VEHICLE_ROSTER: readonly VehicleDefinition[] = [
     tuning: BUS_TUNING,
     createModel: (quality) => new BusModel(quality),
     seats: 24,
+    cameraRigScale: 1.95,
+    farePremium: 1,
+  },
+  {
+    id: 'carriage',
+    name: 'El Coche de Caballos',
+    tagline: 'Despacio, pero pasa por donde nadie más pasa.',
+    description:
+      'A working tourist carriage off the plaza: black lacquer, chrome-yellow ' +
+      'spoked wheels, a blue-and-white awning and one dapple-grey Paso Fino in ' +
+      'harness. It will never win a drag race. It will turn inside its own ' +
+      'length, thread a callejón the Jeep scrapes down, and take the plaza ' +
+      'steps while the others go the long way round. Spur the horse and it ' +
+      'gallops — but the meter that pays for that fills up by threading ' +
+      'crowds, not by going fast.',
+    stats: { topSpeed: 0.24, acceleration: 0.35, grip: 0.6, weight: 0.2 },
+    tuning: CARRIAGE_TUNING,
+    createModel: (quality) => new CarriageModel(quality),
+    seats: 4,
+    /* longer than the Jeep and the interesting half of it is out in front, so
+     * the rig wants a little more arm — but nothing like the bus's */
+    cameraRigScale: 1.25,
+    /** a scenic ride, priced like one */
+    farePremium: 1.35,
   },
 ];
 

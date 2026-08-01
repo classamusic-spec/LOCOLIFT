@@ -93,6 +93,23 @@ export interface VehicleOpts {
 
 type CollisionKind = 'traffic' | 'prop' | 'wall' | 'ped';
 
+/**
+ * Optional reactions a vehicle's mesh may implement, over and above the
+ * `VehicleModel` contract.
+ *
+ * A machine does not care that it was hit; an animal does. The carriage's horse
+ * shies away from an impact or a near miss, and nothing in `VehicleModel`
+ * carries that signal, so it is declared here structurally rather than widening
+ * the contract every vehicle has to satisfy. Models that don't implement these
+ * are unaffected — the Jeep and the bus never notice.
+ */
+interface ReactiveModel {
+  /** something hit us. `fromRight` is the side it came from: +1 right, −1 left */
+  reactToImpact?(impulse: number, fromRight: number): void;
+  /** something just missed us, at `speed` m/s, from the same signed side */
+  reactToNearMiss?(speed: number, fromRight: number): void;
+}
+
 /** Static ride height of the Jeep's body origin above the road, metres. */
 const STATIC_RIDE_HEIGHT = staticRideHeight(JEEP_TUNING, CONFIG.gravity);
 
@@ -109,6 +126,8 @@ export class Vehicle implements System {
   readonly object3d: THREE.Object3D;
   readonly body: BodyHandle;
   readonly model: VehicleModel;
+  /** the same model, viewed through the optional-reactions lens (see above) */
+  private readonly reactive: ReactiveModel;
 
   /** which vehicle from the roster this is */
   readonly definition: VehicleDefinition;
@@ -325,6 +344,7 @@ export class Vehicle implements System {
     this.body = this.physics.createBody(desc);
 
     this.model = this.definition.createModel(opts.quality ?? 'high');
+    this.reactive = this.model as ReactiveModel;
     this.object3d = this.model.object3d;
     this.object3d.position.copy(spawn);
     this.object3d.quaternion.copy(quat);
@@ -1309,6 +1329,10 @@ export class Vehicle implements System {
       other.getPosition(at);
 
       this.boost.add(this.boostT.gainNearMiss);
+      this.reactive.reactToNearMiss?.(
+        this.frame.speed,
+        this.tmpVec.copy(at).sub(this.frame.pos).dot(this.frame.right) >= 0 ? 1 : -1,
+      );
       bus.emit('vehicle:nearMiss', { speed: this.frame.speed, at });
     }
   }
@@ -1330,6 +1354,13 @@ export class Vehicle implements System {
     this.lastImpulseAt = this.elapsed;
 
     if (e.impulse >= this.collisionT.heavyImpulse) this.hardHitPending = true;
+
+    /* which side did it come from? Models that care (the carriage's horse)
+     * shy away from it rather than into it. */
+    this.reactive.reactToImpact?.(
+      e.impulse,
+      this.tmpVec.copy(e.point).sub(this.frame.pos).dot(this.frame.right) >= 0 ? 1 : -1,
+    );
 
     this.busRef?.emit('vehicle:collision', {
       impulse: e.impulse,

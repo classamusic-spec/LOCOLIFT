@@ -1,0 +1,9 @@
+node_modules
+.captures
+.captures-*
+dist-standalone
+.git
+docs
+tools
+src
+*.md

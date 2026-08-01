@@ -420,20 +420,34 @@ export class PinonesLife {
  * ========================================================================== */
 
 /**
+ * Yaw that makes a figure look along `(dx, dz)`.
+ *
+ * The rig faces **−Z** at yaw 0, which is `PedestrianSystem`'s own convention
+ * (`heading = atan2(-dx, -dz)`). Every anchor in this file goes through here
+ * rather than open-coding the sign flips, because getting it wrong produces a
+ * crowd that is subtly, uncannily facing the wrong way and nothing else.
+ */
+export function faceYaw(dx: number, dz: number): number {
+  return Math.atan2(-dx, -dz);
+}
+
+/**
  * A queue at a serving counter: `n` people in a line running back from the
  * hatch, each facing it, with the shuffle of a real queue rather than a rank.
+ *
+ * `facing` is the shack's yaw — the way the counter looks — so the queue is
+ * laid out along `(sin, cos)` of it and everybody turns round to look back at
+ * the hatch.
  */
 export function queueAnchors(
   out: CrowdAnchor[],
   x: number,
-  y: number,
   z: number,
   facing: number,
   n: number,
   height: (x: number, z: number) => number,
   jitter: (a: number, b: number) => number,
 ): void {
-  // `facing` is the way the counter looks; the queue stands in front of it
   const fx = Math.sin(facing);
   const fz = Math.cos(facing);
   for (let i = 0; i < n; i++) {
@@ -445,15 +459,14 @@ export function queueAnchors(
       x: px,
       y: height(px, pz),
       z: pz,
-      // face back down the queue's own axis, toward the hatch
-      yaw: facing + Math.PI,
+      // look back down the queue at the hatch: direction −front
+      yaw: faceYaw(-fx, -fz),
       kind: 'counter',
     });
   }
-  void y;
 }
 
-/** People standing round a barrel table or a cooler, turned inward. */
+/** People standing round a barrel table or a speaker, turned inward. */
 export function ringAnchors(
   out: CrowdAnchor[],
   x: number,
@@ -474,7 +487,7 @@ export function ringAnchors(
       y: height(px, pz),
       z: pz,
       // turned inward, toward whatever they are gathered round
-      yaw: Math.atan2(-Math.cos(a), -Math.sin(a)) + Math.PI * 0.5,
+      yaw: faceYaw(-Math.cos(a), -Math.sin(a)),
       kind,
     });
   }

@@ -5,3 +5,4 @@ dist-standalone/
 .captures-*/
 *.local
 .DS_Store
+.vercel
