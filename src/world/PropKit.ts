@@ -901,6 +901,24 @@ export class DressKit {
  * ========================================================================== */
 
 /**
+ * The vertex span one cluster occupies in a finished merged geometry, plus the
+ * cull multiplier it was authored with.
+ *
+ * `ClusterBuilder` hands these out so a *single* merged prop can be switched
+ * off at runtime — see {@link setClusterVisible}. That is what lets a market
+ * stall vanish when the Jeep drives through it even though twenty-odd stalls
+ * share one draw call.
+ */
+export interface ClusterRange {
+  /** first vertex of the cluster, inclusive */
+  start: number;
+  /** one past the last vertex */
+  end: number;
+  /** the cull multiplier the cluster was opened with */
+  mul: number;
+}
+
+/**
  * A `GeoBuilder` that remembers which vertices belong to which prop, so the
  * finished merged mesh can still be culled prop-by-prop in the vertex shader.
  *
@@ -908,6 +926,12 @@ export class DressKit {
  */
 export class ClusterBuilder {
   readonly g: GeoBuilder;
+  /**
+   * One entry per `open`/`close` pair, in build order. Callers that want to be
+   * able to hide an individual merged prop later keep the entry `close()`
+   * returns rather than walking this list.
+   */
+  readonly ranges: ClusterRange[] = [];
   private anchors: number[] = [];
   private start = 0;
   private ax = 0;
@@ -931,11 +955,15 @@ export class ClusterBuilder {
     return this;
   }
 
-  close(): void {
-    if (!this.open_) return;
+  /** Closes the open cluster and returns its vertex span, or null if none. */
+  close(): ClusterRange | null {
+    if (!this.open_) return null;
     const end = this.g.vertexCount;
     for (let i = this.start; i < end; i++) this.anchors.push(this.ax, this.ay, this.az, this.mul);
     this.open_ = false;
+    const range: ClusterRange = { start: this.start, end, mul: this.mul };
+    this.ranges.push(range);
+    return range;
   }
 
   get triangles(): number {
@@ -956,6 +984,29 @@ export class ClusterBuilder {
     geo.setAttribute('aAnchor', new THREE.BufferAttribute(data, 4));
     return geo;
   }
+}
+
+/**
+ * Switch one merged prop on or off in a finished cluster geometry.
+ *
+ * Setting a cluster's cull multiplier to zero makes `uDressCull.x * mul` zero,
+ * so the shared vertex shader collapses every one of its vertices onto the
+ * cluster anchor: the prop degenerates to a point and rasterises nothing, at
+ * no draw-call cost and with no hole punched in the shared index buffer.
+ * Passing `true` restores the multiplier the cluster was authored with.
+ */
+export function setClusterVisible(
+  geo: THREE.BufferGeometry,
+  range: ClusterRange,
+  visible: boolean,
+): void {
+  const attr = geo.getAttribute('aAnchor') as THREE.BufferAttribute | undefined;
+  if (!attr) return;
+  const arr = attr.array as Float32Array;
+  const mul = visible ? range.mul : 0;
+  const end = Math.min(range.end, arr.length >> 2);
+  for (let i = range.start; i < end; i++) arr[i * 4 + 3] = mul;
+  attr.needsUpdate = true;
 }
 
 /* ========================================================================== *
@@ -1102,11 +1153,13 @@ export function mergeInstances(
   geo: THREE.BufferGeometry,
   list: readonly DressPlacement[],
   dispose = false,
+  outRanges?: ClusterRange[],
 ): void {
   for (const it of list) {
     cb.open(it.x, it.y, it.z, it.cull ?? 1);
     appendGeometry(cb, geo, it.x, it.y, it.z, it.yaw, it.scale ?? 1, it.scaleY ?? it.scale ?? 1);
-    cb.close();
+    const range = cb.close();
+    if (outRanges && range) outRanges.push(range);
   }
   if (dispose) geo.dispose();
 }

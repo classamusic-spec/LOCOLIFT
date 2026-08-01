@@ -48,6 +48,7 @@ import {
   buildPlasticTable,
   buildUmbrella,
 } from './ShackKit';
+import { destructibles } from './Destructibles';
 import {
   ClusterBuilder,
   DRESS,
@@ -75,7 +76,8 @@ import {
   triCount,
   wireRibbon,
 } from './PropKit';
-import type { DressPlacement, DressSign, FrontEdge, WetnessSource } from './PropKit';
+import type { ClusterRange, DressPlacement, DressSign, FrontEdge, WetnessSource } from './PropKit';
+import type { PropSpecId } from './Destructibles';
 import type { CityLayout, DistrictZone, Lot, OpenArea, WorldLayer, WorldOpts } from './WorldTypes';
 
 /* ------------------------------------------------------------------ tuning */
