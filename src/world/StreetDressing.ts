@@ -189,6 +189,8 @@ export class StreetDressing implements WorldLayer {
   private stalls: DressPlacement[] = [];
   private crates: DressPlacement[] = [];
   private bulbs: DressPlacement[] = [];
+  /** one per stall, in `stalls` order: the span its painted banner occupies */
+  private stallBanners: ClusterRange[] = [];
 
   private wires = new ClusterBuilder();
   private cloth = new ClusterBuilder(true);
@@ -517,7 +519,7 @@ export class StreetDressing implements WorldLayer {
           const key = rng.pick(STALL_SIGNS);
           this.signs.open(x, y + 2.4, z, 1.6);
           stallBanner(this.signs, x, y, z, yaw, key);
-          this.signs.close();
+          this.stallBanners.push(this.signs.close() ?? { start: 0, end: 0, mul: 1.6 });
 
           // crates at the stall's feet
           const n = rng.int(1, 3);
@@ -546,11 +548,13 @@ export class StreetDressing implements WorldLayer {
 
     // the painted board faces are four triangles each — merging them into the
     // stall banners keeps the sign atlas to a single draw call
+    const boardFaceRanges: ClusterRange[] = [];
     for (const b of this.boards) {
       const faces = buildAboardFaces(rng.pick(BOARD_SIGNS));
       this.signs.open(b.x, b.y, b.z, 1);
       appendGeometry(this.signs, faces, b.x, b.y, b.z, b.yaw);
-      this.signs.close();
+      const r = this.signs.close();
+      boardFaceRanges.push(r ?? { start: 0, end: 0, mul: 1 });
       faces.dispose();
     }
 
@@ -558,40 +562,50 @@ export class StreetDressing implements WorldLayer {
     // colour, so they merge into the shared cloth mesh instead of sharing one
     // instanced geometry — a draw call cheaper and far less repetitive. This
     // has to happen before the cloth builder is closed out below.
+    const stallClothRanges: ClusterRange[] = [];
     for (let i = 0; i < this.stalls.length; i++) {
       const st = this.stalls[i];
       const geo = buildStall(rng.fork(0x26 + i), st.tint);
       this.cloth.open(st.x, st.y + 1.4, st.z, 1.5);
       appendGeometry(this.cloth, geo, st.x, st.y, st.z, st.yaw, st.scale ?? 1, st.scale ?? 1);
-      this.cloth.close();
+      const r = this.cloth.close();
+      stallClothRanges.push(r ?? { start: 0, end: 0, mul: 1.5 });
       geo.dispose();
     }
 
     this.addMerged(this.wires.build('aDress'), kit.solid, 'street/wires', false);
-    this.addMerged(this.cloth.build('aWave'), kit.cloth, 'street/cloth', false);
-    this.addMerged(this.signs.build('aDress'), kit.sign, 'street/signs', false);
+    const clothGeo = this.cloth.build('aWave');
+    this.addMerged(clothGeo, kit.cloth, 'street/cloth', false);
+    const signGeo = this.signs.build('aDress');
+    this.addMerged(signGeo, kit.sign, 'street/signs', false);
 
-    this.addInstanced(buildDoorwayPot(rng.fork(0x21), false), kit.foliage, this.pots, 'street/pot');
-    this.addInstanced(buildPottedPalm(rng.fork(0x22)), kit.foliage, this.palms, 'street/palm');
-    this.addInstanced(
+    const pots = this.addInstanced(buildDoorwayPot(rng.fork(0x21), false), kit.foliage, this.pots, 'street/pot');
+    const palms = this.addInstanced(buildPottedPalm(rng.fork(0x22)), kit.foliage, this.palms, 'street/palm');
+    const blooms = this.addInstanced(
       buildBloomBush(rng.fork(0x23), rng.pick(DRESS.bloom)),
       kit.foliage,
       this.blooms,
       'street/bloom',
     );
-    this.addInstanced(buildPlanterBox(rng.fork(0x24)), kit.solid, this.planters, 'street/planter');
+    const planters = this.addInstanced(buildPlanterBox(rng.fork(0x24)), kit.solid, this.planters, 'street/planter');
     this.addInstanced(
       buildHangingPlanter(rng.fork(0x25), rng.pick(DRESS.bloom)),
       kit.foliage,
       this.hanging,
       'street/hanging',
     );
-    this.addInstanced(buildPlasticTable(), kit.solid, this.tables, 'street/table');
-    this.addInstanced(buildPlasticChair(), kit.solid, this.chairs, 'street/chair');
-    this.addInstanced(buildUmbrella(1.5, 2.35), kit.cloth, this.umbrellas, 'street/umbrella');
-    this.addInstanced(buildAboardFrame(), kit.solid, this.boards, 'street/board');
-    this.addInstanced(buildProduceCrate(rng.fork(0x27)), kit.solid, this.crates, 'street/crate');
+    const tables = this.addInstanced(buildPlasticTable(), kit.solid, this.tables, 'street/table');
+    const chairs = this.addInstanced(buildPlasticChair(), kit.solid, this.chairs, 'street/chair');
+    const umbrellas = this.addInstanced(buildUmbrella(1.5, 2.35), kit.cloth, this.umbrellas, 'street/umbrella');
+    const boards = this.addInstanced(buildAboardFrame(), kit.solid, this.boards, 'street/board');
+    const crates = this.addInstanced(buildProduceCrate(rng.fork(0x27)), kit.solid, this.crates, 'street/crate');
     this.addInstanced(buildBulb(), kit.glow, this.bulbs, 'street/bulb');
+
+    /* --- hand the smashable half of the street to the destructible pool --- */
+    this.registerDestructibles({
+      pots, palms, blooms, planters, tables, chairs, umbrellas, boards, crates,
+      clothGeo, signGeo, stallClothRanges, boardFaceRanges,
+    });
 
     this.pots = [];
     this.palms = [];
@@ -605,6 +619,7 @@ export class StreetDressing implements WorldLayer {
     this.stalls = [];
     this.crates = [];
     this.bulbs = [];
+    this.stallBanners = [];
   }
 
   private addMerged(
@@ -634,17 +649,94 @@ export class StreetDressing implements WorldLayer {
     mat: THREE.Material,
     list: DressPlacement[],
     name: string,
-  ): void {
+  ): THREE.InstancedMesh | null {
     const mesh = dressInstanced(geo, mat, list, name);
     if (!mesh) {
       geo.dispose();
-      return;
+      return null;
     }
     this.group.add(mesh);
     this.meshes.push(mesh);
     this.geometries.push(mesh.geometry);
     this._stats.instances += mesh.count;
     this._stats.triangles += triCount(mesh.geometry) * mesh.count;
+    return mesh;
+  }
+
+  /* ------------------------------------------------------- destructibility */
+
+  /**
+   * Everything on this street that ought to go flying when the Jeep mounts the
+   * pavement. The pool is proximity-driven, so registering two thousand props
+   * costs two thousand records and no rigid bodies — see `Destructibles`.
+   *
+   * The market stall is the odd one out: twenty-odd of them share one merged
+   * cloth mesh so each can carry its own awning colour, which means it cannot
+   * be tumbled instance-by-instance. It registers its cloth span and its
+   * painted banner span instead and collapses in place, which for a canvas
+   * stall reads better than a rigid box cartwheeling down the aisle anyway.
+   */
+  private registerDestructibles(m: {
+    pots: THREE.InstancedMesh | null;
+    palms: THREE.InstancedMesh | null;
+    blooms: THREE.InstancedMesh | null;
+    planters: THREE.InstancedMesh | null;
+    tables: THREE.InstancedMesh | null;
+    chairs: THREE.InstancedMesh | null;
+    umbrellas: THREE.InstancedMesh | null;
+    boards: THREE.InstancedMesh | null;
+    crates: THREE.InstancedMesh | null;
+    clothGeo: THREE.BufferGeometry | null;
+    signGeo: THREE.BufferGeometry | null;
+    stallClothRanges: ClusterRange[];
+    boardFaceRanges: ClusterRange[];
+  }): void {
+    const reg = (
+      mesh: THREE.InstancedMesh | null,
+      id: PropSpecId,
+      list: DressPlacement[],
+      clusters?: ReadonlyArray<Array<{ geo: THREE.BufferGeometry; range: ClusterRange }> | null>,
+    ): void => destructibles.registerInstanced(this, mesh, id, list, clusters);
+
+    reg(m.pots, 'pot', this.pots);
+    reg(m.palms, 'palm', this.palms);
+    reg(m.blooms, 'bush', this.blooms);
+    reg(m.planters, 'planter', this.planters);
+    reg(m.tables, 'table', this.tables);
+    reg(m.chairs, 'chair', this.chairs);
+    reg(m.umbrellas, 'umbrella', this.umbrellas);
+    reg(m.crates, 'crate', this.crates);
+
+    if (m.boards && m.signGeo) {
+      const sign = m.signGeo;
+      reg(
+        m.boards,
+        'board',
+        this.boards,
+        m.boardFaceRanges.map((range) => [{ geo: sign, range }]),
+      );
+    } else {
+      reg(m.boards, 'board', this.boards);
+    }
+
+    if (m.clothGeo) {
+      const cloth = m.clothGeo;
+      const sign = m.signGeo;
+      for (let i = 0; i < this.stalls.length; i++) {
+        const st = this.stalls[i];
+        const parts: Array<{ geo: THREE.BufferGeometry; range: ClusterRange }> = [];
+        const clothRange = m.stallClothRanges[i];
+        if (clothRange) parts.push({ geo: cloth, range: clothRange });
+        const banner = this.stallBanners[i];
+        if (sign && banner) parts.push({ geo: sign, range: banner });
+        destructibles.registerCluster(
+          this,
+          'stall',
+          { x: st.x, y: st.y, z: st.z, yaw: st.yaw, scale: st.scale ?? 1 },
+          parts,
+        );
+      }
+    }
   }
 
   /* -------------------------------------------------------------- runtime */
@@ -684,6 +776,7 @@ export class StreetDressing implements WorldLayer {
   }
 
   dispose(): void {
+    destructibles.unregisterOwner(this);
     for (const g of this.geometries) g.dispose();
     this.geometries.length = 0;
     for (const m of this.meshes) {

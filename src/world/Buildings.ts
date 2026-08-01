@@ -27,6 +27,7 @@ import {
   type BuildingPlan,
 } from './Facades';
 import { getFacadeAtlas, type FacadeAtlas } from './FacadeTextures';
+import { sharedWetness } from './Materials';
 import { Roofs, type RoofStats } from './Roofs';
 import type { TextureFactory } from './TextureFactory';
 import type { CityLayout, Lot, WorldLayer, WorldOpts } from './WorldTypes';
@@ -60,6 +61,44 @@ export interface BuildingStats {
  * can read, and the swap happens behind intervening façades.
  */
 const SHELL_LOD_DISTANCE = 130;
+
+/**
+ * The district finish block — see {@link Buildings.injectGlow}.
+ *
+ * `vColor` is `vec3` here and `vec4` under `USE_COLOR_ALPHA`; `.rgb` is a legal
+ * swizzle on both, so the block does not care which the geometry supplied.
+ */
+const FACADE_FINISH_GLSL = /* glsl */ `
+#include <lights_physical_fragment>
+{
+	// §5.1 up mask: a wall sheds, a cornice or an azotea deck holds water
+	vec3 locoUpV = normalize( ( viewMatrix * vec4( 0.0, 1.0, 0.0, 0.0 ) ).xyz );
+	float locoUp = clamp( dot( nonPerturbedNormal, locoUpV ) * 1.6 - 0.2, 0.0, 1.0 );
+	float locoWet = clamp( uWetness, 0.0, 1.0 ) * mix( 0.30, 1.0, locoUp );
+
+	// grime, damp and the §3.2 splash band are all darker *and* rougher
+	float locoLum = clamp( dot( vColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) ), 0.0, 1.0 );
+	material.roughness = clamp( material.roughness * ( 1.12 - 0.24 * locoLum ), 0.05, 1.0 );
+
+	#ifdef USE_CLEARCOAT
+		// atlas roughness *is* the material mask: paint, varnish, glaze and
+		// glazed tile all live below 0.5, every masonry tile above 0.72
+		float locoLacquer = 1.0 - smoothstep( 0.40, 0.72, material.roughness );
+		material.clearcoat = clamp( locoLacquer * 0.5 + locoWet * 0.45, 0.0, 1.0 );
+		material.clearcoatRoughness = max( 0.0525, mix( 0.20, 0.09, locoWet ) );
+		clearcoatNormal = normalize( mix( normal, nonPerturbedNormal, locoWet * 0.7 ) );
+	#endif
+
+	// §5.1, verbatim: how far wet darkens is porosity, not taste. Lime render
+	// drinks water and goes almost black; enamelled iron and a waxy leaf barely
+	// change value at all, they just get glossier.
+	float locoDarken = mix( 1.0, mix( 1.0, 0.35, uPorosity ), locoWet );
+	material.diffuseColor *= locoDarken;
+	material.diffuseContribution *= locoDarken;
+	material.roughness = max( 0.06,
+		mix( material.roughness, material.roughness * 0.22, locoWet * ( 0.35 + 0.65 * uPorosity ) ) );
+}
+`;
 
 /** Hours over which lit windows fade in and out. */
 const DUSK_START = 17.6;
@@ -313,19 +352,45 @@ export class Buildings implements WorldLayer {
       t.anisotropy = aniso;
     }
 
-    this.shellMat = new THREE.MeshStandardMaterial({
-      name: 'buildings/shell',
-      map: this.atlas.map,
-      normalMap: this.atlas.normalMap,
-      roughnessMap: this.atlas.roughnessMap,
-      vertexColors: true,
-      roughness: 1,
-      metalness: 0,
-    });
+    /**
+     * The single most valuable material in the game: one atlas draws every
+     * façade in the district, so it is also the only place a clearcoat lobe
+     * buys glass, azulejo, varnished doors and painted persianas all at once
+     * (§5 asks for a coat on all four) for the price of one program.
+     *
+     * The mask is free. Every lacquered or glazed tile in the atlas sits below
+     * 0.5 roughness and every masonry tile sits above 0.72, so the coat can be
+     * keyed off the roughness the shader has already sampled — no extra map, no
+     * extra texture fetch, no extra draw call.
+     */
+    const coat = this.quality !== 'low';
+    this.shellMat = coat
+      ? new THREE.MeshPhysicalMaterial({
+          name: 'buildings/shell',
+          map: this.atlas.map,
+          normalMap: this.atlas.normalMap,
+          roughnessMap: this.atlas.roughnessMap,
+          vertexColors: true,
+          roughness: 1,
+          metalness: 0,
+          envMapIntensity: 0.9,
+          clearcoat: 0.5,
+          clearcoatRoughness: 0.2,
+        })
+      : new THREE.MeshStandardMaterial({
+          name: 'buildings/shell',
+          map: this.atlas.map,
+          normalMap: this.atlas.normalMap,
+          roughnessMap: this.atlas.roughnessMap,
+          vertexColors: true,
+          roughness: 1,
+          metalness: 0,
+          envMapIntensity: 0.9,
+        });
     // §5 — painted lime stucco wants nScale 0.35, not the implicit 1.0 that
     // §8.22 calls out as the reason procedural stucco reads as plastic.
     this.shellMat.normalScale.set(0.42, 0.42);
-    this.injectGlow(this.shellMat);
+    this.injectGlow(this.shellMat, 'shell', 0.9);
 
     const tf = this.textures;
     /**
@@ -336,29 +401,38 @@ export class Buildings implements WorldLayer {
      * blending also keeps the rails in the depth pre-pass and in the shadow
      * map, so a railing throws a railing's shadow.
      */
-    this.ironMat = new THREE.MeshStandardMaterial({
+    const ironParams = {
       name: 'buildings/iron',
       map: ironTexture(tf),
       vertexColors: true,
       roughness: 0.45,
       metalness: 0.35,
+      // painted iron is a metal under a coat of enamel: without a real
+      // environment response a balcony is a black silhouette at every hour
+      envMapIntensity: 1.0,
       alphaTest: 0.42,
       transparent: false,
       side: THREE.DoubleSide,
-    });
-    this.injectGlow(this.ironMat);
+    };
+    this.ironMat = coat
+      ? new THREE.MeshPhysicalMaterial({ ...ironParams, clearcoat: 0.4, clearcoatRoughness: 0.22 })
+      : new THREE.MeshStandardMaterial(ironParams);
+    this.injectGlow(this.ironMat, 'iron', 0.1);
 
+    // §5 foliage: 0.62. Balcony leaves are waxy, not chalk — they were the one
+    // thing on the façade already reading as matte plastic.
     this.foliageMat = new THREE.MeshStandardMaterial({
       name: 'buildings/foliage',
       map: foliageTexture(tf),
       vertexColors: true,
-      roughness: 0.85,
+      roughness: 0.66,
       metalness: 0,
+      envMapIntensity: 0.7,
       transparent: true,
       alphaTest: 0.42,
       side: THREE.DoubleSide,
     });
-    this.injectGlow(this.foliageMat);
+    this.injectGlow(this.foliageMat, 'foliage', 0.25);
   }
 
   /**
@@ -374,10 +448,32 @@ export class Buildings implements WorldLayer {
    * Here `warmth` picks between a 2700 K bulb and a cool fluorescent, and
    * `phase` gives each building its own brightness so the district does not
    * switch on as one flat sheet (§8.45).
+   *
+   * The same patch carries the district's **finish** pass, because it is the
+   * only shader hook these materials have. Two things happen at
+   * `<lights_physical_fragment>`, where the shading normal, the sampled
+   * roughness and the whole `PhysicalMaterial` struct are simultaneously in
+   * scope:
+   *
+   *  - **Spatial roughness.** `vColor` already carries every bit of §3.2
+   *    weathering — the splash band, the drip streaks under sills, the
+   *    per-building grime — and all of it is *rougher* than clean paint. Keying
+   *    roughness off it makes the variation follow the dirt instead of being a
+   *    second, unrelated wash of noise. Free: `vColor` is already a varying.
+   *  - **Rain.** Buildings hold no `MaterialLibrary` reference, so they were the
+   *    one district-scale surface rain never reached: the street went black and
+   *    glossy while the walls above it stayed bone dry. Binding the shared
+   *    wetness uniform fixes that, with the §5.1 up-facing mask so a vertical
+   *    render only sheds and darkens (§5: albedo × 0.80) while cornices, sills,
+   *    balcony slabs and azotea decks wet properly.
    */
-  private injectGlow(mat: THREE.MeshStandardMaterial): void {
+  private injectGlow(mat: THREE.MeshStandardMaterial, tag: string, porosity: number): void {
+    const coated = mat instanceof THREE.MeshPhysicalMaterial && mat.clearcoat > 0;
+    const porosityUniform = { value: clamp01(porosity) };
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uNight = this.nightUniform;
+      shader.uniforms.uWetness = sharedWetness;
+      shader.uniforms.uPorosity = porosityUniform;
       shader.vertexShader = shader.vertexShader
         .replace(
           '#include <common>',
@@ -385,11 +481,14 @@ export class Buildings implements WorldLayer {
         )
         .replace('#include <begin_vertex>', '#include <begin_vertex>\n\tvGlow = aGlow;');
       shader.fragmentShader = shader.fragmentShader
+        .replace('#include <lights_physical_fragment>', FACADE_FINISH_GLSL)
         .replace(
           '#include <common>',
           [
             '#include <common>',
             'uniform float uNight;',
+            'uniform float uWetness;',
+            'uniform float uPorosity;',
             'varying vec3 vGlow;',
             'const vec3 LAMP_WARM = vec3(1.0, 0.66, 0.33);',
             'const vec3 LAMP_COOL = vec3(0.78, 0.87, 1.0);',
@@ -405,7 +504,10 @@ export class Buildings implements WorldLayer {
           ].join('\n\t'),
         );
     };
-    mat.customProgramCacheKey = () => 'loco-glow';
+    // per-material, not a shared constant: the three façade programs differ only
+    // in their injections, so one key for all of them would let three link
+    // against whichever compiled first
+    mat.customProgramCacheKey = () => `loco-glow|${tag}|${coated ? 'cc' : 'std'}`;
   }
 
   update(cameraPos: THREE.Vector3, _dt: number, timeOfDay: number): void {

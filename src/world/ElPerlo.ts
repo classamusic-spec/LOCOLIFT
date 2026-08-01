@@ -1082,7 +1082,13 @@ export class ElPerlo implements WorldLayer {
     const aniso = QUALITY_BUDGET[this.quality].anisotropy;
     for (const t of [maps.map, maps.normalMap, maps.roughnessMap]) t.anisotropy = aniso;
 
-    this.shellMat = new THREE.MeshStandardMaterial({
+    /**
+     * The shell is where the zinc lives, and a corrugated zinc roof in rain is
+     * the single most recognisable thing about this place. A wet-only clearcoat
+     * (nothing at all when dry — the shell's atlas is deliberately chalky) buys
+     * that for one program and no extra texture.
+     */
+    const shellParams = {
       name: 'elPerlo/shell',
       map: maps.map,
       normalMap: maps.normalMap,
@@ -1090,8 +1096,12 @@ export class ElPerlo implements WorldLayer {
       vertexColors: true,
       roughness: 1,
       metalness: 0,
-      envMapIntensity: 0.8,
-    });
+      envMapIntensity: 0.85,
+    };
+    const coat = this.quality !== 'low';
+    this.shellMat = coat
+      ? new THREE.MeshPhysicalMaterial({ ...shellParams, clearcoat: 0.02, clearcoatRoughness: 0.12 })
+      : new THREE.MeshStandardMaterial(shellParams);
     // §5 / §8.22 — painted render is not plastic; keep the normal quiet
     this.shellMat.normalScale.set(0.5, 0.5);
     this.patch(this.shellMat, 'shell', 0.8);
@@ -1166,6 +1176,21 @@ export class ElPerlo implements WorldLayer {
           '#include <roughnessmap_fragment>\n\troughnessFactor = mix( roughnessFactor, roughnessFactor * 0.14 + 0.03, uWetness * uWetAmount );',
         )
         .replace(
+          '#include <lights_physical_fragment>',
+          [
+            '#include <lights_physical_fragment>',
+            '#ifdef USE_CLEARCOAT',
+            // horizontal zinc holds a film of water; a vertical board sheds it
+            'vec3 epUpV = normalize( ( viewMatrix * vec4( 0.0, 1.0, 0.0, 0.0 ) ).xyz );',
+            'float epUp = clamp( dot( nonPerturbedNormal, epUpV ) * 1.6 - 0.2, 0.0, 1.0 );',
+            'float epWet = clamp( uWetness * uWetAmount, 0.0, 1.0 ) * mix( 0.25, 1.0, epUp );',
+            'material.clearcoat = clamp( epWet * 0.85, 0.0, 1.0 );',
+            'material.clearcoatRoughness = max( 0.0525, mix( 0.25, 0.08, epWet ) );',
+            'clearcoatNormal = normalize( mix( normal, nonPerturbedNormal, epWet ) );',
+            '#endif',
+          ].join('\n\t'),
+        )
+        .replace(
           '#include <dithering_fragment>',
           [
             'vec3 epLamp = mix(EP_WARM, EP_COOL, clamp(vEPGlow.y, 0.0, 1.0));',
@@ -1175,7 +1200,8 @@ export class ElPerlo implements WorldLayer {
           ].join('\n\t'),
         );
     };
-    mat.customProgramCacheKey = () => `loco/elperlo/${key}`;
+    const coated = mat instanceof THREE.MeshPhysicalMaterial && mat.clearcoat > 0;
+    mat.customProgramCacheKey = () => `loco/elperlo/${key}${coated ? '/cc' : ''}`;
   }
 
   /* --------------------------------------------------------------- frame */

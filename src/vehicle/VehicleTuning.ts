@@ -352,6 +352,59 @@ export const TYRE = {
   slipSpeedGain: 14,
 } as const;
 
+/* ------------------------------------------------------------------ terrain */
+
+/**
+ * How this vehicle answers to what is under its tyres, and to the kerb.
+ *
+ * The world already publishes a surface classification — `Coast.surfaceAt`
+ * rasterises sand / grass / asphalt / cobble over the whole district, and
+ * Piñones tags each of its collision meshes with a typed `grip` — but until now
+ * nothing read it, so the beach drove exactly like the *adoquín*. These are the
+ * knobs that turn that data into feel.
+ */
+export interface TerrainTuning {
+  /**
+   * 0 = ignore the surface entirely, 1 = take `SURFACE_GRIP` at face value.
+   * A light off-roader is transformed by sand; a 12-tonne bus mostly bulldozes
+   * through it, and a horse does not care what the road is made of at all.
+   */
+  readonly surfaceSensitivity: number;
+  /**
+   * Extra rolling drag per wheel on a loose surface, N at `SURFACE_GRIP.drag`
+   * = 1. Sand costs the Jeep about 1.3 kN a corner, which is what caps beach
+   * speed below road speed without making the beach feel like treacle.
+   */
+  readonly surfaceDragForce: number;
+
+  /**
+   * Kerb assist. Riding up a 0.14 m kerb is a step change in ray length, which
+   * the springs answer honestly but *politely*: the car climbs the pavement and
+   * carries on. Arcade wants a bang. When a wheel's ray shortens by more than
+   * `kerbStep` inside one physics step and the vehicle is moving faster than
+   * `kerbMinSpeed`, this much extra upward impulse is added at that corner,
+   * scaled by speed. Set `kerbKick` to 0 to disable.
+   */
+  readonly kerbStep: number;
+  readonly kerbMinSpeed: number;
+  /** N·s per m/s of forward speed, per wheel */
+  readonly kerbKick: number;
+  /** ceiling on one kerb event's impulse, N·s */
+  readonly kerbKickMax: number;
+  /** seconds between kerb kicks on the same corner — stops stair-step buzzing */
+  readonly kerbCooldown: number;
+}
+
+export const TERRAIN: TerrainTuning = {
+  surfaceSensitivity: 1,
+  surfaceDragForce: 6000,
+  kerbStep: 0.055,
+  kerbMinSpeed: 7,
+  kerbKick: 62,
+  kerbKickMax: 1800,
+  kerbCooldown: 0.28,
+};
+
 /* -------------------------------------------------------------------- drift */
 
 export const DRIFT = {
@@ -785,6 +838,8 @@ export interface VehicleTuningSet {
   readonly brake: BrakeTuning;
   readonly steer: SteerTuning;
   readonly tyre: TyreTuning;
+  /** surface response and the kerb assist */
+  readonly terrain: TerrainTuning;
   readonly drift: DriftTuning;
   readonly boost: BoostTuning;
   readonly air: AirTuning;
@@ -809,6 +864,7 @@ export const JEEP_TUNING: VehicleTuningSet = {
   brake: BRAKE,
   steer: STEER,
   tyre: TYRE,
+  terrain: TERRAIN,
   drift: DRIFT,
   boost: BOOST,
   air: AIR,

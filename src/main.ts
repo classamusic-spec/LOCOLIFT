@@ -33,6 +33,7 @@ import { MissionSystem } from './passengers/MissionSystem';
 import { ComboSystem } from './scoring/ComboSystem';
 import { ScoreSystem } from './scoring/ScoreSystem';
 import { GameDirector } from './states/GameDirector';
+import { RenderPipeline } from './fx/RenderPipeline'; // LOCOFX-TEMP-WIRING
 
 /**
  * Steps the solver. Registered last so every system has already applied its
@@ -226,6 +227,19 @@ async function boot(): Promise<void> {
   engine.setPreFrameHook((dt) => {
     input.poll(dt, settingsStore.current, vehicle.isAirborne);
   });
+
+  // LOCOFX-TEMP-WIRING-BEGIN
+  const pipeline = new RenderPipeline(
+    engine.renderer,
+    engine.scene,
+    engine.camera,
+    settingsStore.current,
+    engine.bus,
+  );
+  pipeline.setSpeedSource(() => camera);
+  engine.add(pipeline);
+  engine.setRenderHook((dt) => pipeline.render(dt));
+  // LOCOFX-TEMP-WIRING-END
 
   await engine.initSystems();
   t = stage('initSystems', t);

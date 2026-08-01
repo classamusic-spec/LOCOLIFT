@@ -318,7 +318,12 @@ function genCobblestone(size: number): Field {
       col = mixRGB(col, [176, 186, 198], polish);
 
       setRGB(f, i, col[0], col[1], col[2]);
-      f.rough[i] = clamp01(lerp(0.97, lerp(0.72, 0.42, polish * 4), joint) - (grain - 0.5) * 0.08);
+      // §5 puts dry adoquín at 0.86. The number that matters more is the
+      // *spread*: slag blocks were cast in different batches and have been worn
+      // by different amounts, so each stone carries its own gloss level and the
+      // crowns glint individually instead of the street sharing one finish.
+      const stoneRough = lerp(0.74, 0.97, stoneRand2) - polish * 1.6;
+      f.rough[i] = clamp01(lerp(0.97, stoneRough, joint) - (grain - 0.5) * 0.08);
     }
   }
   return f;
@@ -358,7 +363,10 @@ function genFlagstone(size: number): Field {
       col = [col[0] + sp, col[1] + sp, col[2] + sp];
       col = mixRGB(hexRGB(0x6b6659), col, joint);
       setRGB(f, i, col[0], col[1], col[2]);
-      f.rough[i] = clamp01(lerp(0.95, 0.66, joint) + (grain - 0.5) * 0.1);
+      // §5 losa canaria 0.80, but per-slab: some are footworn smooth, some are
+      // freshly cut. h.rand2 is stable per slab, so the variation is per-stone
+      // rather than a wash of noise across the whole pavement.
+      f.rough[i] = clamp01(lerp(0.95, lerp(0.66, 0.90, h.rand2), joint) + (grain - 0.5) * 0.1);
     }
   }
   return f;
@@ -406,7 +414,8 @@ function genSand(size: number): Field {
       const col = mixRGB(hexRGB(0xe4d3ae), hexRGB(0xc9b391), dune * 0.8 + ripple * 0.2);
       const sp = (grain - 0.5) * 30;
       setRGB(f, i, col[0] + sp, col[1] + sp, col[2] + sp * 0.8);
-      f.rough[i] = clamp01(0.95 + (grain - 0.5) * 0.08);
+      // dune crests are wind-polished, troughs hold damp coarse grains
+      f.rough[i] = clamp01(0.88 + (dune - 0.5) * 0.16 + (grain - 0.5) * 0.08 - ripple * 0.05);
     }
   }
   return f;
@@ -428,7 +437,12 @@ function genGrass(size: number): Field {
       col = mixRGB(col, hexRGB(0x8a9a4a), clamp01((dry - 0.55) * 2.4));
       const sp = (blade - 0.5) * 40;
       setRGB(f, i, col[0] + sp * 0.6, col[1] + sp, col[2] + sp * 0.4);
-      f.rough[i] = 0.94;
+      // §5's 0.62 is for foliage *cards*; a lawn seen as a ground plane is a
+      // mass of scattering blades and belongs near 0.87 — at 0.62 the esplanade
+      // picked up a sheet-wide specular and visibly brightened. What matters
+      // here is the spread, not the mean: the clump field is what stops the
+      // glacis shading like one moulded surface.
+      f.rough[i] = clamp01(0.80 + (1 - clump) * 0.13 + clamp01((dry - 0.55) * 2.4) * 0.08 + (blade - 0.5) * 0.08);
     }
   }
   return f;
@@ -607,8 +621,11 @@ const SPECS: Record<SurfaceId, SurfaceSpec> = {
   cobblestone: { gen: genCobblestone, baseSize: 512, maxSize: 1024, tileMeters: 1.9, normalStrength: 1.15, relief: 3.4, wantNormal: true, wantRoughness: true },
   flagstone: { gen: genFlagstone, baseSize: 512, tileMeters: 4.2, normalStrength: 0.7, relief: 2.4, wantNormal: true, wantRoughness: true },
   kerbstone: { gen: genKerbstone, baseSize: 256, tileMeters: 2.6, normalStrength: 0.8, relief: 2.6, wantNormal: true, wantRoughness: true },
-  sand: { gen: genSand, baseSize: 256, tileMeters: 5.0, normalStrength: 0.55, relief: 1.6, wantNormal: true, wantRoughness: false },
-  grass: { gen: genGrass, baseSize: 256, tileMeters: 4.0, normalStrength: 0.6, relief: 1.4, wantNormal: true, wantRoughness: false },
+  // Both generators already fill a roughness channel; leaving it unbound was
+  // what pinned sand and grass at a flat `roughness = 1` — the single cheapest
+  // "plastic" tell in the whole scene (ART_REFERENCE §5, §8.22).
+  sand: { gen: genSand, baseSize: 256, tileMeters: 5.0, normalStrength: 0.55, relief: 1.6, wantNormal: true, wantRoughness: true },
+  grass: { gen: genGrass, baseSize: 256, tileMeters: 4.0, normalStrength: 0.6, relief: 1.4, wantNormal: true, wantRoughness: true },
   roofTile: { gen: genRoofTile, baseSize: 512, tileMeters: 2.2, normalStrength: 1.0, relief: 3.0, wantNormal: true, wantRoughness: true },
   sandstone: { gen: genSandstone, baseSize: 512, tileMeters: 4.5, normalStrength: 0.9, relief: 2.8, wantNormal: true, wantRoughness: true },
   stucco: { gen: genStucco, baseSize: 512, tileMeters: 3.2, normalStrength: 0.45, relief: 1.5, wantNormal: true, wantRoughness: true },

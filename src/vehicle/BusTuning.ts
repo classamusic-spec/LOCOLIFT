@@ -32,6 +32,7 @@
 import { PALETTE } from '../core/Config';
 import type {
   ModelFeel,
+  TerrainTuning,
   VehicleTuningSet,
   WheelPlacement,
 } from './VehicleTuning';
@@ -510,6 +511,24 @@ export const BUS_WHEEL_LAYOUT: readonly WheelPlacement[] = [
   { x: BUS_SUSPENSION.halfTrackRear, z: BUS_SUSPENSION.halfWheelbase, front: false, left: false },
 ];
 
+/* ----------------------------------------------------------------- terrain */
+
+/**
+ * Twelve tonnes on leaf springs. The bus notices sand, but it does not get
+ * shoved around by it the way the Jeep does, and a kerb barely registers under
+ * that much unsprung weight — it goes over the pavement like the pavement is
+ * not there, which is exactly the joke.
+ */
+export const BUS_TERRAIN: TerrainTuning = {
+  surfaceSensitivity: 0.55,
+  surfaceDragForce: 11000,
+  kerbStep: 0.06,
+  kerbMinSpeed: 8,
+  kerbKick: 130,
+  kerbKickMax: 5200,
+  kerbCooldown: 0.34,
+};
+
 /* ============================================================== the bundle */
 
 export const BUS_TUNING: VehicleTuningSet = {
@@ -521,6 +540,7 @@ export const BUS_TUNING: VehicleTuningSet = {
   brake: BUS_BRAKE,
   steer: BUS_STEER,
   tyre: BUS_TYRE,
+  terrain: BUS_TERRAIN,
   drift: BUS_DRIFT,
   boost: BUS_BOOST,
   air: BUS_AIR,

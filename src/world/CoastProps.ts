@@ -269,21 +269,33 @@ export class CoastProps implements WorldLayer {
     return m;
   }
 
-  /** Anything actually in the water, so it rides the swell. */
+  /**
+   * Anything actually in the water, so it rides the swell.
+   *
+   * Boat hulls are the one prop in the game that is *literally* clearcoated —
+   * a gel coat over pigmented glassfibre — and they sit on the brightest,
+   * highest-contrast surface in the frame, so the lobe reads from the
+   * promenade. They are also a handful of small meshes, so it is close to the
+   * cheapest place in the scene to spend a second specular lobe.
+   */
   private floatMaterial(): THREE.MeshStandardMaterial {
-    const m = new THREE.MeshStandardMaterial({
+    const params = {
       name: 'loco/coastFloating',
       vertexColors: true,
-      roughness: 0.72,
+      roughness: 0.4,
       metalness: 0.04,
-      envMapIntensity: 0.85,
-    });
+      envMapIntensity: 0.95,
+    };
+    const coat = this.quality !== 'low';
+    const m: THREE.MeshStandardMaterial = coat
+      ? new THREE.MeshPhysicalMaterial({ ...params, clearcoat: 0.75, clearcoatRoughness: 0.1 })
+      : new THREE.MeshStandardMaterial(params);
     m.onBeforeCompile = (shader) => {
       Object.assign(shader.uniforms, this.uniforms);
       patchTint(shader, `\n${FLOAT_PARS}`);
       shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', FLOAT_BEGIN);
     };
-    m.customProgramCacheKey = () => 'loco/coast-float-v1';
+    m.customProgramCacheKey = () => (coat ? 'loco/coast-float-v2cc' : 'loco/coast-float-v2');
     this.materials.push(m);
     return m;
   }

@@ -96,16 +96,18 @@ vec2 locoClouds( vec3 d, float detailFade ) {
   float edge = 1.0 - uCloudCover * 0.92;
 
   float base = locoFbm( p );
-  float detail = locoFbm( p * 3.4 + 19.7 ) * 0.30 * detailFade;
-  float dens = smoothstep( edge, edge + 0.26, base + detail );
+  float detail = locoFbm( p * 3.4 + 19.7 ) * 0.34 * detailFade;
+  // a tighter smoothstep than the usual 0.26 is what gives the cumulus a hard
+  // top and a definite edge instead of an airbrushed smudge
+  float dens = smoothstep( edge, edge + 0.17, base + detail );
 
   vec2 toSun = uSunDir.xz;
   float l = length( toSun );
   toSun = l > 1e-4 ? toSun / l : vec2( 1.0, 0.0 );
-  vec2 sp = p + toSun * 0.085;
+  vec2 sp = p + toSun * 0.105;
   float sBase = locoFbm( sp );
-  float sDetail = locoFbm( sp * 3.4 + 19.7 ) * 0.30 * detailFade;
-  float shadow = smoothstep( edge, edge + 0.26, sBase + sDetail );
+  float sDetail = locoFbm( sp * 3.4 + 19.7 ) * 0.34 * detailFade;
+  float shadow = smoothstep( edge, edge + 0.17, sBase + sDetail );
 
   return vec2( dens, shadow );
 }
@@ -146,11 +148,33 @@ vec3 locoSky( vec3 dir ) {
   vec3 d = normalize( dir );
   float up = d.y;
 
-  /* ---- gradient: zenith -> horizon, then the 6 degree band ---- */
-  float t = pow( clamp( up, 0.0, 1.0 ), 0.44 );
+  /* ---- gradient: zenith -> horizon, then the 6 degree band ----
+   *
+   * Three things separate a dramatic sky from a placeholder ramp, and all
+   * three are here:
+   *
+   * 1. a *deepened* zenith. The top 30° of a Caribbean sky is markedly darker
+   *    and more saturated than a straight lerp to the zenith colour makes it,
+   *    and that darkness is what gives cumulus tops something to stand against.
+   * 2. a horizon band that is **anchored to the sun's azimuth** rather than
+   *    ringing the whole dome. A sunset is a hot wedge over one bearing with
+   *    cooler air either side; a uniform orange ring reads as a gradient
+   *    someone typed in.
+   * 3. a hard, thin sea horizon. Without it the dome and the water dissolve
+   *    into each other and the frame loses its strongest horizontal.
+   */
+  float t = pow( clamp( up, 0.0, 1.0 ), 0.38 );
   vec3 col = mix( uHorizon, uZenith, t );
-  float bandMask = exp( -max( up, 0.0 ) * 13.0 );
-  col = mix( col, uBand, bandMask * 0.62 );
+  col = mix( col, uZenith * 0.72, pow( clamp( up, 0.0, 1.0 ), 2.1 ) * 0.42 );
+
+  vec2 hAz = normalize( vec2( d.x, d.z ) + 1e-6 );
+  vec2 sAz = normalize( vec2( uSunDir.x, uSunDir.z ) + 1e-6 );
+  float towardSun = max( dot( hAz, sAz ), 0.0 );
+  float lowSunAmt = 1.0 - clamp( uSunDir.y * 2.2, 0.0, 1.0 );
+
+  float bandMask = exp( -max( up, 0.0 ) * 15.0 );
+  float bandAz = mix( 0.42, 1.0, pow( towardSun, 2.2 ) );
+  col = mix( col, uBand, bandMask * 0.74 * mix( 1.0, bandAz, lowSunAmt ) );
 
   /* ---- night sky content, before clouds so clouds occlude it ---- */
   col += locoStars( d );
@@ -173,8 +197,11 @@ vec3 locoSky( vec3 dir ) {
   float ca = dot( d, uSunDir );
   float above = smoothstep( -0.09, 0.03, uSunDir.y );
   float lowSun = 1.0 - clamp( uSunDir.y * 2.6, 0.0, 1.0 );
-  col += uSunColor * pow( max( ca, 0.0 ), 5.0 ) * 0.13 * uHaze * ( 1.0 + 2.2 * lowSun ) * above;
-  col += uSunColor * pow( max( ca, 0.0 ), 90.0 ) * 0.55 * uHaze * above;
+  col += uSunColor * pow( max( ca, 0.0 ), 5.0 ) * 0.16 * uHaze * ( 1.0 + 2.6 * lowSun ) * above;
+  col += uSunColor * pow( max( ca, 0.0 ), 90.0 ) * 0.70 * uHaze * above;
+  /* the wide, low-lying aureole that makes a tropical low sun feel *hot* and
+   * that the ocean's glitter path reads out of the environment capture */
+  col += uSunColor * pow( max( ca, 0.0 ), 1.6 ) * 0.06 * uHaze * lowSun * above;
 
   if ( uSunDisc > 0.02 ) {
     float ang = acos( clamp( ca, -1.0, 1.0 ) );
@@ -190,14 +217,23 @@ vec3 locoSky( vec3 dir ) {
   if ( hf > 0.001 ) {
     vec2 cl = locoClouds( d, hf );
     float dens = cl.x;
-    float litAmt = clamp( 1.0 - cl.y * 0.82, 0.0, 1.0 );
-    vec3 cc = mix( uCloudShade, uCloudLit, litAmt );
-    // silver lining on the sun side
-    cc += uSunColor * pow( max( ca, 0.0 ), 7.0 ) * litAmt * 0.30 * above;
+    float litAmt = clamp( 1.0 - cl.y * 0.95, 0.0, 1.0 );
+    /* §4.2 wants flat-based, hard-topped trade-wind cumulus. The shading ramp
+     * is deliberately non-linear: the bright top two thirds of a cumulus is
+     * nearly uniform and the base falls off a cliff, which is why a linear
+     * shade->lit lerp always reads as cotton wool. */
+    vec3 cc = mix( uCloudShade, uCloudLit, smoothstep( 0.10, 0.62, litAmt ) );
+    // silver lining on the sun side, and a hot rim when the sun is low
+    cc += uSunColor * pow( max( ca, 0.0 ), 7.0 ) * litAmt * 0.55 * above;
+    cc += uSunColor * pow( max( ca, 0.0 ), 22.0 ) * ( 1.0 - litAmt ) * 0.45 * lowSun * above;
     // clouds recede into the horizon haze
     cc = mix( uHorizon, cc, clamp( hf * 1.2, 0.0, 1.0 ) );
     col = mix( col, cc, dens * uCloudOpacity * hf );
   }
+
+  /* ---- the sea horizon: a thin, hard edge ---- */
+  float horizonLine = exp( -abs( up ) * 240.0 );
+  col = mix( col, col * 0.72, horizonLine * 0.5 );
 
   /* ---- below the horizon: sea haze, matched to the fog colour ---- */
   col = mix( uGroundCol, col, smoothstep( -0.17, 0.004, up ) );

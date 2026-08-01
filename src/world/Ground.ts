@@ -1023,6 +1023,7 @@ export class Ground implements WorldLayer {
           color: 0xa9b98d,
           map: maps.map,
           normalMap: maps.normalMap ?? undefined,
+          roughnessMap: maps.roughnessMap ?? undefined,
           roughness: 1,
           metalness: 0,
           vertexColors: true,
@@ -1032,6 +1033,9 @@ export class Ground implements WorldLayer {
         return m;
       },
       0.6,
+      // stays matte — no clearcoat — but the sheen has to drift across the
+      // slope or a 200 m lawn reads as one sheet of moulded plastic
+      { porosity: 0.6, macroRough: 0.24, macroValue: 0.08, tileMeters: this.materials.tileMeters('terrain') },
     );
   }
 

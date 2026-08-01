@@ -138,6 +138,13 @@ class Pedestrian {
   waitTimer = 0;
   panicTimer = 0;
   hopTimer = 0;
+  /**
+   * Seconds during which the dodge offset is exempt from the `maxDodge` clamp.
+   * Set when the hard clearance shoves someone out from under the car: without
+   * it the clamp would haul them straight back under the wheels on the next
+   * frame while the car is still parked on top of them.
+   */
+  dodgeHold = 0;
   stuckTimer = 0;
   animTimer = 0;
 
@@ -155,6 +162,7 @@ class Pedestrian {
     this.state = PSTATE.WALK;
     this.speed = 0;
     this.dodge.set(0, 0, 0);
+    this.dodgeHold = 0;
     this.idleTimer = 0;
     this.waitTimer = 0;
     this.panicTimer = 0;
@@ -248,6 +256,18 @@ export class PedestrianSystem implements System {
   private statHigh = 0;
   private statLow = 0;
   private statPanic = 0;
+  /** peds inside the player's swept footprint this frame — must reach zero */
+  private statOverlaps = 0;
+  /** closest anyone got to the player's centre this frame, metres */
+  private statMinPlayerDist = Infinity;
+  /** the player's position last frame, for the swept clearance test */
+  private readonly prevPlayer = new THREE.Vector3();
+  private hasPrevPlayer = false;
+  private shoutCooldown = 0;
+  /** worst overlap count seen since the last reset — must stay at zero */
+  private worstOverlap = 0;
+  private minEverPlayerDist = Infinity;
+  private safetyFrames = 0;
   private statCrossing = 0;
   private statDodged = 0;
 
@@ -575,6 +595,7 @@ export class PedestrianSystem implements System {
 
   init(_ctx: GameContext): void {
     this.warmUp(180);
+    this.installDebugHook();
   }
 
   /** Populate the pavements immediately. */
@@ -621,6 +642,7 @@ export class PedestrianSystem implements System {
     }
     this.separate(dt);
     this.enforceClearance();
+    this.scatterShout(ctx, dt);
     this.stream(ctx, dt);
     this.writeInstances(ctx, dt);
     this.syncBodies();
@@ -669,9 +691,14 @@ export class PedestrianSystem implements System {
     }
 
     /* --- dodge relaxation --- */
+    if (p.dodgeHold > 0) p.dodgeHold -= dt;
     const dodgeLen = Math.hypot(p.dodge.x, p.dodge.z);
-    if (dodgeLen > PED.maxDodge) {
-      const k = PED.maxDodge / dodgeLen;
+    // The clamp keeps people near their graph position — except right after
+    // the car has physically shoved them off it, when obeying it would put
+    // them straight back under the wheels.
+    const cap = p.dodgeHold > 0 ? PED.maxDodgeShoved : PED.maxDodge;
+    if (dodgeLen > cap) {
+      const k = cap / dodgeLen;
       p.dodge.x *= k;
       p.dodge.z *= k;
     }
@@ -700,8 +727,11 @@ export class PedestrianSystem implements System {
     if (p.panicTimer > 0) {
       p.clip = CLIP.PANIC;
       p.clipRate = CLIP_RATE[CLIP.PANIC];
-      // face away from the player
+      // face away from the player, and *run* — a group outside a café has to
+      // scatter as a group, not stand there waving while the Jeep comes through
       p.targetHeading = Math.atan2(-p.dodge.x, -p.dodge.z);
+      p.state = PSTATE.FLEE;
+      p.speed = Math.min(PED.panicSpeed, p.speed + PED.panicAccel * dt);
     } else {
       p.state = PSTATE.ANCHOR;
       p.clip = spot.clip;
@@ -721,7 +751,8 @@ export class PedestrianSystem implements System {
     else want = p.baseSpeed;
     p.targetSpeed = want;
 
-    const rate = PED.accel * dt;
+    // a frightened person does not ease up to a run
+    const rate = (p.panicTimer > 0 ? PED.panicAccel : PED.accel) * dt;
     if (p.speed < want) p.speed = Math.min(want, p.speed + rate);
     else p.speed = Math.max(want, p.speed - rate * 2);
 
@@ -908,31 +939,75 @@ export class PedestrianSystem implements System {
    * The hard guarantee. After everything else has moved, project anybody still
    * inside the Jeep's footprint straight back out of it. Nobody is ever run
    * over — they get shoved aside, arms up, and the comedy lands.
+   *
+   * The exclusion volume is **swept**, from where the player was last frame to
+   * where he is now, not a box around his current position. That distinction is
+   * the whole safety argument at 50 m/s: at 20 fps the Jeep covers 2.5 m
+   * between frames, more than the box is long, so a static test would let a
+   * pedestrian pass clean through the car between two samples and pop out
+   * behind it. Sweeping the box closes that hole at any frame rate.
+   *
+   * The projection is always sideways — out through the nearest flank — because
+   * pushing someone forwards would shove them *along* the car's path, and
+   * pushing them backwards would drag them under it.
    */
   private enforceClearance(): void {
     const player = this.player.position;
     const v = this.player.velocity;
     const speed = this.player.speed;
-    // orient the exclusion box along travel when moving, else keep it circular
-    let fx = 0;
-    let fz = 1;
-    if (speed > 0.6) {
+
+    if (!this.hasPrevPlayer) {
+      this.prevPlayer.copy(player);
+      this.hasPrevPlayer = true;
+    }
+
+    // Travel direction: prefer the actual step taken, fall back to velocity.
+    let fx = this.prevPlayer.x === player.x ? 0 : player.x - this.prevPlayer.x;
+    let fz = this.prevPlayer.z === player.z ? 0 : player.z - this.prevPlayer.z;
+    let travel = Math.hypot(fx, fz);
+    if (travel > 1e-4) {
+      fx /= travel;
+      fz /= travel;
+    } else if (speed > 0.6) {
       fx = v.x / speed;
       fz = v.z / speed;
+      travel = 0;
+    } else {
+      fx = 0;
+      fz = 1;
+      travel = 0;
     }
-    const halfLen = speed > 0.6 ? PED_PANIC.clearHalfLength : PED_PANIC.clearRadius;
+
+    // centre of the swept capsule, and its half-length including the sweep
+    const cx = (player.x + this.prevPlayer.x) * 0.5;
+    const cz = (player.z + this.prevPlayer.z) * 0.5;
+    const halfLen =
+      (speed > 0.6 || travel > 0.02 ? PED_PANIC.clearHalfLength : PED_PANIC.clearRadius) +
+      travel * 0.5;
     const halfWide = PED_PANIC.clearRadius;
+    const cull = (halfLen + halfWide) * (halfLen + halfWide);
+
+    this.statOverlaps = 0;
+    this.statMinPlayerDist = Infinity;
 
     for (let i = 0; i < this.peds.length; i++) {
       const p = this.peds[i];
       if (!p.active) continue;
-      const dx = p.pos.x - player.x;
-      const dz = p.pos.z - player.z;
-      if (dx * dx + dz * dz > (halfLen + halfWide) * (halfLen + halfWide)) continue;
+      const dx = p.pos.x - cx;
+      const dz = p.pos.z - cz;
+
+      // telemetry is measured against the *car*, not the swept box
+      const toCarX = p.pos.x - player.x;
+      const toCarZ = p.pos.z - player.z;
+      const dCar = Math.hypot(toCarX, toCarZ);
+      if (dCar < this.statMinPlayerDist) this.statMinPlayerDist = dCar;
+
+      if (dx * dx + dz * dz > cull) continue;
       // project into the player's frame
       const along = dx * fx + dz * fz;
       const side = dx * -fz + dz * fx;
       if (Math.abs(along) > halfLen || Math.abs(side) > halfWide) continue;
+      this.statOverlaps++;
       // push sideways — the short way out, and never through the car
       const sign = side >= 0 ? 1 : -1;
       const need = halfWide - Math.abs(side) + 0.05;
@@ -942,8 +1017,45 @@ export class PedestrianSystem implements System {
       p.pos.z += oz;
       p.dodge.x += ox;
       p.dodge.z += oz;
+      // and let them keep the offset: the dodge clamp must not drag them back
+      // under the wheels next frame while the car is still on top of them
+      p.dodgeHold = Math.max(p.dodgeHold, PED_PANIC.shoveHold);
       p.panicTimer = Math.max(p.panicTimer, PED_PANIC.duration);
+      if (p.hopTimer <= 0) p.hopTimer = PED_PANIC.hopTime;
     }
+
+    this.prevPlayer.copy(player);
+    this.safetyFrames++;
+    if (this.statOverlaps > this.worstOverlap) this.worstOverlap = this.statOverlaps;
+    if (this.activeCount > 0 && this.statMinPlayerDist < this.minEverPlayerDist) {
+      this.minEverPlayerDist = this.statMinPlayerDist;
+    }
+  }
+
+  /**
+   * The noise a scattering crowd makes.
+   *
+   * Comedy needs sound. When enough people panic at once — a terrace emptying,
+   * a plaza clearing — one crowd vocalisation is fired at the middle of the
+   * group. Heavily rate-limited: this is a punctuation mark, not an ambience
+   * bed, and it uses the library's existing `crowdCheer` rather than adding an
+   * asset.
+   */
+  private scatterShout(ctx: GameContext, dt: number): void {
+    if (this.shoutCooldown > 0) {
+      this.shoutCooldown -= dt;
+      return;
+    }
+    if (this.statPanic < PED_PANIC.shoutMinPeople) return;
+    if (this.player.speed < PED_PANIC.shoutMinSpeed) return;
+    this.shoutCooldown = PED_PANIC.shoutCooldown;
+    _v1.copy(this.player.position);
+    ctx.bus.emit('audio:sfx', {
+      id: 'crowdCheer',
+      at: _v1,
+      volume: Math.min(0.5, 0.16 + this.statPanic * 0.03),
+      pitch: 1.25 + Math.random() * 0.3,
+    });
   }
 
   /* -------------------------------------------------------------- stream */
@@ -1166,6 +1278,32 @@ export class PedestrianSystem implements System {
     }
   }
 
+  /**
+   * QA hook, shared with `Destructibles` and `Vehicle`. The scripted charge-a-
+   * crowd test reads `worstOverlap` and `minPlayerDistance` off this to prove
+   * the no-run-over guarantee holds at top speed. Absent outside a browser.
+   */
+  private installDebugHook(): void {
+    if (typeof window === 'undefined') return;
+    const w = window as unknown as { __locoDebug?: Record<string, unknown> };
+    const bag = (w.__locoDebug ??= {});
+    bag.peds = (): Record<string, number> => ({
+      active: this.activeCount,
+      panicking: this.statPanic,
+      dodging: this.statDodged,
+      overlaps: this.statOverlaps,
+      worstOverlap: this.worstOverlap,
+      minPlayerDistance:
+        this.minEverPlayerDist === Infinity ? -1 : Number(this.minEverPlayerDist.toFixed(3)),
+      frames: this.safetyFrames,
+    });
+    bag.resetPeds = (): void => {
+      this.worstOverlap = 0;
+      this.minEverPlayerDist = Infinity;
+      this.safetyFrames = 0;
+    };
+  }
+
   /* ------------------------------------------------------------ rendering */
 
   private writeInstances(ctx: GameContext, dt: number): void {
@@ -1222,6 +1360,9 @@ export class PedestrianSystem implements System {
       pedDodging: this.statDodged,
       pedDrawCalls: this.kit.drawCalls,
       pedTriangles: this.kit.liveTriangles,
+      pedOverlaps: this.statOverlaps,
+      pedMinPlayerDistance:
+        this.statMinPlayerDist === Infinity ? -1 : Number(this.statMinPlayerDist.toFixed(3)),
       pedAnchorSpots: this.spots.length,
       pedWalkableEdges: this.walkable.length,
       pedCarts: this.kit.carts.count,

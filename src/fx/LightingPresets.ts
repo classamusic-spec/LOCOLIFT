@@ -14,12 +14,42 @@
  * dominant street bearing, see `Lighting`) is added on the way out so golden
  * hour rakes down the calles largas without rotating the city.
  *
- * Numbers marked "§4.2" are verbatim from the reference table and must not be
- * "improved" without changing the reference first. The extra channels —
- * ambient, bounce, env intensity, sky/cloud/star colours, lamp level — are this
- * module's own, and exist because the reference's hemisphere fill alone crushes
- * shadowed ground to black at low sun elevation (the exact defect §8.36/§8.42
- * name).
+ * ---------------------------------------------------------------------------
+ * DEVIATIONS FROM §4.2, and why (art-direction pass, "low warm sun" brief)
+ * ---------------------------------------------------------------------------
+ *
+ * 1. **`afternoon` (15:30) is the most-seen hour** — it is what `main.ts` boots
+ *    into — and the reference's 50° elevation makes it a second, slightly
+ *    yellower midday. It is retuned to a **24° raking sun at az 250°**, warm
+ *    `#FFD9A8` at 3.9. A 9.6 m building now throws a 21.6 m shadow, which
+ *    crosses the 9–11 m street and climbs the opposite façade: slabs of light
+ *    at every cross street, which is the look §4.1 calls the game's signature.
+ *    50° threw 8 m and put 84 % of the street in sun, indistinguishable from
+ *    midday — measured at 0.404 vs 0.401 mean luminance before this change.
+ *
+ * 2. **`golden` sun intensity 2.4 → 3.6.** At 2.4 the whole calle sank to mean
+ *    luminance 0.349, below the §6.4 daylight floor of 0.38, and the "slabs of
+ *    orange light" never reached a stop above the shadow. The colour stays in
+ *    the reference's family (`#FFA85C` vs `#FF9E4D`) — what changed is that the
+ *    lit half of the frame now actually blazes.
+ *
+ * 3. **`envIntensity` was crushing every reflection.** It ran 0.42–0.85, and it
+ *    multiplies each material's own `envMapIntensity` (0.55–1.5 here). Night
+ *    was the worst case: 0.48 × 0.55 = 0.26 of the captured sky, which is most
+ *    of the reason the wet-road lamp reflections §4.3 calls load-bearing did
+ *    not read. Daylight now sits at 1.0 — the sky capture *is* the radiance,
+ *    so anything under 1.0 is a silent, invisible exposure cut — and night at
+ *    0.9. This is the failure mode that is never obviously broken, only flat.
+ *
+ * 4. **Night ambient 0.20 → 0.13 and desaturated.** §4.3's night contract says
+ *    the driving line must read from lamp pools, and explicitly names a global
+ *    ambient lift as the amateur move. The old value measured 0.56 mean centre
+ *    saturation — a flat blue wash, well over the §6.4 night ceiling of 0.44.
+ *
+ * Everything else in the §4.2 table is verbatim and must not be "improved"
+ * without changing the reference first. The extra channels — ambient, bounce,
+ * env intensity, sky/cloud/star colours, lamp level, and the whole grade and
+ * atmosphere block below — are this module's own.
  */
 import * as THREE from 'three';
 import { clamp, clamp01, lerp, smootherstep } from '../core/MathUtils';
@@ -61,6 +91,13 @@ export interface LightingPreset {
   /* — post — */
   readonly exposure: number;
   readonly bloomStrength: number;
+  /**
+   * **Display-space** luminance a pixel must reach before it blooms, 0..1.
+   * `pushPostState` runs it back through the inverse of the ACES curve and
+   * divides by exposure, because the bloom pass sees linear HDR: thresholding
+   * a linear buffer at 0.85 blooms every sunlit stucco wall in the district,
+   * which is the single most common way a bloom pass reads as amateur.
+   */
   readonly bloomThreshold: number;
 
   /* — sky dome — */
@@ -91,6 +128,37 @@ export interface LightingPreset {
   readonly lampLevel: number;
   /** 0 = full night, 1 = full day. Drives weather desaturation. */
   readonly dayFactor: number;
+
+  /* ------------------------------------------------------------ post-fx -- */
+
+  /** 0..1 screen-space light-shaft strength (`GodRays`) */
+  readonly godRays: number;
+  /** in-scatter colour the far plane drifts toward (aerial perspective) */
+  readonly aerialColor: number;
+  /** 0..1 how hard aerial perspective bites at the draw distance */
+  readonly aerialStrength: number;
+  /** 0..1 heat shimmer over the cobbles. Non-zero around solar noon only. */
+  readonly shimmer: number;
+
+  /* — grade — */
+  /** multiplied into the shadows, hue only: luminance is normalised out */
+  readonly gradeShadowTint: number;
+  /** multiplied into the highlights, hue only */
+  readonly gradeHighlightTint: number;
+  /** 0..1 how far toward those tints the split-tone actually goes */
+  readonly gradeSplit: number;
+  readonly gradeSaturation: number;
+  /** S-curve strength about the 0.42 pivot; 1.0 = off */
+  readonly gradeContrast: number;
+  /** black-point lift colour (§6.3.5) */
+  readonly gradeLiftColor: number;
+  readonly gradeLift: number;
+  /** added on top of the weather system's vignette (which owns the 0.22 base) */
+  readonly vignetteBoost: number;
+  /** §6.3.8 — 0.012 by day, more at night where the shadows are large and flat */
+  readonly grain: number;
+  /** §6.3.6 — fraction of screen width, edges only */
+  readonly chroma: number;
 }
 
 /**
@@ -147,14 +215,31 @@ export interface LightingState {
   dayFactor: number;
   /** 0 = dry, 1 = streaming — the weather system's authoritative wet drive */
   rainAmount: number;
+
+  godRays: number;
+  aerialColor: THREE.Color;
+  aerialStrength: number;
+  shimmer: number;
+
+  gradeShadowTint: THREE.Color;
+  gradeHighlightTint: THREE.Color;
+  gradeSplit: number;
+  gradeSaturation: number;
+  gradeContrast: number;
+  gradeLiftColor: THREE.Color;
+  gradeLift: number;
+  vignetteBoost: number;
+  grain: number;
+  chroma: number;
 }
 
 /* ---------------------------------------------------------------- presets */
 
 /**
- * Eight anchors. Seven are the §4.2 time-of-day rows verbatim; `midnight` is
- * added so the clock closes smoothly across 00:00 (interpolating `night` →
- * `dawn` directly would drag the moon backwards through the sky).
+ * Eight anchors. Seven are the §4.2 time-of-day rows (see the deviations noted
+ * in the file header); `midnight` is added so the clock closes smoothly across
+ * 00:00 — interpolating `night` → `dawn` directly would drag the moon backwards
+ * through the sky.
  */
 export const PRESETS: readonly LightingPreset[] = [
   {
@@ -166,17 +251,17 @@ export const PRESETS: readonly LightingPreset[] = [
     sunIntensity: 0.22,
     hemiSky: 0x1a2740,
     hemiGround: 0x0f1116,
-    hemiIntensity: 0.3,
-    ambientColor: 0x2a3a56,
-    ambientIntensity: 0.16,
+    hemiIntensity: 0.24,
+    ambientColor: 0x27334a,
+    ambientIntensity: 0.1,
     bounceColor: 0x232c40,
-    bounceIntensity: 0.08,
-    envIntensity: 0.42,
+    bounceIntensity: 0.07,
+    envIntensity: 0.88,
     fogColor: 0x0c1320,
     fogDensity: 0.0036,
-    exposure: 1.28,
-    bloomStrength: 1.15,
-    bloomThreshold: 0.52,
+    exposure: 1.14,
+    bloomStrength: 0.8,
+    bloomThreshold: 0.66,
     skyZenith: 0x03060f,
     skyHorizon: 0x0a1226,
     skyBand: 0x101a30,
@@ -193,6 +278,20 @@ export const PRESETS: readonly LightingPreset[] = [
     moonEl: 56,
     lampLevel: 1,
     dayFactor: 0,
+    godRays: 0.05,
+    aerialColor: 0x121c33,
+    aerialStrength: 0.55,
+    shimmer: 0,
+    gradeShadowTint: 0x7d90c8,
+    gradeHighlightTint: 0xffd9a8,
+    gradeSplit: 0.5,
+    gradeSaturation: 0.86,
+    gradeContrast: 1.08,
+    gradeLiftColor: 0x16243c,
+    gradeLift: 0.038,
+    vignetteBoost: 0.08,
+    grain: 0.02,
+    chroma: 0.0014,
   },
   {
     key: 'dawn',
@@ -205,21 +304,21 @@ export const PRESETS: readonly LightingPreset[] = [
     hemiGround: 0x4a3e38,
     hemiIntensity: 0.55,
     ambientColor: 0x6b6f8c,
-    ambientIntensity: 0.3,
+    ambientIntensity: 0.24,
     bounceColor: 0xb07048,
     bounceIntensity: 0.4,
-    envIntensity: 0.72,
+    envIntensity: 0.95,
     fogColor: 0xc9a98f,
     fogDensity: 0.0022,
     exposure: 1.05,
     bloomStrength: 0.55,
-    bloomThreshold: 0.78,
+    bloomThreshold: 0.87,
     skyZenith: 0x1e3e77,
     skyHorizon: 0xf0a878,
     skyBand: 0xff7a47,
     skyGround: 0x33291f,
-    sunDisc: 9.0,
-    haze: 1.35,
+    sunDisc: 10.0,
+    haze: 1.45,
     cloudCover: 0.34,
     cloudLit: 0xffc79a,
     cloudShade: 0x5e4a5e,
@@ -230,6 +329,20 @@ export const PRESETS: readonly LightingPreset[] = [
     moonEl: 12,
     lampLevel: 0.45,
     dayFactor: 0.38,
+    godRays: 0.95,
+    aerialColor: 0xd9a882,
+    aerialStrength: 0.7,
+    shimmer: 0,
+    gradeShadowTint: 0x8c9ad0,
+    gradeHighlightTint: 0xffd2a0,
+    gradeSplit: 0.65,
+    gradeSaturation: 1.1,
+    gradeContrast: 1.06,
+    gradeLiftColor: 0x1a1c2e,
+    gradeLift: 0.038,
+    vignetteBoost: 0.03,
+    grain: 0.014,
+    chroma: 0.0013,
   },
   {
     key: 'morning',
@@ -242,15 +355,15 @@ export const PRESETS: readonly LightingPreset[] = [
     hemiGround: 0x7a6a54,
     hemiIntensity: 0.75,
     ambientColor: 0x9db4cc,
-    ambientIntensity: 0.26,
+    ambientIntensity: 0.22,
     bounceColor: 0xc9a070,
     bounceIntensity: 0.48,
-    envIntensity: 0.8,
+    envIntensity: 1.0,
     fogColor: 0xbfd8e8,
     fogDensity: 0.0011,
     exposure: 1.0,
-    bloomStrength: 0.35,
-    bloomThreshold: 0.85,
+    bloomStrength: 0.4,
+    bloomThreshold: 0.92,
     skyZenith: 0x2a6fbe,
     skyHorizon: 0xcde4f4,
     skyBand: 0xe8f2f8,
@@ -267,6 +380,20 @@ export const PRESETS: readonly LightingPreset[] = [
     moonEl: -20,
     lampLevel: 0,
     dayFactor: 1,
+    godRays: 0.55,
+    aerialColor: 0xa8c8de,
+    aerialStrength: 0.62,
+    shimmer: 0.3,
+    gradeShadowTint: 0xffc98e,
+    gradeHighlightTint: 0xdcecff,
+    gradeSplit: 0.7,
+    gradeSaturation: 1.08,
+    gradeContrast: 1.1,
+    gradeLiftColor: 0x0e1a28,
+    gradeLift: 0.03,
+    vignetteBoost: 0,
+    grain: 0.011,
+    chroma: 0.0012,
   },
   {
     key: 'midday',
@@ -279,20 +406,20 @@ export const PRESETS: readonly LightingPreset[] = [
     hemiGround: 0x8a7a62,
     hemiIntensity: 0.9,
     ambientColor: 0xa8c0d6,
-    ambientIntensity: 0.24,
+    ambientIntensity: 0.2,
     bounceColor: 0xc8b48e,
     bounceIntensity: 0.55,
-    envIntensity: 0.85,
+    envIntensity: 1.0,
     fogColor: 0xc6dcec,
     fogDensity: 0.0009,
     exposure: 0.95,
-    bloomStrength: 0.28,
-    bloomThreshold: 0.9,
+    bloomStrength: 0.34,
+    bloomThreshold: 0.94,
     skyZenith: 0x2e7bc4,
     skyHorizon: 0xbfe0f2,
     skyBand: 0xd8ecf7,
     skyGround: 0x4c5a5e,
-    sunDisc: 18.0,
+    sunDisc: 20.0,
     haze: 0.6,
     cloudCover: 0.33,
     cloudLit: 0xfffdf6,
@@ -304,36 +431,56 @@ export const PRESETS: readonly LightingPreset[] = [
     moonEl: -40,
     lampLevel: 0,
     dayFactor: 1,
+    // a near-vertical sun makes almost no horizontal shafts; what it does make
+    // is glare off the sea and off the crowns of the cobbles
+    godRays: 0.28,
+    aerialColor: 0xb6d6ea,
+    aerialStrength: 0.58,
+    shimmer: 1.0,
+    gradeShadowTint: 0xffbf7d,
+    gradeHighlightTint: 0xd4e8ff,
+    gradeSplit: 0.85,
+    gradeSaturation: 1.10,
+    gradeContrast: 1.14,
+    gradeLiftColor: 0x0e1a28,
+    gradeLift: 0.028,
+    vignetteBoost: 0,
+    grain: 0.01,
+    chroma: 0.0012,
   },
   {
+    /**
+     * 15:30 — the hour the game boots into, and therefore the one that has to
+     * carry the art direction. A low warm raking key, not a second midday.
+     */
     key: 'afternoon',
     hour: 15.5,
-    sunAz: 226,
-    sunEl: 50,
-    sunColor: 0xffe9c2,
-    sunIntensity: 3.1,
-    hemiSky: 0x9cc3e6,
-    hemiGround: 0x836f55,
-    hemiIntensity: 0.78,
-    ambientColor: 0x9fb6cc,
-    ambientIntensity: 0.26,
-    bounceColor: 0xc79a63,
-    bounceIntensity: 0.52,
-    envIntensity: 0.82,
-    fogColor: 0xc4d9e6,
-    fogDensity: 0.0012,
-    exposure: 1.0,
-    bloomStrength: 0.38,
-    bloomThreshold: 0.85,
-    skyZenith: 0x2d74bc,
-    skyHorizon: 0xc6dff0,
-    skyBand: 0xe6dcc8,
-    skyGround: 0x4a5658,
-    sunDisc: 16.0,
-    haze: 0.78,
+    sunAz: 250,
+    sunEl: 24,
+    sunColor: 0xffd9a8,
+    sunIntensity: 3.9,
+    hemiSky: 0x8fb6de,
+    hemiGround: 0x7a6248,
+    hemiIntensity: 0.72,
+    ambientColor: 0x9aaec4,
+    ambientIntensity: 0.24,
+    bounceColor: 0xd8a468,
+    bounceIntensity: 0.66,
+    envIntensity: 1.0,
+    fogColor: 0xd6c8b4,
+    fogDensity: 0.0013,
+    exposure: 1.02,
+    bloomStrength: 0.5,
+    bloomThreshold: 0.92,
+    skyZenith: 0x3f74c4,
+    skyHorizon: 0xffd0a0,
+    skyBand: 0xffc07a,
+    skyGround: 0x4a4640,
+    sunDisc: 15.0,
+    haze: 1.15,
     cloudCover: 0.4,
-    cloudLit: 0xfff6e6,
-    cloudShade: 0x8d9fb6,
+    cloudLit: 0xfff0dc,
+    cloudShade: 0x8496b4,
     cloudOpacity: 0.95,
     starIntensity: 0,
     moonIntensity: 0,
@@ -341,33 +488,47 @@ export const PRESETS: readonly LightingPreset[] = [
     moonEl: -18,
     lampLevel: 0,
     dayFactor: 1,
+    godRays: 0.9,
+    aerialColor: 0xdcc6a8,
+    aerialStrength: 0.68,
+    shimmer: 0.35,
+    gradeShadowTint: 0x8fa8e0,
+    gradeHighlightTint: 0xffdcb0,
+    gradeSplit: 0.8,
+    gradeSaturation: 1.10,
+    gradeContrast: 1.13,
+    gradeLiftColor: 0x101c2c,
+    gradeLift: 0.03,
+    vignetteBoost: 0.01,
+    grain: 0.011,
+    chroma: 0.0012,
   },
   {
     key: 'golden',
     hour: 18.25,
     sunAz: 268,
     sunEl: 8,
-    sunColor: 0xff9e4d,
-    sunIntensity: 2.4,
+    sunColor: 0xffa85c,
+    sunIntensity: 3.6,
     hemiSky: 0x7fa8d8,
     hemiGround: 0x6b4e3a,
     hemiIntensity: 0.6,
-    ambientColor: 0x8b7f8c,
+    ambientColor: 0x93849a,
     ambientIntensity: 0.34,
-    bounceColor: 0xc4622c,
-    bounceIntensity: 0.62,
-    envIntensity: 0.78,
+    bounceColor: 0xd4702e,
+    bounceIntensity: 0.78,
+    envIntensity: 1.0,
     fogColor: 0xe8a56b,
     fogDensity: 0.0018,
-    exposure: 1.08,
-    bloomStrength: 0.7,
-    bloomThreshold: 0.8,
-    skyZenith: 0x2a4e86,
+    exposure: 1.12,
+    bloomStrength: 0.78,
+    bloomThreshold: 0.90,
+    skyZenith: 0x2f5a9c,
     skyHorizon: 0xffb35c,
     skyBand: 0xff6b3d,
     skyGround: 0x3c2c22,
-    sunDisc: 11.0,
-    haze: 1.5,
+    sunDisc: 14.0,
+    haze: 1.7,
     cloudCover: 0.38,
     cloudLit: 0xffd39a,
     cloudShade: 0x6a4e63,
@@ -378,6 +539,20 @@ export const PRESETS: readonly LightingPreset[] = [
     moonEl: 16,
     lampLevel: 0.2,
     dayFactor: 0.62,
+    godRays: 1.0,
+    aerialColor: 0xffab63,
+    aerialStrength: 0.82,
+    shimmer: 0,
+    gradeShadowTint: 0x7f9ae0,
+    gradeHighlightTint: 0xffd08c,
+    gradeSplit: 0.95,
+    gradeSaturation: 1.12,
+    gradeContrast: 1.12,
+    gradeLiftColor: 0x171e38,
+    gradeLift: 0.036,
+    vignetteBoost: 0.03,
+    grain: 0.012,
+    chroma: 0.0014,
   },
   {
     key: 'dusk',
@@ -388,17 +563,17 @@ export const PRESETS: readonly LightingPreset[] = [
     sunIntensity: 0.5,
     hemiSky: 0x4a6a9e,
     hemiGround: 0x2c2e3a,
-    hemiIntensity: 0.5,
-    ambientColor: 0x5a5a78,
-    ambientIntensity: 0.3,
+    hemiIntensity: 0.46,
+    ambientColor: 0x565274,
+    ambientIntensity: 0.24,
     bounceColor: 0x7a4a4a,
     bounceIntensity: 0.3,
-    envIntensity: 0.7,
+    envIntensity: 0.98,
     fogColor: 0x7a6a86,
     fogDensity: 0.0026,
     exposure: 1.15,
-    bloomStrength: 0.9,
-    bloomThreshold: 0.7,
+    bloomStrength: 0.95,
+    bloomThreshold: 0.82,
     skyZenith: 0x16233f,
     skyHorizon: 0xa8665f,
     skyBand: 0xe0705a,
@@ -415,6 +590,20 @@ export const PRESETS: readonly LightingPreset[] = [
     moonEl: 28,
     lampLevel: 0.75,
     dayFactor: 0.16,
+    godRays: 0.55,
+    aerialColor: 0x8a7096,
+    aerialStrength: 0.72,
+    shimmer: 0,
+    gradeShadowTint: 0x8a9ad8,
+    gradeHighlightTint: 0xffc38c,
+    gradeSplit: 0.85,
+    gradeSaturation: 1.06,
+    gradeContrast: 1.1,
+    gradeLiftColor: 0x141c34,
+    gradeLift: 0.045,
+    vignetteBoost: 0.06,
+    grain: 0.016,
+    chroma: 0.0014,
   },
   {
     key: 'night',
@@ -425,17 +614,17 @@ export const PRESETS: readonly LightingPreset[] = [
     sunIntensity: 0.28,
     hemiSky: 0x22304c,
     hemiGround: 0x14161c,
-    hemiIntensity: 0.32,
-    ambientColor: 0x33455f,
-    ambientIntensity: 0.2,
+    hemiIntensity: 0.26,
+    ambientColor: 0x2a3850,
+    ambientIntensity: 0.13,
     bounceColor: 0x2a3348,
     bounceIntensity: 0.1,
-    envIntensity: 0.48,
+    envIntensity: 0.9,
     fogColor: 0x101828,
     fogDensity: 0.0034,
-    exposure: 1.25,
-    bloomStrength: 1.1,
-    bloomThreshold: 0.55,
+    exposure: 1.10,
+    bloomStrength: 0.85,
+    bloomThreshold: 0.70,
     skyZenith: 0x050b1c,
     skyHorizon: 0x101b33,
     skyBand: 0x18243c,
@@ -452,6 +641,22 @@ export const PRESETS: readonly LightingPreset[] = [
     moonEl: 38,
     lampLevel: 1,
     dayFactor: 0,
+    godRays: 0.07,
+    aerialColor: 0x16243e,
+    aerialStrength: 0.6,
+    shimmer: 0,
+    // the split is what stops night reading as monochrome blue: the lamp pools
+    // land in the highlights and are pushed warm, the sky sits in the shadows
+    gradeShadowTint: 0x6f86bc,
+    gradeHighlightTint: 0xffc98a,
+    gradeSplit: 0.95,
+    gradeSaturation: 0.86,
+    gradeContrast: 1.12,
+    gradeLiftColor: 0x14223a,
+    gradeLift: 0.032,
+    vignetteBoost: 0.07,
+    grain: 0.019,
+    chroma: 0.0014,
   },
 ];
 
@@ -481,6 +686,7 @@ interface WeatherVariant {
   fogDensity: number;
   exposure: number;
   bloomStrength: number;
+  bloomThreshold: number;
   skyZenith: number;
   skyHorizon: number;
   skyBand: number;
@@ -494,6 +700,16 @@ interface WeatherVariant {
   /** target for `MaterialLibrary.setWetness` while this weather is fully in */
   rain: number;
   lampBoost: number;
+
+  godRays: number;
+  aerialColor: number;
+  aerialStrength: number;
+  gradeShadowTint: number;
+  gradeHighlightTint: number;
+  gradeSaturation: number;
+  gradeContrast: number;
+  vignetteBoost: number;
+  grain: number;
 }
 
 const RAIN: WeatherVariant = {
@@ -504,13 +720,15 @@ const RAIN: WeatherVariant = {
   hemiGround: 0x4a4f52,
   hemiIntensity: 0.85,
   ambientColor: 0x8695a0,
-  ambientIntensity: 0.4,
+  ambientIntensity: 0.34,
   bounceScale: 0.45,
-  envScale: 0.95,
+  envScale: 1.0,
   fogColor: 0x97a5ae,
   fogDensity: 0.0038,
   exposure: 1.1,
-  bloomStrength: 0.45,
+  bloomStrength: 0.62,
+  // a wet street is nothing but specular highlights; drop the gate so they glow
+  bloomThreshold: 0.86,
   skyZenith: 0x5d6b78,
   skyHorizon: 0x97a5ae,
   skyBand: 0xa8b4bb,
@@ -523,6 +741,15 @@ const RAIN: WeatherVariant = {
   starScale: 0.05,
   rain: 1.0,
   lampBoost: 0.55,
+  godRays: 0.3,
+  aerialColor: 0x9aa8b2,
+  aerialStrength: 0.85,
+  gradeShadowTint: 0x8fa8c8,
+  gradeHighlightTint: 0xffe0bc,
+  gradeSaturation: 1.02,
+  gradeContrast: 1.14,
+  vignetteBoost: 0.05,
+  grain: 0.016,
 };
 
 /**
@@ -550,13 +777,14 @@ const STORM: WeatherVariant = {
   hemiGround: 0x31352b,
   hemiIntensity: 0.8,
   ambientColor: 0x69725d,
-  ambientIntensity: 0.42,
+  ambientIntensity: 0.36,
   bounceScale: 0.28,
-  envScale: 0.88,
+  envScale: 0.95,
   fogColor: 0x6d7663,
   fogDensity: 0.0068,
   exposure: 1.14,
-  bloomStrength: 0.55,
+  bloomStrength: 0.7,
+  bloomThreshold: 0.85,
   skyZenith: 0x242b22,
   skyHorizon: 0x747d5c,
   skyBand: 0x9aa06a,
@@ -569,6 +797,15 @@ const STORM: WeatherVariant = {
   starScale: 0.0,
   rain: 1.0,
   lampBoost: 0.95,
+  godRays: 0.12,
+  aerialColor: 0x6f7865,
+  aerialStrength: 0.95,
+  gradeShadowTint: 0x9ab0c0,
+  gradeHighlightTint: 0xffe4b0,
+  gradeSaturation: 0.98,
+  gradeContrast: 1.18,
+  vignetteBoost: 0.09,
+  grain: 0.022,
 };
 
 /* ------------------------------------------------------------------- math */
@@ -616,12 +853,31 @@ function slerpDir(a: THREE.Vector3, b: THREE.Vector3, t: number, out: THREE.Vect
 
 /** Shortest-path lerp for a value in degrees on a 360° circle. */
 function lerpAngleDeg(a: number, b: number, t: number): number {
-  let d = ((b - a) % 360 + 540) % 360 - 180;
+  const d = ((((b - a) % 360) + 540) % 360) - 180;
   return a + d * t;
 }
 
 function setHexLinear(c: THREE.Color, hex: number): THREE.Color {
   return c.setHex(hex, THREE.SRGBColorSpace);
+}
+
+/**
+ * Inverse of the ACES filmic curve three applies, so a threshold authored in
+ * display space can be handed to a pass that only sees linear HDR. Narkowicz's
+ * rational fit inverted, then un-doing three's `/ 0.6` pre-scale.
+ *
+ * Sanity: `displayToLinear(0.85) ≈ 0.76`, and a sunlit cream façade measures
+ * ~0.80 linear at midday. That 0.04 of headroom is exactly the difference
+ * between "the sun disc and the chrome bloom" and "the whole wall glows".
+ */
+export function displayToLinear(display: number): number {
+  const d = clamp(display, 0, 0.997);
+  const a = 2.51 - 2.43 * d;
+  const b = 0.03 - 0.59 * d;
+  const c = -0.14 * d;
+  const disc = Math.max(0, b * b - 4 * a * c);
+  const x = a > 1e-5 ? (-b + Math.sqrt(disc)) / (2 * a) : 4;
+  return Math.max(0, x * 0.6);
 }
 
 /* ------------------------------------------------------------- evaluation */
@@ -645,17 +901,17 @@ export function createLightingState(): LightingState {
     bounceColor: new THREE.Color(1, 1, 1),
     bounceIntensity: 0.55,
     bounceDir: new THREE.Vector3(0, 1, 0),
-    envIntensity: 0.85,
+    envIntensity: 1,
     fogColor: new THREE.Color(1, 1, 1),
     fogDensity: 0.0009,
     exposure: 0.95,
-    bloomStrength: 0.28,
-    bloomThreshold: 0.9,
+    bloomStrength: 0.34,
+    bloomThreshold: 0.91,
     skyZenith: new THREE.Color(1, 1, 1),
     skyHorizon: new THREE.Color(1, 1, 1),
     skyBand: new THREE.Color(1, 1, 1),
     skyGround: new THREE.Color(1, 1, 1),
-    sunDisc: 18,
+    sunDisc: 20,
     haze: 0.6,
     cloudCover: 0.33,
     cloudLit: new THREE.Color(1, 1, 1),
@@ -667,6 +923,20 @@ export function createLightingState(): LightingState {
     lampLevel: 0,
     dayFactor: 1,
     rainAmount: 0,
+    godRays: 0.3,
+    aerialColor: new THREE.Color(1, 1, 1),
+    aerialStrength: 0.6,
+    shimmer: 0,
+    gradeShadowTint: new THREE.Color(1, 1, 1),
+    gradeHighlightTint: new THREE.Color(1, 1, 1),
+    gradeSplit: 0.8,
+    gradeSaturation: 1.2,
+    gradeContrast: 1.12,
+    gradeLiftColor: new THREE.Color(1, 1, 1),
+    gradeLift: 0.03,
+    vignetteBoost: 0,
+    grain: 0.012,
+    chroma: 0.0012,
   };
 }
 
@@ -767,8 +1037,38 @@ export function evaluateLighting(
   out.dayFactor = lerp(a.dayFactor, b.dayFactor, t);
   out.rainAmount = 0;
 
+  out.godRays = lerp(a.godRays, b.godRays, t);
+  setHexLinear(out.aerialColor, a.aerialColor).lerp(setHexLinear(_tmpColor, b.aerialColor), t);
+  out.aerialStrength = lerp(a.aerialStrength, b.aerialStrength, t);
+  out.shimmer = lerp(a.shimmer, b.shimmer, t);
+
+  setHexLinear(out.gradeShadowTint, a.gradeShadowTint).lerp(
+    setHexLinear(_tmpColor, b.gradeShadowTint),
+    t,
+  );
+  setHexLinear(out.gradeHighlightTint, a.gradeHighlightTint).lerp(
+    setHexLinear(_tmpColor, b.gradeHighlightTint),
+    t,
+  );
+  out.gradeSplit = lerp(a.gradeSplit, b.gradeSplit, t);
+  out.gradeSaturation = lerp(a.gradeSaturation, b.gradeSaturation, t);
+  out.gradeContrast = lerp(a.gradeContrast, b.gradeContrast, t);
+  setHexLinear(out.gradeLiftColor, a.gradeLiftColor).lerp(
+    setHexLinear(_tmpColor, b.gradeLiftColor),
+    t,
+  );
+  out.gradeLift = lerp(a.gradeLift, b.gradeLift, t);
+  out.vignetteBoost = lerp(a.vignetteBoost, b.vignetteBoost, t);
+  out.grain = lerp(a.grain, b.grain, t);
+  out.chroma = lerp(a.chroma, b.chroma, t);
+
   /* — bounce comes back at the player from the sunlit surfaces opposite — */
-  directionFromAzEl(out.sunAz + 180, Math.max(12, 40 - Math.abs(out.sunEl) * 0.35), azOffsetDeg, out.bounceDir);
+  directionFromAzEl(
+    out.sunAz + 180,
+    Math.max(12, 40 - Math.abs(out.sunEl) * 0.35),
+    azOffsetDeg,
+    out.bounceDir,
+  );
 
   /* — weather — */
   const wa = clamp01(weatherAmount);
@@ -822,6 +1122,7 @@ function applyVariant(s: LightingState, v: WeatherVariant, wa: number, azOffsetD
 
   s.exposure = lerp(s.exposure, v.exposure, wa);
   s.bloomStrength = lerp(s.bloomStrength, v.bloomStrength, wa);
+  s.bloomThreshold = lerp(s.bloomThreshold, v.bloomThreshold, wa);
 
   setHexLinear(_tmpColor, v.skyZenith).multiplyScalar(dayScale);
   s.skyZenith.lerp(_tmpColor, wa);
@@ -844,6 +1145,21 @@ function applyVariant(s: LightingState, v: WeatherVariant, wa: number, azOffsetD
   s.moonIntensity *= lerp(1, v.starScale, wa);
   s.lampLevel = clamp01(Math.max(s.lampLevel, v.lampBoost * wa));
   s.rainAmount = v.rain * wa;
+
+  s.godRays = lerp(s.godRays, v.godRays, wa);
+  setHexLinear(_tmpColor, v.aerialColor).multiplyScalar(dayScale);
+  s.aerialColor.lerp(_tmpColor, wa);
+  s.aerialStrength = lerp(s.aerialStrength, v.aerialStrength, wa);
+  s.shimmer *= 1 - wa;
+
+  setHexLinear(_tmpColor, v.gradeShadowTint);
+  s.gradeShadowTint.lerp(_tmpColor, wa);
+  setHexLinear(_tmpColor, v.gradeHighlightTint);
+  s.gradeHighlightTint.lerp(_tmpColor, wa);
+  s.gradeSaturation = lerp(s.gradeSaturation, v.gradeSaturation, wa);
+  s.gradeContrast = lerp(s.gradeContrast, v.gradeContrast, wa);
+  s.vignetteBoost = lerp(s.vignetteBoost, v.vignetteBoost, wa);
+  s.grain = lerp(s.grain, v.grain, wa);
 }
 
 /* --------------------------------------------------------- post-fx bridge */
@@ -856,12 +1172,20 @@ function applyVariant(s: LightingState, v: WeatherVariant, wa: number, azOffsetD
  * constructor argument so the render pipeline can be installed by `main.ts`
  * with a single `engine.setRenderHook(...)` call and still track the clock —
  * there is exactly one world and one composer per document.
+ *
+ * **Ownership inside this object matters.** `vignette` and `wet` are written by
+ * `Weather` every frame (it owns the §6.3.7 base of 0.22 plus its storm ramp);
+ * everything else is written by `Lighting`. The composer *adds* `vignetteBoost`
+ * to `vignette` rather than overwriting it, so the two never fight.
  */
 export interface PostState {
   exposure: number;
   bloomStrength: number;
+  /** already converted to the linear-HDR value the bloom pass needs */
   bloomThreshold: number;
   bloomRadius: number;
+  /** high-pass knee, so bloom fades in instead of popping at the threshold */
+  bloomKnee: number;
   /** 0..1 — screen-wide punch from a lightning strike */
   flash: number;
   /** grade: multiply applied to shadows (warm) and highlights (cool) */
@@ -871,48 +1195,103 @@ export interface PostState {
   liftColor: THREE.Color;
   lift: number;
   saturation: number;
+  contrast: number;
+  /** owned by `Weather`: §6.3.7 base 0.22 plus its storm ramp */
   vignette: number;
+  /** owned by `Lighting`: per-time-of-day addition on top of the above */
+  vignetteBoost: number;
   grain: number;
   chroma: number;
   /** 0..1 — how wet the world is, for a touch of extra contrast in the grade */
   wet: number;
+
+  /* — atmosphere the composer needs to build shafts and depth — */
+  /** world-space unit vector toward the key light */
+  sunDir: THREE.Vector3;
+  sunColor: THREE.Color;
+  /** 0..1 shaft strength */
+  godRays: number;
+  aerialColor: THREE.Color;
+  aerialStrength: number;
+  shimmer: number;
+  /** 0 = night, 1 = day; gates the effects that only make sense in daylight */
+  dayFactor: number;
+  /** 0..1 street-lamp master level */
+  lampLevel: number;
+  /** FogExp2 density in force this frame, for the aerial-perspective ramp */
+  fogDensity: number;
 }
 
 export const POST_STATE: PostState = {
   exposure: 1.0,
-  bloomStrength: 0.35,
-  bloomThreshold: 0.85,
+  bloomStrength: 0.4,
+  bloomThreshold: 1.2,
   bloomRadius: 0.55,
+  bloomKnee: 0.28,
   flash: 0,
-  shadowTint: new THREE.Color(0xffd9b0).convertSRGBToLinear(),
-  highlightTint: new THREE.Color(0xdcecff).convertSRGBToLinear(),
+  shadowTint: new THREE.Color(1, 1, 1),
+  highlightTint: new THREE.Color(1, 1, 1),
   liftColor: new THREE.Color(0x0e1a28).convertSRGBToLinear(),
   lift: 0.03,
-  saturation: 1.08,
+  saturation: 1.18,
+  contrast: 1.12,
   vignette: 0.22,
+  vignetteBoost: 0,
   grain: 0.012,
   chroma: 0.0012,
   wet: 0,
+  sunDir: new THREE.Vector3(0, 1, 0),
+  sunColor: new THREE.Color(1, 1, 1),
+  godRays: 0.4,
+  aerialColor: new THREE.Color(1, 1, 1),
+  aerialStrength: 0.6,
+  shimmer: 0,
+  dayFactor: 1,
+  lampLevel: 0,
+  fogDensity: 0.0009,
 };
+
+const _tint = new THREE.Color();
+
+/**
+ * Normalise a tint to luminance 1 so it shifts hue without moving exposure,
+ * then walk it back toward white by `1 - split`.
+ */
+function bakeTint(src: THREE.Color, split: number, out: THREE.Color): void {
+  _tint.copy(src);
+  const lum = 0.2126 * _tint.r + 0.7152 * _tint.g + 0.0722 * _tint.b;
+  if (lum > 1e-4) _tint.multiplyScalar(1 / lum);
+  out.setRGB(lerp(1, _tint.r, split), lerp(1, _tint.g, split), lerp(1, _tint.b, split));
+}
 
 /** Push the parts of a lighting state the composer needs. Called by `Lighting`. */
 export function pushPostState(s: LightingState): void {
   POST_STATE.exposure = s.exposure;
   POST_STATE.bloomStrength = s.bloomStrength;
-  POST_STATE.bloomThreshold = s.bloomThreshold;
+  // display-space authored -> linear HDR, then un-do the exposure the grade
+  // will apply later, so the gate lands on the pixel the player actually sees
+  POST_STATE.bloomThreshold = displayToLinear(s.bloomThreshold) / Math.max(0.2, s.exposure);
+  POST_STATE.bloomKnee = 0.22 + (1 - clamp01(s.dayFactor)) * 0.16;
   POST_STATE.wet = s.rainAmount;
-  // Caribbean split: warmer shadows at golden hour, cooler at midday and night.
-  const warm = clamp01(1 - s.dayFactor * 0.55);
-  POST_STATE.shadowTint.setRGB(
-    lerp(1.0, 1.09, warm),
-    lerp(1.0, 1.005, warm),
-    lerp(1.0, 0.9, warm),
-  );
-  POST_STATE.highlightTint.setRGB(
-    lerp(1.0, 0.985, 1),
-    1.0,
-    lerp(1.0, 1.035, 1),
-  );
-  POST_STATE.saturation = lerp(1.04, 1.1, clamp01(s.dayFactor));
-  POST_STATE.lift = lerp(0.045, 0.03, clamp01(s.dayFactor));
+
+  bakeTint(s.gradeShadowTint, s.gradeSplit, POST_STATE.shadowTint);
+  bakeTint(s.gradeHighlightTint, s.gradeSplit, POST_STATE.highlightTint);
+
+  POST_STATE.liftColor.copy(s.gradeLiftColor);
+  POST_STATE.lift = s.gradeLift;
+  POST_STATE.saturation = s.gradeSaturation;
+  POST_STATE.contrast = s.gradeContrast;
+  POST_STATE.vignetteBoost = s.vignetteBoost;
+  POST_STATE.grain = s.grain;
+  POST_STATE.chroma = s.chroma;
+
+  POST_STATE.sunDir.copy(s.sunDir);
+  POST_STATE.sunColor.copy(s.sunColor);
+  POST_STATE.godRays = s.godRays;
+  POST_STATE.aerialColor.copy(s.aerialColor);
+  POST_STATE.aerialStrength = s.aerialStrength;
+  POST_STATE.shimmer = s.shimmer;
+  POST_STATE.dayFactor = s.dayFactor;
+  POST_STATE.lampLevel = s.lampLevel;
+  POST_STATE.fogDensity = s.fogDensity;
 }

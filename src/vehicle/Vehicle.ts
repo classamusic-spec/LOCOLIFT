@@ -41,11 +41,15 @@ import type {
   PhysicsWorldAPI,
 } from '../physics/PhysicsTypes';
 import { GROUP } from '../physics/PhysicsTypes';
+import { destructibles } from '../world/Destructibles';
 import { AirControl } from './AirControl';
 import { BoostSystem } from './BoostSystem';
 import { DriftModel } from './DriftModel';
 import { Suspension } from './Suspension';
 import type { VehicleFrame } from './Suspension';
+import { SURFACE_GRIP, SURFACE_PLUME, scaleGrip } from './SurfaceGrip';
+import type { SurfaceGrip } from './SurfaceGrip';
+import { WheelPlume } from './WheelPlume';
 import {
   DEFAULT_VEHICLE_ID,
   getVehicleDefinition,
@@ -70,6 +74,7 @@ import type {
   SpeedTuning,
   SteerTuning,
   SuspensionTuning,
+  TerrainTuning,
   TwoWheelTuning,
   TyreTuning,
   VehicleModel,
@@ -141,6 +146,8 @@ export class Vehicle implements System {
   private readonly drift: DriftModel;
   private readonly boost: BoostSystem;
   private readonly air: AirControl;
+  /** dust and sand off the contact patches — one draw call, quality-gated */
+  private readonly plume: WheelPlume;
 
   /* ---------------------------------------------------------------- tuning
    * Local aliases onto `tuning`, so the simulation below reads exactly as it
@@ -159,6 +166,7 @@ export class Vehicle implements System {
   private readonly nearMissT: NearMissTuning;
   private readonly collisionT: CollisionTuning;
   private readonly recoveryT: RecoveryTuning;
+  private readonly terrainT: TerrainTuning;
 
   /** static ride height and spring compression for THIS vehicle */
   private readonly rideHeight: number;
@@ -270,6 +278,16 @@ export class Vehicle implements System {
   private readonly wheelDrive = new Float32Array(4);
   private readonly wheelBrake = new Float32Array(4);
 
+  /* ------------------------------------------------------------------ terrain
+   * One scratch record per wheel, refilled every step from the surface under
+   * it. Never allocated in `fixedUpdate`. */
+  private readonly wheelGrip: SurfaceGrip[] = [];
+  /** plume spawn credit per wheel, so emission is frame-rate independent */
+  private readonly plumeCredit = new Float32Array(4);
+  private attachedDestructibles = false;
+  /** running count of kerb mounts, for QA */
+  private kerbCount = 0;
+
   private disposed = false;
   private busRef: EventBus | null = null;
 
@@ -294,6 +312,7 @@ export class Vehicle implements System {
     this.nearMissT = t.nearMiss;
     this.collisionT = t.collision;
     this.recoveryT = t.recovery;
+    this.terrainT = t.terrain;
     this.rideHeight = staticRideHeight(t, CONFIG.gravity);
     this.restCompression = staticCompression(t, CONFIG.gravity);
 
@@ -343,6 +362,9 @@ export class Vehicle implements System {
 
     this.body = this.physics.createBody(desc);
 
+    this.plume = new WheelPlume(opts.quality ?? 'high');
+    this.scene.add(this.plume.group);
+
     this.model = this.definition.createModel(opts.quality ?? 'high');
     this.reactive = this.model as ReactiveModel;
     this.object3d = this.model.object3d;
@@ -356,6 +378,7 @@ export class Vehicle implements System {
     for (let i = 0; i < 4; i++) {
       this._wheelContacts.push(new THREE.Vector3());
       this._wheelHubs.push(new THREE.Vector3());
+      this.wheelGrip.push({ lateral: 1, longitudinal: 1, drag: 0, spray: 0 });
     }
     for (let i = 0; i < 8; i++) this.nearMissPool.push(new THREE.Vector3());
 
@@ -374,10 +397,73 @@ export class Vehicle implements System {
     this.busRef = ctx.bus;
     this.unsubContact = this.physics.onContact(this.handleContact, this.collisionT.minImpulse);
     this.model.setHeadlights(this.isNight(ctx.timeOfDay));
+
+    /* The destructible street furniture is registered by the world layers while
+     * the district builds, but it has no reason to exist until somebody can hit
+     * it: the player is the only thing in the game that breaks anything, the
+     * only thing whose proximity decides which props need bodies, and the owner
+     * of the physics world. So the vehicle drives it. `Destructibles` imports
+     * nothing from this module — `destructiblePlayer` is a structural view. */
+    destructibles.attach({
+      scene: this.scene,
+      physics: this.physics,
+      bus: ctx.bus,
+      quality: ctx.settings?.quality ?? 'high',
+      player: this.destructiblePlayer(),
+    });
+    this.attachedDestructibles = true;
+    this.installDebugHook();
+  }
+
+  /**
+   * QA hook, shared with `Destructibles` and `PedestrianSystem`. Read-only
+   * telemetry for the scripted drive tests: which surface the tyres found, how
+   * loose it is, and how many kerbs were mounted. Absent outside a browser.
+   */
+  private installDebugHook(): void {
+    if (typeof window === 'undefined') return;
+    const w = window as unknown as { __locoDebug?: Record<string, unknown> };
+    const bag = (w.__locoDebug ??= {});
+    bag.drive = (): Record<string, number | string> => ({
+      surface: this.surfaceKind,
+      looseness: Number(this.surfaceLooseness.toFixed(3)),
+      kerbs: this.kerbCount,
+      speed: Number(this.frame.speed.toFixed(2)),
+      posY: Number(this.frame.pos.y.toFixed(3)),
+      wheelsOnGround: this.suspension.groundedCount,
+      plume: this.plume.liveCount,
+      airborne: this.air.airborne ? 1 : 0,
+    });
+  }
+
+  /** The read-only view `Destructibles` sweeps its props against. */
+  private destructiblePlayer(): {
+    position: THREE.Vector3;
+    quaternion: THREE.Quaternion;
+    velocity: THREE.Vector3;
+    speed: number;
+    halfWidth: number;
+    halfLength: number;
+    halfHeight: number;
+  } {
+    const frame = this.frame;
+    const chassis = this.chassisT;
+    return {
+      position: frame.pos,
+      quaternion: frame.quat,
+      velocity: frame.linVel,
+      get speed(): number {
+        return frame.speed;
+      },
+      halfWidth: chassis.colliderHalfX,
+      halfLength: chassis.colliderHalfZ,
+      halfHeight: chassis.colliderHalfY,
+    };
   }
 
   onQualityChange(tier: QualityTier): void {
     this.model.setQuality(tier);
+    this.plume.onQualityChange(tier);
   }
 
   dispose(): void {
@@ -385,6 +471,11 @@ export class Vehicle implements System {
     this.disposed = true;
     this.unsubContact?.();
     this.unsubContact = null;
+    if (this.attachedDestructibles) {
+      destructibles.detach();
+      this.attachedDestructibles = false;
+    }
+    this.plume.dispose();
     this.physics.removeBody(this.body);
     if (this.object3d.parent) this.object3d.parent.remove(this.object3d);
     this.model.dispose();
@@ -426,6 +517,14 @@ export class Vehicle implements System {
     /* 2. suspension: rays, springs, dampers, anti-roll ---------------------- */
     this.suspension.step(this.physics, this.body, this.frame, dt);
     const grounded = this.suspension.groundedCount;
+    this.applyKerbKick();
+
+    /* 2b. destructible street furniture, BEFORE the solver runs --------------
+     * Registered as `System`s, the order in `main.ts` is vehicle → physics, so
+     * a café table that is about to be hit is already off the solver's books
+     * by the time it builds contacts. That is what turns "the car stops on a
+     * market stall" into "the market stall explodes". */
+    destructibles.fixedUpdate(dt);
 
     /* 3. drift state machine — produces the grip multipliers ---------------- */
     this.drift.step(
@@ -509,6 +608,10 @@ export class Vehicle implements System {
     this.suspension.updateVisual(dt);
     this.updateModel(ctx, dt);
     this.syncTransform();
+
+    /* the world reacting to us: props tumbling, debris settling, dust rising */
+    destructibles.update(dt);
+    this.updatePlume(dt, ctx.camera);
   }
 
   /* ============================================================== public API */
@@ -994,12 +1097,23 @@ export class Vehicle implements System {
         1.4,
       );
 
+      /* --- what we are driving ON ------------------------------------------
+       * Sand, grass and asphalt are no longer cosmetic. The multipliers come
+       * from the world's own surface table, blended toward neutral by this
+       * vehicle's `surfaceSensitivity` so a bus is not thrown around by a
+       * beach the way a light 4x4 is. */
+      const surf = scaleGrip(
+        SURFACE_GRIP[w.surfaceKind],
+        this.terrainT.surfaceSensitivity,
+        this.wheelGrip[i],
+      );
+
       /* --- lateral: slip-angle curve with a defined peak and a held plateau -- */
       const slipAngle = Math.atan2(vLat, Math.abs(vLong) + 0.6);
       const gripShape = slipCurve(Math.abs(slipAngle), this.tyreT);
       const gripMul = w.isFront ? this.drift.frontGripMul : this.drift.rearGripMul;
       const baseMu = w.isFront ? this.tyreT.latGripFront : this.tyreT.latGripRear;
-      const maxLat = baseMu * gripShape * muScale * gripMul * load;
+      const maxLat = baseMu * gripShape * muScale * gripMul * surf.lateral * load;
 
       /* the force that would kill the slide outright, under-relaxed for stability */
       const wantLat = -vLat * massShare * invDt * this.tyreT.latRecoveryFraction;
@@ -1007,13 +1121,17 @@ export class Vehicle implements System {
         Math.abs(vLat) < this.tyreT.latDeadband ? 0 : clamp(wantLat, -maxLat, maxLat);
 
       /* --- longitudinal, sharing the friction budget with the lateral force -- */
-      const maxLong = this.tyreT.longGrip * muScale * load;
+      const maxLong = this.tyreT.longGrip * muScale * surf.longitudinal * load;
       const latUse = maxLat > 1 ? Math.abs(fLat) / maxLat : 0;
       const longBudget =
         maxLong * Math.sqrt(Math.max(0, 1 - this.tyreT.combinedSlip * latUse * latUse));
 
       let wantLong = this.wheelDrive[i];
-      const rollDrag = this.speedT.rollingResistance * Math.sign(vLong);
+      // loose surfaces cost real drive force — this is what caps beach speed
+      // below road speed without making sand feel like treacle
+      const rollDrag =
+        (this.speedT.rollingResistance + surf.drag * this.terrainT.surfaceDragForce) *
+        Math.sign(vLong);
       wantLong -= rollDrag;
       if (this.wheelBrake[i] > 0) {
         /* brakes can only ever oppose motion, never drive it */
@@ -1057,6 +1175,45 @@ export class Vehicle implements System {
       w.spinRate = spin;
 
       w.slip = clamp01(Math.hypot(w.slipLat, slipLong) / this.tyreT.slipNormalise);
+    }
+  }
+
+  /* ===================================================================== kerb */
+
+  /**
+   * The kerb kick.
+   *
+   * San Viejo's kerbs are 0.14 m of real geometry in the ground collider, and
+   * the chassis box rides 0.4 m clear of the road, so the Jeep was never
+   * *blocked* by one — it just climbed it, politely, and carried on. Correct,
+   * and completely undramatic.
+   *
+   * `Suspension` flags the tick a wheel's ray steps up. This adds the bang: an
+   * upward impulse at that corner, scaled by speed and capped, so mounting the
+   * pavement at 40 m/s unweights the car and launches it onto the sidewalk
+   * instead of shrugging. Applied at the wheel, not the centre of mass, so
+   * clipping a kerb with one side rolls the car the way it should.
+   *
+   * `kerbKick` of 0 (the horse carriage) disables it outright.
+   */
+  private applyKerbKick(): void {
+    const T = this.terrainT;
+    if (T.kerbKick <= 0 || this.suspension.kerbEvents === 0) return;
+    const f = this.frame;
+    if (f.upDot < 0.4) return;
+
+    for (let i = 0; i < 4; i++) {
+      const w = this.suspension.wheels[i];
+      if (!w.kerbHit) continue;
+      // scale by how big the step actually was, so a pothole is not a ramp
+      const rise = clamp01(w.kerbRise / Math.max(0.02, this.suspT.restLength * 0.55));
+      const mag = Math.min(T.kerbKickMax, T.kerbKick * f.speed * rise);
+      if (mag < 1) continue;
+      this.tmpForce.copy(w.contactNormal).multiplyScalar(mag);
+      // a little of it goes forward too: a kerb hit should not scrub speed
+      this.tmpForce.addScaledVector(f.forward, mag * 0.16 * Math.sign(f.forwardSpeed || 1));
+      this.body.applyImpulse(this.tmpForce, w.contactPoint);
+      this.kerbCount++;
     }
   }
 
@@ -1289,6 +1446,84 @@ export class Vehicle implements System {
     } else {
       this.airBrakeCharge = Math.max(0, this.airBrakeCharge - dt * ab.decayRate);
     }
+  }
+
+  /* ===================================================================== dust */
+
+  /**
+   * Feed the plume pool. A wheel throws material when it is *working* the
+   * surface — sliding, spinning, or simply moving fast over something loose —
+   * scaled by that surface's own `spray` weight, so cobbles give a wisp of
+   * grit and sand throws a rooster tail. Emission is credit-based so the
+   * density is the same at 30 fps and at 144.
+   */
+  private updatePlume(dt: number, camera: THREE.PerspectiveCamera | null): void {
+    if (this.plume.capacity > 0) {
+      const f = this.frame;
+      for (let i = 0; i < 4; i++) {
+        const w = this.suspension.wheels[i];
+        if (!w.grounded) {
+          this.plumeCredit[i] = 0;
+          continue;
+        }
+        const surfSpray = SURFACE_GRIP[w.surfaceKind].spray;
+        if (surfSpray <= 0.02) {
+          this.plumeCredit[i] = 0;
+          continue;
+        }
+        // how hard this corner is abusing the ground, 0..1
+        const slip = clamp01(w.slip);
+        const fast = clamp01((f.speed - 4) / 26);
+        const work = clamp01(slip * 0.75 + fast * 0.55);
+        const rate = work * surfSpray * 34;
+        if (rate <= 0.05) {
+          this.plumeCredit[i] = 0;
+          continue;
+        }
+        this.plumeCredit[i] += rate * dt;
+        let n = Math.floor(this.plumeCredit[i]);
+        if (n <= 0) continue;
+        if (n > 3) n = 3;
+        this.plumeCredit[i] -= n;
+        // material is thrown backwards along the contact patch's motion
+        const back = -0.35 - work * 0.9;
+        const vx = w.contactVel.x * back * 0.28;
+        const vz = w.contactVel.z * back * 0.28;
+        const tint = SURFACE_PLUME[w.surfaceKind];
+        for (let k = 0; k < n; k++) {
+          this.plume.spawn(
+            w.contactPoint.x,
+            w.contactPoint.y,
+            w.contactPoint.z,
+            vx,
+            vz,
+            tint,
+            work,
+          );
+        }
+      }
+    }
+    this.plume.update(dt, camera);
+  }
+
+  /** 0..1 how loose the surface under the wheels is — HUD and audio may want it. */
+  get surfaceLooseness(): number {
+    let worst = 0;
+    for (let i = 0; i < 4; i++) {
+      const w = this.suspension.wheels[i];
+      if (!w.grounded) continue;
+      const s = SURFACE_GRIP[w.surfaceKind];
+      worst = Math.max(worst, 1 - s.longitudinal);
+    }
+    return clamp01(worst * 3.2);
+  }
+
+  /** The surface class under the front-left wheel. QA and audio read this. */
+  get surfaceKind(): string {
+    for (let i = 0; i < 4; i++) {
+      if (this.suspension.wheels[i].grounded) return this.suspension.wheels[i].surfaceKind;
+    }
+    return 'cobble';
   }
 
   /* ============================================================== near misses */

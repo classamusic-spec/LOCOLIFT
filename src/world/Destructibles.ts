@@ -57,7 +57,7 @@ import type { EventBus } from '../core/EventBus';
 import { clamp, clamp01 } from '../core/MathUtils';
 import type { QualityTier } from '../core/types';
 import { GROUP, type BodyHandle, type PhysicsWorldAPI } from '../physics/PhysicsTypes';
-import { DressKit, setClusterVisible, type ClusterRange, type DressPlacement } from './PropKit';
+import { setClusterVisible, type ClusterRange, type DressPlacement } from './PropKit';
 
 /* ========================================================================== *
  *  the catalogue
@@ -168,6 +168,17 @@ export const PROP_SPECS = {
     breakSpeed: 4.5, chips: 12, tint: 0x8a6a44, chipSize: 0.15,
     mode: 'knock', respawn: 70,
   }),
+  /**
+   * The plaza's kerbside stone planters. They are merged into the shared solid
+   * mesh so they cannot tumble instance-by-instance; a stone box would not
+   * bounce convincingly anyway, so it stands as solid scenery and then bursts.
+   */
+  stonePlanter: spec({
+    id: 'stonePlanter', wire: 'planter', points: 140, mass: 0,
+    hx: 0.34, hy: 0.3, hz: 0.34, cy: 0.3,
+    breakSpeed: 3.0, chips: 12, tint: 0xa9a08c, chipSize: 0.13,
+    mode: 'shatter', respawn: 75,
+  }),
   stall: spec({
     id: 'stall', wire: 'stall', points: 450, mass: 0,
     hx: 1.6, hy: 1.1, hz: 1.05, cy: 1.1,
@@ -234,7 +245,18 @@ const KICK_SPIN = 0.9;
 const SPEED_BONUS = 0.6;
 const SPEED_BONUS_FULL = 28;
 
-const PROP_MASK = GROUP.WORLD | GROUP.VEHICLE | GROUP.PROP | GROUP.DEBRIS;
+/**
+ * Destructibles live in `GROUP.DEBRIS`, not `GROUP.PROP`, and it matters.
+ * `GROUP.PROP` is in the chase camera's occlusion mask and in the suspension's
+ * ray mask, so a café chair in that group would jerk the camera in every time
+ * the Jeep parked near a terrace and pop a wheel every time it clipped one.
+ * `GROUP.DEBRIS` is already in the vehicle's, the ground's, the coast's and
+ * Piñones' collision masks, so the props collide with everything they should
+ * and nothing they should not. `userData.kind` is still `'prop'`, which is what
+ * `Vehicle.classifyBody` reads, so `vehicle:collision` still reports `'prop'`.
+ */
+const PROP_GROUP = GROUP.DEBRIS;
+const PROP_MASK = GROUP.WORLD | GROUP.VEHICLE | GROUP.DEBRIS;
 
 /* ========================================================================== *
  *  records
@@ -311,7 +333,6 @@ export class Destructibles {
   private bus: EventBus | null = null;
   private player: DestructiblePlayer | null = null;
   private quality: QualityTier = 'high';
-  private kit: DressKit | null = null;
 
   private chips: ChipPool | null = null;
 
@@ -484,8 +505,7 @@ export class Destructibles {
     this.maxLive = LIVE_BUDGET[opts.quality];
     this.maxBodies = Math.round(this.maxLive * 1.8);
 
-    this.kit = DressKit.acquire(opts.quality);
-    this.chips = new ChipPool(CHIP_BUDGET[opts.quality], this.kit.solid);
+    this.chips = new ChipPool(CHIP_BUDGET[opts.quality]);
     this.group.add(this.chips.mesh);
     opts.scene.add(this.group);
 
@@ -509,8 +529,6 @@ export class Destructibles {
     this.chips = null;
     this.group.removeFromParent();
     this.group.clear();
-    this.kit?.release(this);
-    this.kit = null;
     this.scene = null;
     this.physics = null;
     this.bus = null;
@@ -519,10 +537,18 @@ export class Destructibles {
 
   /* --------------------------------------------------------------- update */
 
-  update(dt: number): void {
+  /**
+   * Activation and the hit test, run on the **fixed step, before the solver**.
+   *
+   * The ordering is the whole trick. `Vehicle.fixedUpdate` runs before
+   * `PhysicsStepper.fixedUpdate`, so a market stall that is about to be hit is
+   * already gone by the time Rapier builds its contact manifolds. Ploughing a
+   * terrace at 45 m/s therefore reads as an explosion rather than as a wall,
+   * and the solver never has to resolve a 1400 kg car against a static box.
+   */
+  fixedUpdate(dt: number): void {
     const player = this.player;
-    const physics = this.physics;
-    if (!player || !physics || dt <= 0) return;
+    if (!player || !this.physics || dt <= 0) return;
     if (!this.sealed) this.rebuildGrid();
 
     this.time += dt;
@@ -543,11 +569,19 @@ export class Destructibles {
     }
 
     this.sweep(player, dt);
-    this.followBodies(dt);
-    this.respawn(player);
-    this.chips?.update(dt);
-
     this.prevPlayer.copy(player.position);
+  }
+
+  /**
+   * Presentation, run once per frame **after** the solver: the tumbling props
+   * copy their bodies, the debris integrates, and wrecks the player has driven
+   * away from quietly come back.
+   */
+  update(dt: number): void {
+    if (!this.player || !this.physics || dt <= 0) return;
+    this.followBodies(dt);
+    this.respawn(this.player);
+    this.chips?.update(dt);
   }
 
   /* ------------------------------------------------------------ activation */
@@ -641,7 +675,7 @@ export class Destructibles {
         quaternion: this.tmpQ.setFromAxisAngle(UP, rec.yaw),
         friction: 0.8,
         restitution: 0.05,
-        group: GROUP.PROP,
+        group: PROP_GROUP,
         mask: PROP_MASK,
         userData: { kind: 'prop', spec: s.id },
       });
@@ -662,7 +696,7 @@ export class Destructibles {
         restitution: 0.18,
         linearDamping: 0.14,
         angularDamping: 0.22,
-        group: GROUP.PROP,
+        group: PROP_GROUP,
         mask: PROP_MASK,
         userData: { kind: 'prop', spec: s.id },
       });
@@ -742,11 +776,12 @@ export class Destructibles {
     this.fwd.normalize();
     this.right.set(this.fwd.z, 0, -this.fwd.x);
 
-    // centre of the swept box, and the extra half-length the travel adds
+    // Centre of the swept box, plus the half-length the travel adds and a
+    // small lead so the prop is removed a step *before* the bumper reaches it.
     const cx = (pos.x + prev.x) * 0.5;
     const cz = (pos.z + prev.z) * 0.5;
-    const halfLen = player.halfLength + travel * 0.5;
-    const halfWide = player.halfWidth;
+    const halfLen = player.halfLength + travel * 0.5 + 0.28;
+    const halfWide = player.halfWidth + 0.1;
     const reach = Math.hypot(halfLen, halfWide) + 2.0;
     const reach2 = reach * reach;
 
@@ -776,8 +811,9 @@ export class Destructibles {
         continue;
       }
       this.destroy(rec, dx * inv, dz * inv, impact);
-      // `destroy` moves the record off the live list only for shatter props
-      if (rec.state === WRECK) this.liveList.splice(i, 1);
+      // A `shatter` prop is finished the instant it breaks; a `knock` prop
+      // stays on the live list until its body has stopped tumbling.
+      if (s.mode === 'shatter') this.liveList.splice(i, 1);
     }
   }
 
@@ -976,6 +1012,28 @@ export class Destructibles {
     this._destroyed = 0;
     this._lastKind = '';
   }
+
+  /**
+   * The `n` intact props nearest a point. Used by the QA harness to aim a run
+   * at a real café terrace instead of guessing a heading, and by nothing else.
+   */
+  nearestProps(
+    x: number,
+    z: number,
+    n = 8,
+    maxDist = 90,
+  ): Array<{ kind: string; x: number; y: number; z: number; d: number }> {
+    if (!this.sealed) this.rebuildGrid();
+    const out: Array<{ kind: string; x: number; y: number; z: number; d: number }> = [];
+    for (const rec of this.props) {
+      if (rec.state === WRECK) continue;
+      const d = Math.hypot(rec.x - x, rec.z - z);
+      if (d > maxDist) continue;
+      out.push({ kind: rec.spec.id, x: rec.x, y: rec.y, z: rec.z, d });
+    }
+    out.sort((a, b) => a.d - b.d);
+    return out.slice(0, n);
+  }
 }
 
 /* ========================================================================== *
@@ -1003,11 +1061,17 @@ interface Chip {
 const CHIP_GRAVITY = -24;
 
 /**
- * The shared debris pool: one `InstancedMesh` of small chips drawn with the
- * dressing kit's own solid material, so it adds one draw call and not one
- * shader program. Chips are integrated on the CPU — there are only a couple of
- * hundred and they need real spawn positions — and bounce once off the height
- * the prop was standing at.
+ * The shared debris pool: one `InstancedMesh` of small chips, one draw call
+ * whatever is breaking. Chips are integrated on the CPU — there are only a
+ * couple of hundred of them and they need real spawn positions, which the GPU
+ * has no way to know — and they bounce once off the height the prop was
+ * standing at before shrinking away.
+ *
+ * The material is deliberately its own bare `MeshStandardMaterial` rather than
+ * a borrowed dressing-kit one: the kit's materials are canvas-textured, which
+ * makes them unavailable in a headless harness, and the vertex-shader distance
+ * cull they carry is pointless for debris that only ever exists next to the
+ * camera. Vertex colours are white; `instanceColor` alone says what broke.
  */
 class ChipPool {
   readonly mesh: THREE.InstancedMesh;
@@ -1015,6 +1079,7 @@ class ChipPool {
   private next = 0;
   private live = 0;
   private geo: THREE.BufferGeometry;
+  private mat: THREE.MeshStandardMaterial;
 
   private readonly m = new THREE.Matrix4();
   private readonly p = new THREE.Vector3();
@@ -1023,14 +1088,17 @@ class ChipPool {
   private readonly axis = new THREE.Vector3();
   private readonly col = new THREE.Color();
 
-  constructor(count: number, material: THREE.Material) {
+  constructor(count: number) {
     this.geo = chipGeometry();
-    const cull = new Float32Array(count);
-    // debris is always right in front of the player, so it never distance-culls
-    cull.fill(1e4);
-    this.geo.setAttribute('aCullMul', new THREE.InstancedBufferAttribute(cull, 1));
+    this.mat = new THREE.MeshStandardMaterial({
+      name: 'loco/propDebris',
+      vertexColors: true,
+      roughness: 0.86,
+      metalness: 0.02,
+      envMapIntensity: 0.7,
+    });
 
-    const mesh = new THREE.InstancedMesh(this.geo, material, count);
+    const mesh = new THREE.InstancedMesh(this.geo, this.mat, count);
     mesh.name = 'destructibles/chips';
     mesh.frustumCulled = false;
     mesh.castShadow = false;
@@ -1151,6 +1219,7 @@ class ChipPool {
     this.mesh.removeFromParent();
     this.mesh.dispose();
     this.geo.dispose();
+    this.mat.dispose();
     this.parts.length = 0;
   }
 }
@@ -1190,16 +1259,23 @@ function countPooled(free: Map<string, BodyHandle[]>): number {
 }
 
 /**
- * QA hook. `main.ts` installs `window.__loco` after boot; this module attaches
- * long before that, so it publishes its own handle rather than reaching into
- * one that does not exist yet.
+ * QA hook. `main.ts` installs `window.__loco` only once boot has finished, and
+ * this module attaches during `initSystems`, so it publishes into a shared
+ * `window.__locoDebug` bag that the vehicle and the pedestrian system also
+ * write to. Read-only, and absent entirely outside a browser.
  */
 function installDebugHook(d: Destructibles): void {
   if (typeof window === 'undefined') return;
-  (window as unknown as { __locoProps?: unknown }).__locoProps = {
-    stats: () => d.stats(),
-    reset: () => d.resetCounters(),
-  };
+  const w = window as unknown as { __locoDebug?: Record<string, unknown> };
+  const bag = (w.__locoDebug ??= {});
+  bag.props = (): Record<string, number | string> => d.stats();
+  bag.resetProps = (): void => d.resetCounters();
+  bag.nearestProps = (
+    x: number,
+    z: number,
+    n?: number,
+    maxDist?: number,
+  ): ReturnType<Destructibles['nearestProps']> => d.nearestProps(x, z, n, maxDist);
 }
 
 /* ========================================================================== *

@@ -51,13 +51,43 @@ import {
 
 /* -------------------------------------------------------------- constants */
 
-/** Half-width of the fitted shadow box, metres. */
+/**
+ * Half-width of the fitted shadow box, metres — the **single-cascade** fallback
+ * used on medium and low, and whenever cascades are switched off.
+ */
 const SHADOW_EXTENT: Record<QualityTier, number> = {
   low: 62,
   medium: 82,
   high: 112,
   ultra: 145,
 };
+
+/**
+ * Two-cascade split (high/ultra only).
+ *
+ * A real 4-slice CSM in three means patching `lights_fragment_begin` on every
+ * shadow-receiving material in the game, which is both out of this module's
+ * ownership and a recompile of the entire shader set. What works without
+ * touching a single material is two directional lights that share a direction
+ * and split the key's intensity:
+ *
+ * - **near** (0–`NEAR` m) carries 58 % of the key and gets a tight box, so its
+ *   texel is 2.3× smaller than the old single cascade — 3.1 cm at high.
+ * - **far** (0–`FAR` m) carries the remaining 42 % over a box that reaches the
+ *   fort and the far end of the calle.
+ *
+ * Inside the near range both lights shadow the same pixel, so a near shadow is
+ * fully dark. Past it only the far light does, so distant shadows land at 42 %
+ * depth — which is what aerial perspective would do to them anyway, and is why
+ * this reads as a cascade rather than as two lights fighting.
+ *
+ * The cost is honest and it is one extra shadow-map render of the scene inside
+ * the far box; see `stats().shadowDraws` and the report.
+ */
+const CASCADE_NEAR: Record<QualityTier, number> = { low: 0, medium: 0, high: 48, ultra: 56 };
+const CASCADE_FAR: Record<QualityTier, number> = { low: 0, medium: 0, high: 260, ultra: 340 };
+/** Share of the key light the near cascade carries. */
+const CASCADE_NEAR_SHARE = 0.58;
 
 /** How far up-light the shadow camera sits. Must clear the fort (43 m). */
 const SHADOW_DISTANCE = 260;
@@ -78,8 +108,8 @@ const LAMP_SPACING = 21;
  * the 3.6-intensity midday sun does, which is what a sodium pool should look
  * like against an otherwise black street.
  */
-const LAMP_CANDELA = 38;
-const LAMP_RANGE = 15;
+const LAMP_CANDELA = 54;
+const LAMP_RANGE = 16;
 
 const UP = new THREE.Vector3(0, 1, 0);
 const ZERO = new THREE.Vector3(0, 0, 0);
@@ -176,7 +206,14 @@ export interface LightingOpts {
 export class Lighting {
   /** Added to the world root by `World`. Holds lights and the lamp field. */
   readonly group = new THREE.Group();
+  /** near cascade, and the whole key light when cascades are off */
   readonly sun = new THREE.DirectionalLight(0xfff8ec, 3.6);
+  /**
+   * Far cascade. Always in the scene — adding or removing a light recompiles
+   * every program in the district — and simply held at intensity 0 with
+   * `castShadow = false` on the tiers that do not run cascades.
+   */
+  readonly sunFar = new THREE.DirectionalLight(0xfff8ec, 0);
   readonly fog = new THREE.FogExp2(0xc6dcec, 0.0009);
   readonly state: LightingState = createLightingState();
 
@@ -201,6 +238,7 @@ export class Lighting {
   private _weather: SkyWeather = 'clear';
   private _weatherAmount = 0;
   private shadowsEnabled = true;
+  private cascades = false;
 
   /* lamp field */
   private lampSites: LampSite[] = [];
@@ -218,6 +256,8 @@ export class Lighting {
   /* shadow fit */
   private focus = new THREE.Vector3();
   private focusTarget = new THREE.Vector3();
+  /** flattened camera forward, reused to lead the far cascade */
+  private forward = new THREE.Vector3(0, 0, -1);
   private lightBasis = new THREE.Matrix4();
   private tmpV = new THREE.Vector3();
   private tmpV2 = new THREE.Vector3();
@@ -241,13 +281,15 @@ export class Lighting {
 
     this.group.name = 'fx/lighting';
 
-    /* --- key light --- */
+    /* --- key light (near cascade) + far cascade --- */
     this.sun.name = 'world/sun';
     this.sun.castShadow = true;
+    this.sunFar.name = 'world/sunFar';
+    this.sunFar.castShadow = false;
     this.configureShadow(opts.quality);
     this.sun.target.position.set(0, 0, 0);
-    this.group.add(this.sun);
-    this.group.add(this.sun.target);
+    this.sunFar.target.position.set(0, 0, 0);
+    this.group.add(this.sun, this.sun.target, this.sunFar, this.sunFar.target);
 
     /* --- fill --- */
     this.hemi.name = 'fx/hemi';
@@ -328,7 +370,14 @@ export class Lighting {
     );
 
     this.sun.color.copy(s.sunColor);
-    this.sun.intensity = s.sunIntensity;
+    this.sunFar.color.copy(s.sunColor);
+    if (this.cascades) {
+      this.sun.intensity = s.sunIntensity * CASCADE_NEAR_SHARE;
+      this.sunFar.intensity = s.sunIntensity * (1 - CASCADE_NEAR_SHARE);
+    } else {
+      this.sun.intensity = s.sunIntensity;
+      this.sunFar.intensity = 0;
+    }
 
     this.hemi.color.copy(s.hemiSky);
     this.hemi.groundColor.copy(s.hemiGround);
@@ -352,9 +401,7 @@ export class Lighting {
   /** Re-derive the light positions from the current focus point. */
   private placeKeyLight(): void {
     const dir = this.state.sunDir;
-    const ext = SHADOW_EXTENT[this.quality];
     const mapSize = QUALITY_BUDGET[this.quality].shadowMapSize;
-    const texel = (ext * 2) / mapSize;
 
     /* Build the light-space basis exactly as three will (Matrix4.lookAt with
      * up = +Y), then snap the focus to whole texels in that space. Snapping in
@@ -363,27 +410,13 @@ export class Lighting {
     if (Math.abs(this.tmpV.y) > 0.9995) this.tmpV.y = Math.sign(this.tmpV.y) * 0.9995;
     this.tmpV.normalize();
     this.lightBasis.lookAt(this.tmpV, ZERO, UP);
-    const e = this.lightBasis.elements;
-    const f = this.focus;
-    const lx = f.x * e[0] + f.y * e[1] + f.z * e[2];
-    const ly = f.x * e[4] + f.y * e[5] + f.z * e[6];
-    const lz = f.x * e[8] + f.y * e[9] + f.z * e[10];
-    const sx = Math.round(lx / texel) * texel;
-    const sy = Math.round(ly / texel) * texel;
-    const t = this.tmpV2.set(
-      e[0] * sx + e[4] * sy + e[8] * lz,
-      e[1] * sx + e[5] * sy + e[9] * lz,
-      e[2] * sx + e[6] * sy + e[10] * lz,
-    );
 
-    this.sun.target.position.copy(t);
-    this.sun.target.updateMatrixWorld();
-    this.sun.position.set(
-      t.x + this.tmpV.x * SHADOW_DISTANCE,
-      t.y + this.tmpV.y * SHADOW_DISTANCE,
-      t.z + this.tmpV.z * SHADOW_DISTANCE,
-    );
-    this.sun.updateMatrixWorld();
+    const nearExt = this.cascades ? CASCADE_NEAR[this.quality] : SHADOW_EXTENT[this.quality];
+    this.aimCascade(this.sun, nearExt, mapSize, 0);
+    if (this.cascades) {
+      // the far box leads further down the street, where the player is looking
+      this.aimCascade(this.sunFar, CASCADE_FAR[this.quality], mapSize, 0.28);
+    }
 
     const b = this.state.bounceDir;
     this.bounce.target.position.copy(this.focus);
@@ -401,11 +434,66 @@ export class Lighting {
     this.lightningLight.updateMatrixWorld();
   }
 
+  /**
+   * Point one cascade at the focus point, snapped to its own shadow-texel grid
+   * in light space. `lead` pushes the box further down the camera's forward
+   * axis as a fraction of its extent — the far cascade wants to cover what the
+   * player is driving toward, the near one wants to stay centred on the car.
+   */
+  private aimCascade(
+    light: THREE.DirectionalLight,
+    ext: number,
+    mapSize: number,
+    lead: number,
+  ): void {
+    const texel = (ext * 2) / mapSize;
+    const e = this.lightBasis.elements;
+    const fx = this.focus.x + this.forward.x * ext * lead;
+    const fy = this.focus.y;
+    const fz = this.focus.z + this.forward.z * ext * lead;
+    const lx = fx * e[0] + fy * e[1] + fz * e[2];
+    const ly = fx * e[4] + fy * e[5] + fz * e[6];
+    const lz = fx * e[8] + fy * e[9] + fz * e[10];
+    const sx = Math.round(lx / texel) * texel;
+    const sy = Math.round(ly / texel) * texel;
+    const t = this.tmpV2.set(
+      e[0] * sx + e[4] * sy + e[8] * lz,
+      e[1] * sx + e[5] * sy + e[9] * lz,
+      e[2] * sx + e[6] * sy + e[10] * lz,
+    );
+
+    light.target.position.copy(t);
+    light.target.updateMatrixWorld();
+    light.position.set(
+      t.x + this.tmpV.x * SHADOW_DISTANCE,
+      t.y + this.tmpV.y * SHADOW_DISTANCE,
+      t.z + this.tmpV.z * SHADOW_DISTANCE,
+    );
+    light.updateMatrixWorld();
+  }
+
   private configureShadow(tier: QualityTier): void {
     const map = QUALITY_BUDGET[tier].shadowMapSize;
-    const ext = SHADOW_EXTENT[tier];
-    this.sun.shadow.mapSize.set(map, map);
-    const cam = this.sun.shadow.camera;
+    this.cascades = CASCADE_FAR[tier] > 0;
+
+    const nearExt = this.cascades ? CASCADE_NEAR[tier] : SHADOW_EXTENT[tier];
+    this.setupShadowCamera(this.sun, nearExt, map);
+
+    if (this.cascades) {
+      // half-resolution far map: its texel is coarse either way, and this keeps
+      // the extra cascade's memory at a quarter of the near one's
+      const farMap = Math.max(1024, map >> 1);
+      this.setupShadowCamera(this.sunFar, CASCADE_FAR[tier], farMap);
+      this.sunFar.castShadow = this.shadowsEnabled;
+    } else {
+      this.sunFar.castShadow = false;
+      this.sunFar.intensity = 0;
+    }
+  }
+
+  private setupShadowCamera(light: THREE.DirectionalLight, ext: number, map: number): void {
+    light.shadow.mapSize.set(map, map);
+    const cam = light.shadow.camera;
     cam.left = -ext;
     cam.right = ext;
     cam.top = ext;
@@ -413,13 +501,13 @@ export class Lighting {
     cam.near = 1;
     cam.far = SHADOW_DISTANCE + ext * 2.2;
     cam.updateProjectionMatrix();
-    // §4.2: bias -0.0004, normalBias 0.02, soft PCF of ~2.5 texels. normalBias
-    // is scaled by the world size of a texel so it survives a quality change.
+    // §4.2: bias -0.0004, normalBias 0.02. normalBias is scaled by the world
+    // size of a texel so it survives a quality change and a cascade swap.
     const texel = (ext * 2) / map;
-    this.sun.shadow.bias = -0.0004;
-    this.sun.shadow.normalBias = Math.max(0.02, texel * 1.35);
-    this.sun.shadow.radius = 2.5;
-    this.sun.shadow.blurSamples = 8;
+    light.shadow.bias = -0.0004;
+    light.shadow.normalBias = Math.max(0.02, texel * 1.35);
+    light.shadow.radius = 2.5;
+    light.shadow.blurSamples = 8;
   }
 
   /* --------------------------------------------------------------- update */
@@ -427,7 +515,9 @@ export class Lighting {
   update(ctx: GameContext, dt: number): void {
     if (this.disposed) return;
     const camera = ctx.camera;
-    const ext = SHADOW_EXTENT[this.quality];
+    // lead the *near* box: biasing a 48 m cascade by 45 m would leave the car
+    // sitting on its trailing edge with its own shadow half cut off
+    const ext = this.cascades ? CASCADE_NEAR[this.quality] : SHADOW_EXTENT[this.quality];
 
     /* --- follow the player, biased ahead so the shadow box covers what the
      * camera is about to see rather than what it just left --- */
@@ -435,6 +525,7 @@ export class Lighting {
     this.tmpV.y = 0;
     if (this.tmpV.lengthSq() < 1e-6) this.tmpV.set(0, 0, -1);
     this.tmpV.normalize();
+    this.forward.copy(this.tmpV);
     this.focusTarget.set(
       camera.position.x + this.tmpV.x * ext * 0.4,
       0,
@@ -455,6 +546,7 @@ export class Lighting {
     if (wantShadows !== this.shadowsEnabled) {
       this.shadowsEnabled = wantShadows;
       this.sun.castShadow = wantShadows;
+      this.sunFar.castShadow = wantShadows && this.cascades;
     }
 
     /* --- lightning --- */
@@ -642,9 +734,11 @@ export class Lighting {
     const level = this.lampLevelSmoothed;
 
     if (this.lampGlobeMat) {
-      // 3.5x the bloom threshold (§4.3) — the globes are what makes the street
-      // read as lit from 100 m, long after the point lights have fallen off.
-      this.lampGlobeMat.emissiveIntensity = level * 3.4;
+      // §4.3: the globe sits well above the bloom gate. It is what makes the
+      // street read as lit from 100 m, long after the point lights have fallen
+      // off, and — with the env capture no longer crushed — what the wet road
+      // has to reflect.
+      this.lampGlobeMat.emissiveIntensity = level * 4.0;
     }
 
     const pool = this.lampLights;
@@ -708,13 +802,17 @@ export class Lighting {
   onQualityChange(tier: QualityTier, settings: SettingsState): void {
     if (tier !== this.quality) {
       this.quality = tier;
+      this.shadowsEnabled = settings.shadows;
       this.configureShadow(tier);
       this.sun.shadow.map?.dispose();
       this.sun.shadow.map = null;
+      this.sunFar.shadow.map?.dispose();
+      this.sunFar.shadow.map = null;
       this.rebuildLamps();
     }
     this.shadowsEnabled = settings.shadows;
     this.sun.castShadow = settings.shadows;
+    this.sunFar.castShadow = settings.shadows && this.cascades;
     this.refresh();
   }
 
@@ -758,6 +856,8 @@ export class Lighting {
     this.lampGrid.clear();
     this.sun.shadow.map?.dispose();
     this.sun.shadow.map = null;
+    this.sunFar.shadow.map?.dispose();
+    this.sunFar.shadow.map = null;
     this.group.removeFromParent();
     this.group.clear();
   }
@@ -777,10 +877,23 @@ export class Lighting {
       lamps: this.lampSites.length,
       lampPool: this.lampLights.length,
       lampLevel: Number(this.lampLevelSmoothed.toFixed(3)),
-      shadowExtent: SHADOW_EXTENT[this.quality],
+      cascades: this.cascades ? 2 : 1,
+      shadowExtent: this.cascades ? CASCADE_NEAR[this.quality] : SHADOW_EXTENT[this.quality],
+      shadowExtentFar: this.cascades ? CASCADE_FAR[this.quality] : 0,
       shadowTexelMetres: Number(
-        ((SHADOW_EXTENT[this.quality] * 2) / QUALITY_BUDGET[this.quality].shadowMapSize).toFixed(4),
+        (
+          ((this.cascades ? CASCADE_NEAR[this.quality] : SHADOW_EXTENT[this.quality]) * 2) /
+          QUALITY_BUDGET[this.quality].shadowMapSize
+        ).toFixed(4),
       ),
+      shadowTexelMetresFar: this.cascades
+        ? Number(
+            (
+              (CASCADE_FAR[this.quality] * 2) /
+              Math.max(1024, QUALITY_BUDGET[this.quality].shadowMapSize >> 1)
+            ).toFixed(4),
+          )
+        : 0,
     };
   }
 }

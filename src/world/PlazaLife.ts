@@ -76,7 +76,8 @@ import {
   pointInPolygon,
   triCount,
 } from './PropKit';
-import type { DressPlacement, WetnessSource } from './PropKit';
+import type { ClusterRange, DressPlacement, WetnessSource } from './PropKit';
+import { destructibles } from './Destructibles';
 import type { CityLayout, OpenArea, WorldLayer, WorldOpts } from './WorldTypes';
 
 /* ------------------------------------------------------------------ tuning */
@@ -704,10 +705,12 @@ export class PlazaLife implements WorldLayer {
     mergeInstances(this.solid, buildStoneBench(FOUNTAIN.stepR * FOUNTAIN_SCALE + 1.7, 0.6), this.stoneBenches, true);
     mergeInstances(this.solid, buildFlagpole(8.6), this.poles, true);
     mergeInstances(this.solid, buildTreeGrate(), this.grates, true);
-    mergeInstances(this.solid, buildPlanterBox(rng.fork(0x13)), this.planters, true);
+    const planterRanges: ClusterRange[] = [];
+    mergeInstances(this.solid, buildPlanterBox(rng.fork(0x13)), this.planters, true, planterRanges);
     mergeInstances(this.solid, buildPigeon(), this.pigeons, true);
 
-    this.addMerged(this.solid.build('aDress'), kit.solid, 'plaza/solid');
+    const solidGeo = this.solid.build('aDress');
+    this.addMerged(solidGeo, kit.solid, 'plaza/solid');
 
     this.addInstanced(buildShadeTrunk(rng.fork(0x11)), kit.solid, this.trees, 'plaza/treeTrunk');
     this.addInstanced(
@@ -722,11 +725,29 @@ export class PlazaLife implements WorldLayer {
       this.blooms,
       'plaza/treeBloom',
     );
-    this.addInstanced(buildBench(), kit.solid, this.benches, 'plaza/bench');
+    const benchMesh = this.addInstanced(buildBench(), kit.solid, this.benches, 'plaza/bench');
     this.addInstanced(buildLampPost(true), kit.solid, this.lamps, 'plaza/lampPost');
     this.addInstanced(buildLampGlobe(true), kit.glow, this.lamps, 'plaza/lampGlobe');
-    this.addInstanced(buildDoorwayPot(rng.fork(0x14), true), kit.foliage, this.pots, 'plaza/pot');
-    this.addInstanced(buildPottedPalm(rng.fork(0x15)), kit.foliage, this.palms, 'plaza/palm');
+    const potMesh = this.addInstanced(buildDoorwayPot(rng.fork(0x14), true), kit.foliage, this.pots, 'plaza/pot');
+    const palmMesh = this.addInstanced(buildPottedPalm(rng.fork(0x15)), kit.foliage, this.palms, 'plaza/palm');
+
+    /* --- what the square is willing to lose when a taxi comes through --- */
+    destructibles.registerInstanced(this, benchMesh, 'bench', this.benches);
+    destructibles.registerInstanced(this, potMesh, 'bigPot', this.pots);
+    destructibles.registerInstanced(this, palmMesh, 'palm', this.palms);
+    // The kerbside planters are merged into the shared solid mesh, so they
+    // collapse in place rather than tumbling — a stone box does not bounce.
+    if (solidGeo) {
+      for (let i = 0; i < this.planters.length && i < planterRanges.length; i++) {
+        const p = this.planters[i];
+        destructibles.registerCluster(
+          this,
+          'stonePlanter',
+          { x: p.x, y: p.y, z: p.z, yaw: p.yaw, scale: p.scale ?? 1 },
+          [{ geo: solidGeo, range: planterRanges[i] }],
+        );
+      }
+    }
 
     // the accumulators are only needed while building
     this.trees = [];
@@ -768,17 +789,18 @@ export class PlazaLife implements WorldLayer {
     mat: THREE.Material,
     list: DressPlacement[],
     name: string,
-  ): void {
+  ): THREE.InstancedMesh | null {
     const mesh = dressInstanced(geo, mat, list, name);
     if (!mesh) {
       geo.dispose();
-      return;
+      return null;
     }
     this.group.add(mesh);
     this.meshes.push(mesh);
     this.geometries.push(mesh.geometry);
     this._stats.instances += mesh.count;
     this._stats.triangles += triCount(mesh.geometry) * mesh.count;
+    return mesh;
   }
 
   /* -------------------------------------------------------------- runtime */
@@ -816,6 +838,7 @@ export class PlazaLife implements WorldLayer {
   }
 
   dispose(): void {
+    destructibles.unregisterOwner(this);
     for (const g of this.geometries) g.dispose();
     this.geometries.length = 0;
     for (const m of this.meshes) {

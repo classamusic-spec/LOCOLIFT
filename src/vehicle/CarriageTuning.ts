@@ -54,6 +54,7 @@
  */
 import type {
   ModelFeel,
+  TerrainTuning,
   VehicleTuningSet,
   WheelPlacement,
 } from './VehicleTuning';
@@ -583,6 +584,23 @@ export const CARRIAGE_WHEEL_LAYOUT: readonly WheelPlacement[] = [
   { x: CARRIAGE_SUSPENSION.halfTrackRear, z: 2.3, front: false, left: false },
 ];
 
+/* ----------------------------------------------------------------- terrain */
+
+/**
+ * A horse and a wooden cart. Iron-shod wheels on sand genuinely bog down, so
+ * the surface term is dialled *up*, not down — but the horse simply steps onto
+ * a kerb, so there is no launch assist at all.
+ */
+export const CARRIAGE_TERRAIN: TerrainTuning = {
+  surfaceSensitivity: 1.15,
+  surfaceDragForce: 2600,
+  kerbStep: 0.06,
+  kerbMinSpeed: 99,
+  kerbKick: 0,
+  kerbKickMax: 0,
+  kerbCooldown: 1,
+};
+
 /* ============================================================== the bundle */
 
 export const CARRIAGE_TUNING: VehicleTuningSet = {
@@ -594,6 +612,7 @@ export const CARRIAGE_TUNING: VehicleTuningSet = {
   brake: CARRIAGE_BRAKE,
   steer: CARRIAGE_STEER,
   tyre: CARRIAGE_TYRE,
+  terrain: CARRIAGE_TERRAIN,
   drift: CARRIAGE_DRIFT,
   boost: CARRIAGE_BOOST,
   air: CARRIAGE_AIR,

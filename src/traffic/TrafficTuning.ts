@@ -349,10 +349,12 @@ export const PED = {
   crossSpeed: 1.95,
   /** joggers on the Paseo */
   jogSpeed: 3.1,
-  /** flat-out panic run, m/s */
-  panicSpeed: 4.4,
+  /** flat-out panic run, m/s. A scared person outruns a jogger. */
+  panicSpeed: 5.6,
   /** how quickly a walker reaches its target speed, m/s² */
   accel: 3.5,
+  /** …and how fast a *frightened* one does. Adrenaline is not gradual. */
+  panicAccel: 14.0,
   /** capsule radius used for personal space and the no-run-over constraint, m */
   radius: 0.32,
   /** eye height for the sensor body centre, m */
@@ -363,7 +365,14 @@ export const PED = {
   /** chance a roamer idles at all when it reaches a node */
   idleChance: 0.13,
   /** an agent this far off its graph position is snapped back, m */
-  maxDodge: 2.6,
+  maxDodge: 3.4,
+  /**
+   * …raised to this for a moment after the car has physically shoved someone
+   * out of its footprint. The ordinary clamp is what keeps the crowd tidy, but
+   * applied to somebody the Jeep is currently parked on top of it would drag
+   * them straight back under the wheels. See `PedestrianSystem.enforceClearance`.
+   */
+  maxDodgeShoved: 5.6,
   /** dodge offset spring-back rate, 1/s */
   dodgeRecover: 1.9,
   /** ped-vs-ped separation impulse, m/s per metre of overlap */
@@ -389,17 +398,28 @@ export const PED_CROSS = {
 
 export const PED_PANIC = {
   /** base radius the player is noticed at, m */
-  baseRadius: 5.0,
-  /** …plus this per m/s of player speed */
-  speedRadius: 0.42,
+  baseRadius: 7.0,
+  /**
+   * …plus this per m/s of player speed. At the Jeep's 50 m/s ceiling the notice
+   * radius saturates at `maxRadius`, which at that speed is only about half a
+   * second of warning — hence the very high `dodgeRate` and `panicAccel`.
+   * People have to move *now*, not realistically.
+   */
+  speedRadius: 0.62,
   /** hard cap on the panic radius, m */
-  maxRadius: 19.0,
+  maxRadius: 26.0,
   /** the player must be closing this fast to trigger a scatter, m/s */
-  minSpeed: 5.5,
+  minSpeed: 4.0,
   /** how long the arms stay up after the scare, s */
-  duration: 2.6,
+  duration: 2.8,
   /** how hard the dodge offset is driven away from the player, m/s */
-  dodgeRate: 6.5,
+  dodgeRate: 11.5,
+  /**
+   * How long a shoved pedestrian keeps the widened dodge cap, s. Long enough
+   * to walk out from under a parked car, short enough that the crowd tidies
+   * itself up again immediately afterwards.
+   */
+  shoveHold: 1.6,
   /**
    * Hard guarantee. Nothing may ever be inside this radius of the player's
    * centre: after all movement the ped is projected out of it. Comedy, not
@@ -408,8 +428,14 @@ export const PED_PANIC = {
   clearRadius: 2.15,
   /** the player capsule is treated as this long front-to-back, m */
   clearHalfLength: 2.4,
+  /** at least this many people must be running for the crowd to shout */
+  shoutMinPeople: 4,
+  /** …and the player must be doing at least this, m/s */
+  shoutMinSpeed: 12,
+  /** seconds between crowd shouts */
+  shoutCooldown: 3.2,
   /** the jump-back is this tall, m */
-  hopHeight: 0.16,
+  hopHeight: 0.22,
   /** and lasts this long, s */
   hopTime: 0.42,
 } as const;

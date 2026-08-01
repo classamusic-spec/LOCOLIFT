@@ -36,46 +36,22 @@ import { GROUP } from '../physics/PhysicsTypes';
 import type { BodyHandle } from '../physics/PhysicsTypes';
 import { SEA_LEVEL, DISTRICT_BOUNDS } from './CityLayout';
 import { RoadNetworkImpl } from './RoadNetwork';
+import { SURFACE_GRIP, setSurfaceProbe } from './Surfaces';
+import type { SurfaceGrip, SurfaceKind } from './Surfaces';
 import type { CityLayout, OpenArea, WorldLayer, WorldOpts } from './WorldTypes';
 
 /* ========================================================================== *
  *  public types
  * ========================================================================== */
 
-/** What the tyres are on. Consumed by the vehicle's grip model. */
-export type SurfaceKind = 'cobble' | 'sand' | 'asphalt' | 'grass';
-
-/** Multipliers on the tyre model, one set per surface. */
-export interface SurfaceGrip {
-  /** scales `TYRE.latGripFront` / `latGripRear` */
-  lateral: number;
-  /** scales `TYRE.longGrip` */
-  longitudinal: number;
-  /**
-   * Extra rolling resistance, as a fraction of the vehicle's drive force lost
-   * per wheel on this surface. Sand is what makes the beach a *different place
-   * to drive* rather than a differently coloured road.
-   */
-  drag: number;
-  /** how readily this surface throws a particle plume under a spinning wheel */
-  spray: number;
-}
-
 /**
- * Suggested tuning. Cobble is the reference — the whole vehicle is tuned on
- * adoquín, so it sits at 1.0 and everything else is expressed relative to it.
- *
- * Sand is deliberately loose: grip drops about a third laterally, the Jeep
- * pushes wide on entry and steps out on power, and the drag term caps beach
- * top speed below road top speed. That combination is the fun — you arrive on
- * the sand fast and immediately have to drive it differently.
+ * The surface classification lives in {@link ./Surfaces} so that the vehicle
+ * can read it without this file and `src/vehicle` importing each other. It is
+ * re-exported here unchanged: every existing
+ * `import { SURFACE_GRIP } from './Coast'` still resolves.
  */
-export const SURFACE_GRIP: Record<SurfaceKind, SurfaceGrip> = {
-  cobble: { lateral: 1.0, longitudinal: 1.0, drag: 0.0, spray: 0.15 },
-  asphalt: { lateral: 1.06, longitudinal: 1.05, drag: 0.0, spray: 0.1 },
-  sand: { lateral: 0.64, longitudinal: 0.74, drag: 0.22, spray: 1.0 },
-  grass: { lateral: 0.8, longitudinal: 0.85, drag: 0.09, spray: 0.5 },
-};
+export { SURFACE_GRIP, SURFACE_PLUME } from './Surfaces';
+export type { SurfaceGrip, SurfaceKind } from './Surfaces';
 
 /** One sample of the waterline, marching along the shore. */
 export interface ShoreStation {
@@ -1161,8 +1137,19 @@ function makeSandMaterial(
   uniforms: SandUniforms,
   normalMap: THREE.Texture,
   tileMeters: number,
+  coat: boolean,
 ): THREE.MeshStandardMaterial {
-  const mat = new THREE.MeshStandardMaterial({
+  /**
+   * The tideline is the one place in the game where a mirror is *correct*:
+   * the sheet of water left behind by a spent wave is millimetres deep over
+   * packed sand, and it reflects the sky and the horizon almost perfectly. The
+   * shader already computes `locoWet`; a clearcoat lobe keyed to it turns that
+   * band from "darker sand" into water, which is the difference between a beach
+   * and a beach-coloured surface. The lobe rides `nonPerturbedNormal`, so the
+   * ripple normal map stops perturbing the reflection exactly where the water
+   * covers the ripples.
+   */
+  const params = {
     name: 'loco/coastSand',
     color: 0xffffff,
     vertexColors: true,
@@ -1170,13 +1157,16 @@ function makeSandMaterial(
     normalScale: new THREE.Vector2(0.85, 0.85),
     roughness: 0.94,
     metalness: 0,
-    envMapIntensity: 0.7,
+    envMapIntensity: 0.85,
     alphaTest: 0.5,
     transparent: false,
     polygonOffset: true,
     polygonOffsetFactor: -2,
     polygonOffsetUnits: -2,
-  });
+  };
+  const mat: THREE.MeshStandardMaterial = coat
+    ? new THREE.MeshPhysicalMaterial({ ...params, clearcoat: 0.02, clearcoatRoughness: 0.08 })
+    : new THREE.MeshStandardMaterial(params);
   // geometry hands UVs in tiles already, so the map itself stays at repeat 1
   normalMap.repeat.set(1, 1);
   void tileMeters;
@@ -1264,14 +1254,30 @@ function makeSandMaterial(
           'diffuseColor.rgb *= locoSand;',
           'float locoRough = mix( 0.95, 0.42, locoWet );',
           'locoRough = mix( locoRough, 0.72, clamp( locoFoam, 0.0, 1.0 ) );',
+          'float locoFoamClamped = clamp( locoFoam, 0.0, 1.0 );',
         ].join('\n'),
       )
       .replace(
         '#include <roughnessmap_fragment>',
         ['#include <roughnessmap_fragment>', 'roughnessFactor = locoRough;'].join('\n'),
       );
+
+    if (coat) {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <lights_physical_fragment>',
+        [
+          '#include <lights_physical_fragment>',
+          // a sheet of water over packed sand, not a wet-looking powder: the
+          // coat goes flat and near-mirror under the run-up and is killed by
+          // foam, which is air, not water
+          'material.clearcoat = clamp( locoWet * 0.92 * ( 1.0 - locoFoamClamped * 0.9 ), 0.0, 1.0 );',
+          'material.clearcoatRoughness = max( 0.0525, mix( 0.30, 0.07, locoWet ) );',
+          'clearcoatNormal = normalize( mix( normal, nonPerturbedNormal, locoWet ) );',
+        ].join('\n'),
+      );
+    }
   };
-  mat.customProgramCacheKey = () => 'loco/coast-sand-v1';
+  mat.customProgramCacheKey = () => (coat ? 'loco/coast-sand-v2cc' : 'loco/coast-sand-v2');
   return mat;
 }
 
@@ -1336,6 +1342,9 @@ export class Coast implements WorldLayer {
     // Build the grip raster now rather than on the vehicle's first query, so
     // the cost lands in the loading screen instead of in frame one.
     model.surfaceAt(0, 0);
+    // …and publish it, so the tyre model can actually price sand and grass.
+    // The vehicle module never imports the world; the world pushes this in.
+    setSurfaceProbe((x, z) => model.surfaceAt(x, z));
 
     this._stats.drawCalls = this.group.children.length;
   }
@@ -1480,7 +1489,7 @@ export class Coast implements WorldLayer {
     worldUVs(geo, SAND_TILE);
     const normalMap = sandNormalTexture(256);
     this.textures.push(normalMap);
-    const mat = makeSandMaterial(this.uniforms, normalMap, SAND_TILE);
+    const mat = makeSandMaterial(this.uniforms, normalMap, SAND_TILE, this.quality !== 'low');
     const mesh = new THREE.Mesh(geo, mat);
     mesh.name = 'coast/sand';
     mesh.receiveShadow = true;
@@ -1745,6 +1754,7 @@ export class Coast implements WorldLayer {
   }
 
   dispose(): void {
+    setSurfaceProbe(null);
     for (const g of this.geometries) g.dispose();
     this.geometries.length = 0;
     for (const m of this.materials) m.dispose();

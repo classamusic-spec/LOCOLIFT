@@ -18,8 +18,15 @@ import * as THREE from 'three';
 import { clamp, clamp01, damp } from '../core/MathUtils';
 import type { BodyHandle, PhysicsWorldAPI } from '../physics/PhysicsTypes';
 import { GROUP } from '../physics/PhysicsTypes';
+import { surfaceAt, DEFAULT_SURFACE } from './SurfaceGrip';
+import type { SurfaceKind } from './SurfaceGrip';
 import { JEEP_TUNING } from './VehicleTuning';
-import type { SuspensionTuning, VehicleTuningSet, WheelPlacement } from './VehicleTuning';
+import type {
+  SuspensionTuning,
+  TerrainTuning,
+  VehicleTuningSet,
+  WheelPlacement,
+} from './VehicleTuning';
 
 /** Everything about the chassis this step, computed once and shared. */
 export interface VehicleFrame {
@@ -89,6 +96,18 @@ export interface WheelState {
   load: number;
   /** whatever the physics backend tagged the surface body with */
   surface: unknown;
+  /** the resolved surface class under this wheel — cobble, sand, grass, asphalt */
+  surfaceKind: SurfaceKind;
+  /**
+   * True on the step this wheel stepped up a kerb: the ray shortened by more
+   * than `TerrainTuning.kerbStep` in one tick. Consumed (and cleared) by the
+   * vehicle's kerb assist.
+   */
+  kerbHit: boolean;
+  /** how far the ray shortened on that step, metres */
+  kerbRise: number;
+  /** seconds until this corner may report another kerb */
+  kerbLockout: number;
 
   /** steer angle applied to this wheel, radians */
   steer: number;
@@ -120,7 +139,11 @@ export class Suspension {
 
   /** this vehicle's suspension constants */
   private readonly T: SuspensionTuning;
+  private readonly terrain: TerrainTuning;
   private readonly layout: readonly WheelPlacement[];
+
+  /** corners that stepped up a kerb this tick — read by the vehicle */
+  kerbEvents = 0;
 
   /** ray length: full travel + the tyre + a little slack */
   private readonly rayLength: number;
@@ -135,6 +158,7 @@ export class Suspension {
 
   constructor(tuning: VehicleTuningSet = JEEP_TUNING) {
     this.T = tuning.suspension;
+    this.terrain = tuning.terrain;
     this.layout = tuning.wheels;
     this.rayLength = this.T.restLength + this.T.wheelRadius + this.T.raySkin;
     for (let i = 0; i < this.layout.length; i++) {
@@ -155,6 +179,10 @@ export class Suspension {
         contactVel: new THREE.Vector3(),
         load: 0,
         surface: null,
+        surfaceKind: DEFAULT_SURFACE,
+        kerbHit: false,
+        kerbRise: 0,
+        kerbLockout: 0,
         steer: 0,
         spinAngle: 0,
         spinRate: 0,
@@ -181,10 +209,15 @@ export class Suspension {
       w.slipLong = 0;
       w.spinRate = 0;
       w.surface = null;
+      w.surfaceKind = DEFAULT_SURFACE;
+      w.kerbHit = false;
+      w.kerbRise = 0;
+      w.kerbLockout = 0;
       w.contactNormal.set(0, 1, 0);
     }
     this.groundedCount = 0;
     this.totalLoad = 0;
+    this.kerbEvents = 0;
   }
 
   /**
@@ -201,9 +234,15 @@ export class Suspension {
     const dir = this.tmpDir.copy(frame.up).multiplyScalar(-1);
     let grounded = 0;
     let total = 0;
+    this.kerbEvents = 0;
 
     for (let i = 0; i < this.wheels.length; i++) {
       const w = this.wheels[i];
+      const wasGrounded = w.grounded;
+      const wasLength = w.springLength;
+      w.kerbHit = false;
+      w.kerbRise = 0;
+      if (w.kerbLockout > 0) w.kerbLockout = Math.max(0, w.kerbLockout - dt);
 
       /* --- ray origin: the strut top mount, in world space --- */
       this.tmpOrigin.copy(w.anchorLocal).applyQuaternion(frame.quat).add(frame.pos);
@@ -220,6 +259,7 @@ export class Suspension {
         w.springLength = this.T.restLength;
         w.load = 0;
         w.surface = null;
+        w.surfaceKind = DEFAULT_SURFACE;
         w.contactNormal.copy(frame.up);
         w.centerWorld
           .copy(dir)
@@ -242,6 +282,7 @@ export class Suspension {
         w.springLength = this.T.restLength;
         w.load = 0;
         w.surface = null;
+        w.surfaceKind = DEFAULT_SURFACE;
         w.contactNormal.copy(hit.normal);
         w.centerWorld
           .copy(dir)
@@ -255,12 +296,37 @@ export class Suspension {
       const springLength = clamp(centreDist, 0, this.T.restLength);
       const compression = clamp01(1 - springLength / this.T.restLength);
 
+      /* --- kerb detection ---------------------------------------------------
+       * A 0.14 m kerb is a *step* in ray length, not a slope: one tick the
+       * wheel is over the gutter, the next it is over the pavement. The spring
+       * answers that honestly and the Jeep simply climbs up, which is correct
+       * and completely undramatic. Flagging the step lets the vehicle add the
+       * bang an arcade game wants. Contact has to be continuous — landing from
+       * a jump is not a kerb. */
+      const rise = wasLength - springLength;
+      // Subtract the compression the chassis' own descent already explains, or
+      // every hard landing would read as a kerb. What is left is a change in
+      // the *ground*, which is what we are actually looking for.
+      const explained = Math.max(0, -frame.verticalSpeed) * dt;
+      if (
+        wasGrounded &&
+        w.kerbLockout <= 0 &&
+        rise - explained >= this.terrain.kerbStep &&
+        frame.speed >= this.terrain.kerbMinSpeed
+      ) {
+        w.kerbHit = true;
+        w.kerbRise = rise - explained;
+        w.kerbLockout = this.terrain.kerbCooldown;
+        this.kerbEvents++;
+      }
+
       w.grounded = true;
       w.compression = compression;
       w.springLength = springLength;
       w.contactPoint.copy(hit.point);
       w.contactNormal.copy(hit.normal);
       w.surface = hit.userData ?? hit.body?.userData ?? null;
+      w.surfaceKind = surfaceAt(w.surface, hit.point.x, hit.point.z);
       w.centerWorld.copy(dir).multiplyScalar(springLength).add(w.anchorWorld);
       grounded++;
 
