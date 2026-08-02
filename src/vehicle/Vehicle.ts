@@ -230,6 +230,7 @@ export class Vehicle implements System {
   /* ------------------------------------------------------------ frustration */
   private flipTimer = 0;
   private safePointTimer = 0;
+  private stuckTimer = 0;
   private readonly safePos = new THREE.Vector3();
   private safeHeading = 0;
   private respawnFreeze = 0;
@@ -521,6 +522,7 @@ export class Vehicle implements System {
     this.suspension.step(this.physics, this.body, this.frame, dt);
     const grounded = this.suspension.groundedCount;
     this.applyKerbKick();
+    this.applyClimbAssist(dt, grounded);
 
     /* 2b. destructible street furniture, BEFORE the solver runs --------------
      * Registered as `System`s, the order in `main.ts` is vehicle → physics, so
@@ -1254,6 +1256,53 @@ export class Vehicle implements System {
       this.body.applyImpulse(this.tmpForce, w.contactPoint);
       this.kerbCount++;
     }
+  }
+
+  /* ============================================================== climb assist */
+
+  /**
+   * The general anti-stuck net. See RECOVERY.stuckClimb* for the why.
+   *
+   * When the player is asking to move, the car is upright and on the ground,
+   * and yet it is going nowhere, it is wedged against something the wheels
+   * can't climb — a tall kerb, the sand/malecón step, a plaza edge, an
+   * intersection seam, or a kinematic traffic car pinning it. We push it up and
+   * over, applying the shove at the leading end so the nose (or tail, in
+   * reverse) also pitches up onto the lip. Everything ramps in past a short
+   * grace period, so a normal standing start never feels it — only a car that
+   * is genuinely stuck.
+   */
+  private applyClimbAssist(dt: number, grounded: number): void {
+    const T = this.recoveryT;
+    const f = this.frame;
+    const demand = this.throttleInput > 0.35 ? 1 : this.brakeInput > 0.35 ? -1 : 0;
+
+    const stuck =
+      demand !== 0 &&
+      grounded >= 2 &&
+      f.upDot > 0.55 &&
+      Math.abs(f.forwardSpeed) < T.stuckClimbSpeed &&
+      this.respawnFreeze <= 0;
+
+    if (!stuck) {
+      this.stuckTimer = 0;
+      return;
+    }
+
+    this.stuckTimer += dt;
+    if (this.stuckTimer < T.stuckClimbDelay) return;
+
+    const ramp = clamp01((this.stuckTimer - T.stuckClimbDelay) / T.stuckClimbRamp);
+    const m = this.chassisT.mass;
+    // up accel exceeds gravity so the body actually rises over the step
+    this.tmpForce.copy(WORLD_UP).multiplyScalar(m * T.stuckClimbUpAccel * ramp * dt);
+    this.tmpForce.addScaledVector(f.forward, demand * m * T.stuckClimbForwardAccel * ramp * dt);
+    // apply at the leading end (front when driving, rear when reversing) so the
+    // impulse also pitches that end up and onto the lip
+    this.tmpPoint
+      .copy(f.pos)
+      .addScaledVector(f.forward, demand * this.chassisT.colliderHalfZ * 0.85);
+    this.body.applyImpulse(this.tmpForce, this.tmpPoint);
   }
 
   /* =============================================================== yaw assist */

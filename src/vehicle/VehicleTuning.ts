@@ -646,6 +646,27 @@ export const RECOVERY = {
   respawnHeight: 0.9,
   /** control is briefly frozen after a respawn so it settles, s */
   respawnSettleTime: 0.25,
+
+  /* --- climb assist: the general anti-stuck net ---
+   * The box chassis rides ~0.32 m clear of the road, so it never catches a
+   * kerb — but it DOES catch anything taller: the step where sand meets the
+   * malecón, a plaza edge, an intersection seam, or a kinematic traffic car
+   * pinning you. Those are the "invisible walls" and the "it takes forever to
+   * get moving again after a hit". When the player is asking to move, the car
+   * is upright and on the ground, yet it is going nowhere, we push it up and
+   * over. The lift accel slightly exceeds gravity so the nose rises onto the
+   * lip; the shove drives it across; both ramp in so a normal standing start is
+   * untouched. */
+  /** forward/back speed below which the car counts as stuck, m/s */
+  stuckClimbSpeed: 1.6,
+  /** grace period of being stuck before the assist engages, s */
+  stuckClimbDelay: 0.28,
+  /** the assist ramps from nothing to full over this long, s */
+  stuckClimbRamp: 0.55,
+  /** upward acceleration applied while stuck, m/s² (gravity is ~22, so this lifts) */
+  stuckClimbUpAccel: 30,
+  /** forward (or reverse) acceleration applied while stuck, m/s² */
+  stuckClimbForwardAccel: 16,
 } as const;
 
 /* ---------------------------------------------------------------- the model */

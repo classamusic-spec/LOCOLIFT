@@ -480,6 +480,13 @@ export const BUS_RECOVERY = {
 
   respawnHeight: 1.2,
   respawnSettleTime: 0.3,
+
+  // the bus is long and heavy — a touch more shove to lever it over a step
+  stuckClimbSpeed: 1.6,
+  stuckClimbDelay: 0.3,
+  stuckClimbRamp: 0.6,
+  stuckClimbUpAccel: 30,
+  stuckClimbForwardAccel: 18,
 } as const;
 
 /* ---------------------------------------------------------- cosmetic motion */

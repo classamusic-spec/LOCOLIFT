@@ -552,6 +552,13 @@ export const CARRIAGE_RECOVERY = {
 
   respawnHeight: 0.7,
   respawnSettleTime: 0.25,
+
+  // light and short — a gentler nudge is plenty to clear a step
+  stuckClimbSpeed: 1.5,
+  stuckClimbDelay: 0.28,
+  stuckClimbRamp: 0.5,
+  stuckClimbUpAccel: 28,
+  stuckClimbForwardAccel: 14,
 } as const;
 
 /* ---------------------------------------------------------- cosmetic motion */
