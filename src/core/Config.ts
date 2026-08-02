@@ -33,11 +33,14 @@ export const CONFIG = {
 
 export const QUALITY_PRESETS: Record<QualityTier, Partial<SettingsState>> = {
   low: {
-    // 0.7 → 0.8: the phone backing store is upscaled, so every 0.1 here is
-    // visible sharpness. 0.8 costs ~30% more scene fragments than 0.7 but the
-    // backing store is tiny on a phone (a landscape 844px CSS frame is ~675px
-    // of buffer at this scale), and the lite post chain below cleans the rest.
-    renderScale: 0.8,
+    // 0.7 → 0.85: the phone backing store is upscaled, so every 0.05 here is
+    // visible sharpness, and renderScale drives *fill* only — it moves no draw
+    // calls and no triangles, so the geometry budget (<900 calls, <1.6M tris)
+    // is untouched. 0.85 measured ~180 draw calls / ~250–370k tris on the low
+    // tier with the whole post chain adding only ~4 calls, well inside budget;
+    // the FXAA + CAS passes below then clean and re-sharpen the upscale. The
+    // adaptive governor still drops this on a phone that can't hold frame-rate.
+    renderScale: 0.85,
     shadows: false,
     // Phones now run a *lite* post chain — FXAA + the Caribbean grade + speed
     // VFX + a CAS sharpen — but never the heavy passes (bloom, AO, god-rays,

@@ -329,7 +329,6 @@
 .ll-dest,
 .ll-card,
 .ll-boost,
-.ll-speedo,
 .ll-minimap {
   border-radius: var(--ll-r-md);
   background: var(--ll-hud-bg);
@@ -919,60 +918,95 @@
   }
 }
 
+/* The speed gauge — a real round analog dial. It carries its own bezel and
+   dark face, so unlike the other HUD widgets it needs no chrome pill behind it;
+   the digital read is inset under the hub in the open bottom of the sweep. */
 .ll-speedo {
-  --needle: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: var(--ll-sp-2) var(--ll-sp-4) var(--ll-sp-2);
-  min-width: calc(150px * var(--ll-ui-scale));
+  display: block;
+  filter: drop-shadow(0 8px 16px rgba(2, 6, 11, 0.55));
 }
 
 .ll-speedo__gauge {
-  width: calc(130px * var(--ll-ui-scale));
-  margin-bottom: calc(-14px * var(--ll-ui-scale));
+  position: relative;
+  width: calc(132px * var(--ll-ui-scale));
+  aspect-ratio: 1 / 1;
+  /* so the inset digital read can size itself as a share of the dial and stay
+     in proportion at every breakpoint, without a font override per size */
+  container-type: inline-size;
 }
 
-.ll-speedo__gauge svg {
+.ll-dial {
   display: block;
   width: 100%;
   height: auto;
 }
 
-.ll-speedo__arc {
-  stroke-dashoffset: 132px;
-  transition: stroke 120ms linear;
+/* Rotate the needle about the true dial centre. `transform-box: view-box`
+   resolves `transform-origin: center` against the 200×200 viewBox, i.e. (100,
+   100) in user space — reliable across Chromium and iOS Safari. */
+.ll-dial__needle {
+  transform-box: view-box;
+  transform-origin: center;
+  will-change: transform;
 }
 
-.ll-speedo__row {
+/* The value arc's colour follows the zone the needle is in. Only toggled at a
+   boundary crossing, never per frame, so the transition is free. */
+.ll-dial__fill {
+  transition: stroke 200ms linear;
+}
+
+.ll-dial__fill.is-mid {
+  stroke: #ffb020;
+}
+
+.ll-dial__fill.is-hi {
+  stroke: var(--ll-danger);
+}
+
+/* Digital read, inset under the hub in the open bottom of the 270° sweep. */
+.ll-speedo__readout {
+  position: absolute;
+  left: 50%;
+  top: 63%;
+  transform: translate(-50%, -50%);
   display: flex;
-  align-items: baseline;
-  gap: 0.25em;
+  flex-direction: column;
+  align-items: center;
+  line-height: 0.92;
+  pointer-events: none;
 }
 
 .ll-speedo__value {
-  font-size: var(--ll-fs-3xl);
+  font-size: calc(23cqw * var(--ll-text-scale));
   font-weight: 900;
-  line-height: 1;
   font-variant-numeric: tabular-nums;
-  letter-spacing: -0.03em;
-  text-shadow: 0 2px 0 var(--ll-ink);
-  -webkit-text-stroke: var(--ll-stroke) var(--ll-ink);
+  letter-spacing: -0.04em;
+  color: var(--ll-text);
+  text-shadow:
+    0 2px 0 var(--ll-ink),
+    0 0 14px rgba(4, 9, 14, 0.85);
 }
 
 .ll-speedo__unit {
-  font-size: var(--ll-fs-xs);
+  margin-top: 0.15em;
+  font-size: 7cqw;
   font-weight: 800;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.16em;
   color: var(--ll-text-muted);
 }
 
-.ll-hud.is-drifting .ll-speedo__value {
+/* Drive-state accents echo the rest of the HUD. */
+.ll-speedo.is-drifting .ll-speedo__value {
   color: var(--ll-combo);
 }
 
-.ll-hud.is-airborne .ll-speedo__value {
+.ll-speedo.is-airborne .ll-speedo__value {
   color: var(--ll-pickup);
+}
+
+.ll-speedo.is-boosting .ll-speedo__value {
+  color: color-mix(in srgb, var(--ll-pickup) 72%, #fff);
 }
 
 /* subtitle ------------------------------------------------------------------ */
@@ -3286,21 +3320,21 @@
   display: none;
 }
 
+/* The right edge of a landscape phone is fully spoken for — the minimap owns
+   the top, the action buttons own the rest — so a bottom-right dial raised
+   above the pad collides with the minimap. Tuck it into the clear bottom gap
+   between the thumb clusters instead, pinned to the bottom edge just inboard of
+   the button cluster. The offsets are the real footprints TouchControls
+   publishes, so it stays correct when the player rescales or drags a cluster. */
 .ll-root[data-touch='1'] .ll-hud__br {
-  bottom: calc(var(--pad-b) + var(--ll-touch-pad-h, 0px) + var(--ll-sp-2));
+  bottom: var(--pad-b);
+  right: calc(var(--pad-r) + var(--ll-touch-pad-w, 0px) + var(--ll-sp-3));
 }
 
-.ll-root[data-touch='1'] .ll-speedo {
-  min-width: 0;
-  padding: var(--ll-sp-1) var(--ll-sp-3);
-}
-
+/* On a phone the analog dial stays — that is the whole point of it — but it
+   shrinks so it never crowds the thumbs. */
 .ll-root[data-touch='1'] .ll-speedo__gauge {
-  display: none;
-}
-
-.ll-root[data-touch='1'] .ll-speedo__value {
-  font-size: var(--ll-fs-2xl);
+  width: calc(120px * var(--ll-ui-scale));
 }
 
 .ll-root[data-touch='1'] .ll-nav__arrow {
@@ -3377,7 +3411,6 @@
   .ll-dest,
   .ll-card,
   .ll-boost,
-  .ll-speedo,
   .ll-minimap,
   .ll-chip {
     -webkit-backdrop-filter: blur(6px);
@@ -3443,12 +3476,7 @@
   }
 
   .ll-speedo__gauge {
-    width: calc(96px * var(--ll-ui-scale));
-    margin-bottom: calc(-10px * var(--ll-ui-scale));
-  }
-
-  .ll-speedo__value {
-    font-size: var(--ll-fs-2xl);
+    width: calc(100px * var(--ll-ui-scale));
   }
 
   .ll-timer__digits {
@@ -3686,7 +3714,10 @@
    come from the footprints TouchControls publishes, so it stays correct when
    the player rescales or drags the clusters. */
 .ll-root[data-touch='1'] .ll-hud__bl {
-  bottom: var(--pad-b);
+  /* Lifted clear of the speed dial, which now sits at the bottom of this same
+     gap between the thumbs — the gap is too narrow to hold both side by side,
+     so the passenger card stacks above the dial. */
+  bottom: calc(var(--pad-b) + 122px * var(--ll-ui-scale) + var(--ll-sp-2));
   left: calc(var(--pad-l) + var(--ll-touch-steer-w, 0px) + var(--ll-sp-2));
   right: calc(var(--pad-r) + var(--ll-touch-pad-w, 0px) + var(--ll-sp-2));
   width: auto;
@@ -3744,7 +3775,8 @@
    layouts: it is discrete taps, not a held control, and moving it would make
    the one button a panicking player reaches for a moving target. */
 .ll-root[data-touch='1'][data-touch-hand='left'] .ll-hud__br {
-  bottom: calc(var(--pad-b) + var(--ll-touch-steer-h, 0px) + var(--ll-sp-2));
+  bottom: var(--pad-b);
+  right: calc(var(--pad-r) + var(--ll-touch-steer-w, 0px) + var(--ll-sp-3));
 }
 
 /* --- 5. phone HUD hierarchy ----------------------------------------------- --
@@ -3771,13 +3803,17 @@
   }
 
   /* Decoration, at 430 px tall: the bilingual sub-labels, the passenger's
-     one-liner, the boost meter (the TURBO button is the boost meter), and the
-     speedometer's arc. */
+     one-liner, and the boost meter (the TURBO button is the boost meter). The
+     speed dial stays — it is the readout the player actually glances at. */
   .ll-root[data-touch='1'] .ll-hud .ll-lbl-en,
   .ll-root[data-touch='1'] .ll-card__blurb,
-  .ll-root[data-touch='1'] .ll-speedo__gauge,
   .ll-root[data-touch='1'] .ll-boost {
     display: none;
+  }
+
+  /* Cramped landscape phone: keep the dial, just make it compact. */
+  .ll-root[data-touch='1'] .ll-speedo__gauge {
+    width: calc(106px * var(--ll-ui-scale));
   }
 
   .ll-root[data-touch='1'] .ll-combo__stack {

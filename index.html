@@ -76,7 +76,10 @@
         touch-action: none;
       }
 
-      /* Visible until the UI system mounts; boot takes seconds on a phone. */
+      /* Visible until the UI system mounts; boot takes seconds on a phone.
+         A San Viejo-tinted splash carrying the LOCO LIFT wordmark, authored as
+         self-contained inline SVG so it renders before a single module has
+         parsed. The mark mirrors `buildLogotype()` in src/ui/TitleScreen.ts. */
       #boot {
         position: fixed;
         inset: 0;
@@ -85,33 +88,103 @@
         padding: max(16px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px))
           max(16px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
         text-align: center;
-        font-size: 13px;
-        font-weight: 800;
-        letter-spacing: 0.24em;
-        text-transform: uppercase;
         color: #ffc21a;
-        background: #0b1d2a;
+        /* dusk over the old city: teal sky pulled down to a deep harbour blue */
+        background: radial-gradient(132% 104% at 50% 6%, #274a5b 0%, #163244 44%, #0a1b27 100%);
+        overflow: hidden;
         z-index: 1;
-        animation: boot-pulse 1.6s ease-in-out infinite;
+      }
+
+      /* a warm sunset glow rising off the low centre */
+      #boot::before {
+        content: '';
+        position: absolute;
+        left: 50%;
+        bottom: -24%;
+        width: 150%;
+        height: 82%;
+        transform: translateX(-50%);
+        background: radial-gradient(
+          closest-side,
+          rgba(255, 150, 74, 0.34),
+          rgba(255, 122, 60, 0.1) 56%,
+          transparent 76%
+        );
+        pointer-events: none;
       }
 
       #boot[hidden] {
         display: none;
       }
 
-      @keyframes boot-pulse {
-        0%,
-        100% {
-          opacity: 0.55;
+      #boot__inner {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 28px;
+        width: min(86vw, 540px);
+      }
+
+      #boot__logo {
+        display: block;
+        width: 100%;
+        height: auto;
+        filter: drop-shadow(0 18px 30px rgba(2, 6, 11, 0.5));
+      }
+
+      #boot__load {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 11px;
+        width: min(66%, 300px);
+      }
+
+      #boot__bar {
+        position: relative;
+        width: 100%;
+        height: 6px;
+        border-radius: 999px;
+        background: rgba(255, 246, 232, 0.14);
+        overflow: hidden;
+      }
+
+      #boot__bar::after {
+        content: '';
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: 42%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, transparent, #ffe6a8, #ff9d3c, transparent);
+        animation: boot-slide 1.25s ease-in-out infinite;
+      }
+
+      #boot__label {
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.26em;
+        text-transform: uppercase;
+        color: #ffe6bf;
+        opacity: 0.86;
+      }
+
+      @keyframes boot-slide {
+        0% {
+          transform: translateX(-120%);
         }
-        50% {
-          opacity: 1;
+        100% {
+          transform: translateX(320%);
         }
       }
 
       @media (prefers-reduced-motion: reduce) {
-        #boot {
+        #boot__bar::after {
           animation: none;
+          width: 100%;
+          opacity: 0.5;
         }
       }
     </style>
@@ -119,7 +192,73 @@
   <body>
     <div id="app">
       <canvas id="gl"></canvas>
-      <div id="boot" role="status">Cargando Viejo San Juan…</div>
+      <div id="boot" role="status" aria-label="Cargando Loco Lift">
+        <div id="boot__inner">
+          <svg
+            id="boot__logo"
+            viewBox="0 0 660 360"
+            role="img"
+            aria-label="Loco Lift"
+            xmlns="http://www.w3.org/2000/svg"
+            font-family="system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+          >
+            <defs>
+              <linearGradient id="bLift" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stop-color="#FF7A1E" />
+                <stop offset="0.5" stop-color="#FFA51E" />
+                <stop offset="1" stop-color="#FFD24A" />
+              </linearGradient>
+              <linearGradient id="bPalm" x1="0" y1="1" x2="0" y2="0">
+                <stop offset="0" stop-color="#3C9A3E" />
+                <stop offset="1" stop-color="#78CE54" />
+              </linearGradient>
+              <radialGradient id="bHalo" cx="50%" cy="48%" r="58%">
+                <stop offset="0" stop-color="rgba(255,244,214,0.5)" />
+                <stop offset="0.6" stop-color="rgba(255,244,214,0.12)" />
+                <stop offset="1" stop-color="rgba(255,244,214,0)" />
+              </radialGradient>
+            </defs>
+            <ellipse cx="330" cy="176" rx="322" ry="158" fill="url(#bHalo)" />
+            <g transform="rotate(-5 330 180)">
+              <g transform="skewX(-9)">
+                <!-- retro speed stripes behind LIFT -->
+                <rect x="430" y="250" width="15" height="98" rx="4" fill="#FF7A3C" stroke="#0F3D3A" stroke-width="4" />
+                <rect x="456" y="250" width="15" height="98" rx="4" fill="#2FA8A0" stroke="#0F3D3A" stroke-width="4" />
+                <rect x="482" y="250" width="15" height="98" rx="4" fill="#FF7A3C" stroke="#0F3D3A" stroke-width="4" />
+                <rect x="508" y="250" width="15" height="98" rx="4" fill="#2FA8A0" stroke="#0F3D3A" stroke-width="4" />
+                <!-- LIFT -->
+                <g>
+                  <text x="150" y="300" font-size="150" font-weight="900" textLength="322" lengthAdjust="spacingAndGlyphs" letter-spacing="-4" fill="#0A2C29" opacity="0.5" transform="translate(3.3,5.1)">LIFT</text>
+                  <text x="150" y="300" font-size="150" font-weight="900" textLength="322" lengthAdjust="spacingAndGlyphs" letter-spacing="-4" fill="#0F3D3A" stroke="#0F3D3A" stroke-width="23" stroke-linejoin="round" paint-order="stroke">LIFT</text>
+                  <text x="150" y="300" font-size="150" font-weight="900" textLength="322" lengthAdjust="spacingAndGlyphs" letter-spacing="-4" fill="#FBF0D6" stroke="#FBF0D6" stroke-width="11" stroke-linejoin="round" paint-order="stroke">LIFT</text>
+                  <text x="150" y="300" font-size="150" font-weight="900" textLength="322" lengthAdjust="spacingAndGlyphs" letter-spacing="-4" fill="url(#bLift)">LIFT</text>
+                </g>
+                <!-- palm fronds sprouting from the L of LOCO -->
+                <g fill="url(#bPalm)" stroke="#215F27" stroke-width="2" stroke-linejoin="round">
+                  <path d="M96 66 Q75.97 49.28 45.93 45.77 Q69.97 64.12 96 66 Z" />
+                  <path d="M96 66 Q81.88 35.38 49.16 13.98 Q67.02 48.76 96 66 Z" />
+                  <path d="M96 66 Q98.26 27.51 76.65 -11.62 Q75.94 33.07 96 66 Z" />
+                  <path d="M96 66 Q113.16 35.78 110.97 -4.42 Q92.62 31.42 96 66 Z" />
+                  <path d="M96 66 Q119.52 50.52 131.71 20.30 Q105.34 39.44 96 66 Z" />
+                  <path d="M96 66 Q117.16 62.68 134.85 45.34 Q110.58 50.32 96 66 Z" />
+                  <circle cx="96" cy="66" r="6" fill="#3C9A3E" />
+                </g>
+                <!-- LOCO -->
+                <g>
+                  <text x="92" y="168" font-size="156" font-weight="900" textLength="410" lengthAdjust="spacingAndGlyphs" letter-spacing="-4" fill="#0A2C29" opacity="0.5" transform="translate(3.3,5.1)">LOCO</text>
+                  <text x="92" y="168" font-size="156" font-weight="900" textLength="410" lengthAdjust="spacingAndGlyphs" letter-spacing="-4" fill="#0F3D3A" stroke="#0F3D3A" stroke-width="23" stroke-linejoin="round" paint-order="stroke">LOCO</text>
+                  <text x="92" y="168" font-size="156" font-weight="900" textLength="410" lengthAdjust="spacingAndGlyphs" letter-spacing="-4" fill="#FBF0D6" stroke="#FBF0D6" stroke-width="11" stroke-linejoin="round" paint-order="stroke">LOCO</text>
+                  <text x="92" y="168" font-size="156" font-weight="900" textLength="410" lengthAdjust="spacingAndGlyphs" letter-spacing="-4" fill="#FBF0D6">LOCO</text>
+                </g>
+              </g>
+            </g>
+          </svg>
+          <div id="boot__load">
+            <div id="boot__bar"></div>
+            <div id="boot__label">Cargando · Loading</div>
+          </div>
+        </div>
+      </div>
       <div id="ui-root"></div>
     </div>
     <script>

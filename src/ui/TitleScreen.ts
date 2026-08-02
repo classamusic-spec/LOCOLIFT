@@ -500,46 +500,69 @@ function hintChip(keys: string[], label: string): HTMLElement {
 
 /* ----------------------------------------------------------------- artwork */
 
+/* Wordmark palette — a badge-sticker treatment, drawn entirely from type. */
+const LOGO = {
+  cream: '#FBF0D6',
+  teal: '#0F3D3A', // dark teal keyline
+  tealShadow: '#0A2C29',
+  chevronTeal: '#2FA8A0',
+  chevronOrange: '#FF7A3C',
+  palmTop: '#78CE54',
+  palmBot: '#3C9A3E',
+  palmEdge: '#215F27',
+} as const;
+
 /**
- * The LOCO LIFT wordmark. Two stacked words, each drawn four times: soft drop,
- * ink extrude, ink outline (via `paint-order: stroke`), gradient face.
- * `textLength` pins the width so the mark never reflows with the system font.
+ * The LOCO LIFT wordmark, authored entirely from type and vector shapes — no
+ * image, no web font. A bold heavy italic display face, tilted up to the right,
+ * given a badge-sticker treatment: each word is a cream (LOCO) or orange→gold
+ * (LIFT) face wrapped in a cream keyline and a thick dark-teal outline, over a
+ * soft cream halo. Palm fronds sprout from the L of LOCO; retro teal/orange
+ * speed stripes are tucked behind LIFT. `textLength` pins each word's width so
+ * the mark never reflows with whichever system font the browser resolves.
+ *
+ * The same shapes are hand-mirrored as inline SVG in `index.html`'s boot splash
+ * (which must render before any module loads); keep the two visually in step.
  */
 export function buildLogotype(): SVGSVGElement {
   const s = svg('svg', {
-    viewBox: '0 0 560 268',
+    viewBox: '0 0 660 360',
     class: 'll-logo__svg',
     role: 'img',
     'aria-label': 'Loco Lift',
   });
 
   const defs = svg('defs');
-  const gradA = svg('linearGradient', { id: 'llGradA', x1: '0', y1: '0', x2: '0', y2: '1' });
-  gradA.append(
-    svg('stop', { offset: '0', 'stop-color': '#FFE9A8' }),
-    svg('stop', { offset: '0.52', 'stop-color': '#FFC21A' }),
-    svg('stop', { offset: '1', 'stop-color': '#FF8A1E' }),
+  // LIFT sunset: orange at the top, gold at the bottom.
+  const lift = svg('linearGradient', { id: 'llLift', x1: '0', y1: '0', x2: '0', y2: '1' });
+  lift.append(
+    svg('stop', { offset: '0', 'stop-color': '#FF7A1E' }),
+    svg('stop', { offset: '0.5', 'stop-color': '#FFA51E' }),
+    svg('stop', { offset: '1', 'stop-color': '#FFD24A' }),
   );
-  const gradB = svg('linearGradient', { id: 'llGradB', x1: '0', y1: '0', x2: '0', y2: '1' });
-  gradB.append(
-    svg('stop', { offset: '0', 'stop-color': '#FFFFFF' }),
-    svg('stop', { offset: '0.55', 'stop-color': '#8CF0FF' }),
-    svg('stop', { offset: '1', 'stop-color': '#00E5FF' }),
+  // Palm frond body.
+  const palm = svg('linearGradient', { id: 'llPalm', x1: '0', y1: '1', x2: '0', y2: '0' });
+  palm.append(
+    svg('stop', { offset: '0', 'stop-color': LOGO.palmBot }),
+    svg('stop', { offset: '1', 'stop-color': LOGO.palmTop }),
   );
-  defs.append(gradA, gradB);
+  // Cream halo.
+  const halo = svg('radialGradient', { id: 'llHalo', cx: '50%', cy: '48%', r: '58%' });
+  halo.append(
+    svg('stop', { offset: '0', 'stop-color': 'rgba(255,244,214,0.55)' }),
+    svg('stop', { offset: '0.6', 'stop-color': 'rgba(255,244,214,0.14)' }),
+    svg('stop', { offset: '1', 'stop-color': 'rgba(255,244,214,0)' }),
+  );
+  defs.append(lift, palm, halo);
   s.append(defs);
 
-  const word = (
-    text: string,
-    y: number,
-    x: number,
-    length: number,
-    size: number,
-    fill: string,
-    extrude: string,
-  ): SVGGElement => {
-    const g = svg('g', { class: 'll-logo__word' });
-    const attrs = {
+  // Soft cream halo behind the whole badge.
+  s.append(svg('ellipse', { cx: '330', cy: '176', rx: '322', ry: '158', fill: 'url(#llHalo)' }));
+
+  /** One word as a layered sticker: teal outline · cream keyline · face. */
+  const word = (text: string, x: number, y: number, length: number, size: number, face: string): SVGGElement => {
+    const g = svg('g');
+    const base: Record<string, string> = {
       x: String(x),
       y: String(y),
       'font-size': String(size),
@@ -547,56 +570,102 @@ export function buildLogotype(): SVGSVGElement {
       'font-family': 'var(--ll-display)',
       textLength: String(length),
       lengthAdjust: 'spacingAndGlyphs',
-      'letter-spacing': '-2',
+      'letter-spacing': '-4',
     };
-    for (let i = 7; i >= 1; i--) {
-      const shadow = svg('text', { ...attrs, transform: `translate(${i * 1.1}, ${i * 1.7})` });
-      shadow.setAttribute('fill', extrude);
-      shadow.textContent = text;
-      g.append(shadow);
+    // Subtle drop shadow — a few decaying dark-teal offsets.
+    for (let i = 5; i >= 1; i--) {
+      const sh = svg('text', { ...base, transform: `translate(${(i * 1.1).toFixed(1)}, ${(i * 1.7).toFixed(1)})` });
+      sh.setAttribute('fill', LOGO.tealShadow);
+      sh.setAttribute('opacity', '0.5');
+      sh.textContent = text;
+      g.append(sh);
     }
-    const outline = svg('text', attrs);
-    outline.setAttribute('fill', 'var(--ll-ink)');
-    outline.setAttribute('stroke', 'var(--ll-ink)');
-    outline.setAttribute('stroke-width', '16');
-    outline.setAttribute('stroke-linejoin', 'round');
-    outline.setAttribute('paint-order', 'stroke');
-    outline.textContent = text;
-    const face = svg('text', attrs);
-    face.setAttribute('fill', fill);
-    face.textContent = text;
-    g.append(outline, face);
+    const teal = svg('text', { ...base, fill: LOGO.teal, stroke: LOGO.teal, 'stroke-width': '23', 'stroke-linejoin': 'round', 'paint-order': 'stroke' });
+    teal.textContent = text;
+    const cream = svg('text', { ...base, fill: LOGO.cream, stroke: LOGO.cream, 'stroke-width': '11', 'stroke-linejoin': 'round', 'paint-order': 'stroke' });
+    cream.textContent = text;
+    const faceEl = svg('text', { ...base, fill: face });
+    faceEl.textContent = text;
+    g.append(teal, cream, faceEl);
     return g;
   };
 
-  const skew = svg('g', { transform: 'skewX(-7)' });
-  skew.append(
-    word('LOCO', 122, 40, 306, 136, 'url(#llGradA)', '#A10F5E'),
-    word('LIFT', 228, 40, 252, 122, 'url(#llGradB)', '#06394A'),
-  );
+  /** A single palm blade — a tapered leaf with a darker vein. */
+  const blade = (bx: number, by: number, deg: number, len: number, hw: number): SVGGElement => {
+    const a = (deg * Math.PI) / 180;
+    const dx = Math.cos(a);
+    const dy = Math.sin(a);
+    const tx = bx + dx * len;
+    const ty = by + dy * len;
+    const mx = bx + dx * len * 0.46;
+    const my = by + dy * len * 0.46;
+    const px = -dy * hw;
+    const py = dx * hw;
+    const g = svg('g');
+    g.append(
+      svg('path', {
+        d: `M${bx.toFixed(1)} ${by.toFixed(1)} Q${(mx + px).toFixed(1)} ${(my + py).toFixed(1)} ${tx.toFixed(1)} ${ty.toFixed(1)} Q${(mx - px).toFixed(1)} ${(my - py).toFixed(1)} ${bx.toFixed(1)} ${by.toFixed(1)} Z`,
+        fill: 'url(#llPalm)',
+        stroke: LOGO.palmEdge,
+        'stroke-width': '2',
+        'stroke-linejoin': 'round',
+      }),
+      svg('path', {
+        d: `M${bx.toFixed(1)} ${by.toFixed(1)} L${tx.toFixed(1)} ${ty.toFixed(1)}`,
+        stroke: LOGO.palmEdge,
+        'stroke-width': '1.4',
+        'stroke-linecap': 'round',
+        opacity: '0.7',
+      }),
+    );
+    return g;
+  };
 
-  // Taxi checker — a livery stripe ruling the whole mark, not a floating dash.
-  const band = svg('g', { class: 'll-logo__checker' });
-  band.append(
-    svg('rect', { x: '38', y: '240', width: '486', height: '24', fill: 'var(--ll-ink)', rx: '3' }),
-  );
-  const sq = 12;
-  for (let row = 0; row < 2; row++) {
-    for (let i = 0; i < 40; i++) {
-      if ((i + row) % 2 !== 0) continue;
-      band.append(
-        svg('rect', {
-          x: String(40 + i * sq),
-          y: String(242 + row * (sq - 1)),
-          width: String(sq),
-          height: String(sq - 1),
-          fill: '#FFF6E8',
-        }),
-      );
-    }
+  // Palm cluster sprouting from the top-left of the L in LOCO.
+  const fronds = svg('g');
+  const bx = 96;
+  const by = 66;
+  for (const [deg, len, hw] of [
+    [-158, 54, 8],
+    [-132, 70, 10],
+    [-104, 80, 11.5],
+    [-78, 72, 10.5],
+    [-52, 58, 9],
+    [-28, 44, 7],
+  ] as Array<[number, number, number]>) {
+    fronds.append(blade(bx, by, deg, len, hw));
   }
-  skew.append(band);
-  s.append(skew);
+  fronds.append(svg('circle', { cx: String(bx), cy: String(by), r: '6', fill: LOGO.palmBot, stroke: LOGO.palmEdge, 'stroke-width': '2' }));
+
+  // Retro speed stripes tucked behind the lower-right of LIFT.
+  const stripes = svg('g');
+  const stripeColors = [LOGO.chevronOrange, LOGO.chevronTeal, LOGO.chevronOrange, LOGO.chevronTeal];
+  for (let i = 0; i < stripeColors.length; i++) {
+    stripes.append(
+      svg('rect', {
+        x: String(430 + i * 26),
+        y: '250',
+        width: '15',
+        height: '98',
+        rx: '4',
+        fill: stripeColors[i],
+        stroke: LOGO.teal,
+        'stroke-width': '4',
+      }),
+    );
+  }
+
+  // The type leans up to the right (rotate) and slants italic (skewX).
+  const lean = svg('g', { transform: 'rotate(-5 330 180)' });
+  const slant = svg('g', { transform: 'skewX(-9)' });
+  slant.append(
+    stripes,
+    word('LIFT', 150, 300, 322, 150, 'url(#llLift)'),
+    fronds,
+    word('LOCO', 92, 168, 410, 156, LOGO.cream),
+  );
+  lean.append(slant);
+  s.append(lean);
   return s;
 }
 

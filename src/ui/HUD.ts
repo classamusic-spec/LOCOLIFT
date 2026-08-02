@@ -20,8 +20,9 @@
  *  - score popups come from a fixed pool, so a busy combo allocates nothing.
  */
 import * as THREE from 'three';
-import { clamp01, lerp, MPS_TO_KMH, MPS_TO_MPH } from '../core/MathUtils';
+import { clamp01, lerp } from '../core/MathUtils';
 import type { PassengerMood, SettingsState } from '../core/types';
+import { Speedo } from './Speedo';
 import {
   el,
   FlagSlot,
@@ -117,9 +118,6 @@ const SKIN_RAMP = [
 
 const HAIR_COLORS = ['#1C1512', '#2E211A', '#4A3124', '#6B4A2E', '#8A6B45', '#C9C3BC'];
 
-/** Length of the speedometer arc path, px in its own viewBox (π × r 42). */
-const SPEED_ARC_LENGTH = 131.95;
-
 const POPUP_POOL = 26;
 const CALLOUT_POOL = 6;
 const CALLOUT_LIFE = 1.5;
@@ -207,12 +205,10 @@ export class HUD {
   private readonly boostFull: FlagSlot;
   private readonly boostActive: FlagSlot;
 
-  /* speed */
-  private readonly speedValue: TextSlot;
-  private readonly speedUnit: TextSlot;
-  private readonly speedArc: SVGPathElement;
-  private lastNeedle = Number.NaN;
-  private units: SettingsState['showSpeedUnits'] = 'mph';
+  /* speed — a real analog dial, driven every frame from `pendingSpeed` */
+  private readonly speedo: Speedo;
+  private drifting = false;
+  private airborne = false;
 
   /* passenger */
   private readonly cardNode: HTMLElement;
@@ -441,21 +437,7 @@ export class HUD {
     /* ------------------------------------------------------ bottom-right */
     const br = el('div', 'll-hud__br');
 
-    const speedo = el('div', 'll-speedo');
-    speedo.setAttribute('role', 'status');
-    speedo.setAttribute('aria-label', 'Speed');
-    const gauge = el('div', 'll-speedo__gauge');
-    const arcSvg = buildSpeedArc();
-    gauge.append(arcSvg);
-    const arc = arcSvg.querySelector('.ll-speedo__arc') as SVGPathElement;
-    const speedRow = el('div', 'll-speedo__row');
-    const speedV = el('span', 'll-speedo__value', '0');
-    const speedU = el('span', 'll-speedo__unit', 'MPH');
-    speedRow.append(speedV, speedU);
-    speedo.append(gauge, speedRow);
-    this.speedValue = new TextSlot(speedV);
-    this.speedUnit = new TextSlot(speedU);
-    this.speedArc = arc;
+    this.speedo = new Speedo(this.theme);
 
     const boost = el('div', 'll-boost');
     const boostLabel = el('div', 'll-boost__label');
@@ -470,7 +452,7 @@ export class HUD {
     this.boostFull = new FlagSlot(boost, 'is-full');
     this.boostActive = new FlagSlot(boost, 'is-active');
 
-    br.append(boost, speedo);
+    br.append(boost, this.speedo.el);
 
     /* ---------------------------------------------------------- subtitle */
     const sub = el('div', 'll-sub');
@@ -544,10 +526,9 @@ export class HUD {
   }
 
   applySettings(s: SettingsState): void {
-    this.units = s.showSpeedUnits;
     this.subtitlesOn = s.subtitles;
     if (!this.subtitlesOn) this.clearSay();
-    this.speedUnit.set(this.units === 'kmh' ? 'KM/H' : 'MPH');
+    this.speedo.applySettings(s);
   }
 
   /* ------------------------------------------------------------- setters */
@@ -809,6 +790,8 @@ export class HUD {
 
   /** Drift / air state, used for subtle HUD reactions only. */
   setDriveState(drifting: boolean, airborne: boolean): void {
+    this.drifting = drifting;
+    this.airborne = airborne;
     this.driftFlag.set(drifting);
     this.airFlag.set(airborne);
   }
@@ -926,13 +909,17 @@ export class HUD {
     this.boostFull.set(this.pendingBoost >= 0.999);
     this.boostActive.set(this.pendingBoostActive);
 
-    const shown = this.pendingSpeed * (this.units === 'kmh' ? MPS_TO_KMH : MPS_TO_MPH);
-    this.speedValue.set(String(Math.round(shown)));
-    const needle = clamp01(this.pendingSpeed / 60);
-    if (!(Math.abs(needle - this.lastNeedle) < 0.004)) {
-      this.lastNeedle = needle;
-      this.speedArc.style.strokeDashoffset = `${(SPEED_ARC_LENGTH * (1 - needle)).toFixed(2)}px`;
-    }
+    // The dial's needle rides a spring, so it animates on wall-clock time and
+    // keeps sweeping smoothly even while the sim is paused mid-transition.
+    this.speedo.update(
+      {
+        speed: this.pendingSpeed,
+        boosting: this.pendingBoostActive,
+        drifting: this.drifting,
+        airborne: this.airborne,
+      },
+      raw,
+    );
 
     /* patience ---------------------------------------------------------- */
     this.patienceBar.set(this.patience);
@@ -1099,6 +1086,7 @@ export class HUD {
   }
 
   dispose(): void {
+    this.speedo.dispose();
     this.unmount();
     this.onCountdownDone = null;
   }
@@ -1190,42 +1178,6 @@ function buildPinIcon(): SVGSVGElement {
       fill: 'var(--ll-ink)',
     }),
   );
-  return s;
-}
-
-/** Speedometer arc: a static track plus a needle rotated by `--needle`. */
-function buildSpeedArc(): SVGSVGElement {
-  const s = svg('svg', { viewBox: '0 0 100 58', 'aria-hidden': 'true' });
-  s.append(
-    svg('path', {
-      d: 'M8 52 A42 42 0 0 1 92 52',
-      fill: 'none',
-      stroke: 'rgba(255,246,232,0.16)',
-      'stroke-width': '7',
-      'stroke-linecap': 'round',
-    }),
-    svg('path', {
-      d: 'M8 52 A42 42 0 0 1 92 52',
-      fill: 'none',
-      stroke: 'var(--ll-pickup)',
-      'stroke-width': '7',
-      'stroke-linecap': 'round',
-      class: 'll-speedo__arc',
-      'stroke-dasharray': '132',
-    }),
-  );
-  const ticks = svg('g', { stroke: 'rgba(255,246,232,0.34)', 'stroke-width': '2' });
-  for (let i = 0; i <= 8; i++) {
-    const a = Math.PI + (i / 8) * Math.PI;
-    const x1 = 50 + Math.cos(a) * 34;
-    const y1 = 52 + Math.sin(a) * 34;
-    const x2 = 50 + Math.cos(a) * 29;
-    const y2 = 52 + Math.sin(a) * 29;
-    ticks.append(
-      svg('path', { d: `M${x1.toFixed(1)} ${y1.toFixed(1)} L${x2.toFixed(1)} ${y2.toFixed(1)}` }),
-    );
-  }
-  s.append(ticks);
   return s;
 }
 
